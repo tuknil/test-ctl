@@ -1,0 +1,448 @@
+{
+  "$defs": {
+    "CandidateArtifact": {
+      "properties": {
+        "artifact_type": {
+          "description": "akamai-waf-rule | firewall-rule | proxy-policy | edr-rule | other",
+          "title": "Artifact Type",
+          "type": "string"
+        },
+        "content_ref": {
+          "title": "Content Ref",
+          "type": "string"
+        },
+        "content_hash": {
+          "title": "Content Hash",
+          "type": "string"
+        },
+        "emitted_as": {
+          "default": "control-specific-mitigation-candidate",
+          "title": "Emitted As",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_type",
+        "content_ref",
+        "content_hash"
+      ],
+      "title": "CandidateArtifact",
+      "type": "object"
+    },
+    "CollateralImpactPrior": {
+      "properties": {
+        "verdict": {
+          "description": "low | medium | high | unknown | abstained",
+          "title": "Verdict",
+          "type": "string"
+        },
+        "confidence": {
+          "description": "high | medium | low | unknown",
+          "title": "Confidence",
+          "type": "string"
+        },
+        "basis": {
+          "title": "Basis",
+          "type": "string"
+        },
+        "measured": {
+          "default": false,
+          "title": "Measured",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "verdict",
+        "confidence",
+        "basis"
+      ],
+      "title": "CollateralImpactPrior",
+      "type": "object"
+    },
+    "ControlTranslationResult": {
+      "description": "Output contract. Field shape mirrors CFS \u00a72 `ControlTranslationResult`.",
+      "properties": {
+        "contract_id": {
+          "default": "control-translation@1.0",
+          "title": "Contract Id",
+          "type": "string"
+        },
+        "result_id": {
+          "title": "Result Id",
+          "type": "string"
+        },
+        "produced_at": {
+          "format": "date-time",
+          "title": "Produced At",
+          "type": "string"
+        },
+        "subject": {
+          "$ref": "#/$defs/Subject"
+        },
+        "input_bindings": {
+          "$ref": "#/$defs/InputBindings"
+        },
+        "terminal_state": {
+          "$ref": "#/$defs/TerminalState"
+        },
+        "outcome_reason": {
+          "$ref": "#/$defs/OutcomeReason"
+        },
+        "primary_candidate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PrimaryCandidate"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "evidence_bindings": {
+          "items": {
+            "$ref": "#/$defs/EvidenceBinding"
+          },
+          "title": "Evidence Bindings",
+          "type": "array"
+        },
+        "prose_summary": {
+          "title": "Prose Summary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "result_id",
+        "subject",
+        "input_bindings",
+        "terminal_state",
+        "outcome_reason",
+        "prose_summary"
+      ],
+      "title": "ControlTranslationResult",
+      "type": "object"
+    },
+    "EvidenceBinding": {
+      "properties": {
+        "claim": {
+          "description": "discriminator-preserved | target-feature-supported | policy-placement | limitation",
+          "title": "Claim",
+          "type": "string"
+        },
+        "evidence_refs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence Refs",
+          "type": "array"
+        }
+      },
+      "required": [
+        "claim"
+      ],
+      "title": "EvidenceBinding",
+      "type": "object"
+    },
+    "ImplementsDiscriminator": {
+      "properties": {
+        "source_discriminator_id": {
+          "title": "Source Discriminator Id",
+          "type": "string"
+        },
+        "translation": {
+          "description": "exact | equivalent | narrower",
+          "title": "Translation",
+          "type": "string"
+        },
+        "justification": {
+          "title": "Justification",
+          "type": "string"
+        },
+        "evidence_refs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence Refs",
+          "type": "array"
+        }
+      },
+      "required": [
+        "source_discriminator_id",
+        "translation",
+        "justification"
+      ],
+      "title": "ImplementsDiscriminator",
+      "type": "object"
+    },
+    "InputBindings": {
+      "properties": {
+        "target_technology": {
+          "title": "Target Technology",
+          "type": "string"
+        },
+        "target_policy_context_id": {
+          "title": "Target Policy Context Id",
+          "type": "string"
+        },
+        "current_policy_snapshot_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Current Policy Snapshot Id"
+        },
+        "translation_policy_id": {
+          "title": "Translation Policy Id",
+          "type": "string"
+        },
+        "proof_record_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Proof Record Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "target_technology",
+        "target_policy_context_id",
+        "translation_policy_id"
+      ],
+      "title": "InputBindings",
+      "type": "object"
+    },
+    "OutcomeReason": {
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/OutcomeReasonCode"
+        },
+        "detail": {
+          "title": "Detail",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "detail"
+      ],
+      "title": "OutcomeReason",
+      "type": "object"
+    },
+    "OutcomeReasonCode": {
+      "description": "Reason codes bound to a terminal state, per CFS \u00a72 `outcome_reason.code`.",
+      "enum": [
+        "translated",
+        "unsupported-target-technology",
+        "unsupported-feature",
+        "policy-conflict",
+        "insufficient-policy-context",
+        "insufficient-pattern-context",
+        "invalid-input",
+        "provider-failure",
+        "result-assembly-failure"
+      ],
+      "title": "OutcomeReasonCode",
+      "type": "string"
+    },
+    "Placement": {
+      "properties": {
+        "policy_section": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Policy Section"
+        },
+        "ordering_constraints": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Ordering Constraints",
+          "type": "array"
+        },
+        "conflict_notes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Conflict Notes",
+          "type": "array"
+        }
+      },
+      "title": "Placement",
+      "type": "object"
+    },
+    "PrimaryCandidate": {
+      "properties": {
+        "candidate_id": {
+          "title": "Candidate Id",
+          "type": "string"
+        },
+        "target_control_class": {
+          "title": "Target Control Class",
+          "type": "string"
+        },
+        "target_technology": {
+          "title": "Target Technology",
+          "type": "string"
+        },
+        "target_policy_context_id": {
+          "title": "Target Policy Context Id",
+          "type": "string"
+        },
+        "candidate_artifact": {
+          "$ref": "#/$defs/CandidateArtifact"
+        },
+        "implements_discriminator": {
+          "$ref": "#/$defs/ImplementsDiscriminator"
+        },
+        "placement": {
+          "$ref": "#/$defs/Placement"
+        },
+        "inherited_collateral_impact_prior": {
+          "$ref": "#/$defs/CollateralImpactPrior"
+        },
+        "translation_assumptions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Translation Assumptions",
+          "type": "array"
+        },
+        "limitations": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Limitations",
+          "type": "array"
+        },
+        "provenance": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Provenance",
+          "type": "array"
+        }
+      },
+      "required": [
+        "candidate_id",
+        "target_control_class",
+        "target_technology",
+        "target_policy_context_id",
+        "candidate_artifact",
+        "implements_discriminator",
+        "inherited_collateral_impact_prior"
+      ],
+      "title": "PrimaryCandidate",
+      "type": "object"
+    },
+    "Subject": {
+      "properties": {
+        "vulnerability_id": {
+          "title": "Vulnerability Id",
+          "type": "string"
+        },
+        "proven_pattern_id": {
+          "title": "Proven Pattern Id",
+          "type": "string"
+        },
+        "selected_control_class": {
+          "title": "Selected Control Class",
+          "type": "string"
+        }
+      },
+      "required": [
+        "vulnerability_id",
+        "proven_pattern_id",
+        "selected_control_class"
+      ],
+      "title": "Subject",
+      "type": "object"
+    },
+    "TerminalState": {
+      "description": "Terminal states the capability may emit for a single invocation.",
+      "enum": [
+        "translated",
+        "cannot-express",
+        "insufficient-context",
+        "scope-declined",
+        "malfunction"
+      ],
+      "title": "TerminalState",
+      "type": "string"
+    }
+  },
+  "properties": {
+    "capability": {
+      "default": "control-translation",
+      "title": "Capability",
+      "type": "string"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "status": {
+      "title": "Status",
+      "type": "string"
+    },
+    "terminal_state": {
+      "$ref": "#/$defs/TerminalState"
+    },
+    "structured_result": {
+      "$ref": "#/$defs/ControlTranslationResult"
+    },
+    "prose": {
+      "title": "Prose",
+      "type": "string"
+    },
+    "reference_bundle": {
+      "additionalProperties": true,
+      "title": "Reference Bundle",
+      "type": "object"
+    },
+    "provenance": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Provenance",
+      "type": "array"
+    },
+    "confidence": {
+      "additionalProperties": true,
+      "title": "Confidence",
+      "type": "object"
+    },
+    "warnings": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Warnings",
+      "type": "array"
+    },
+    "trace": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Trace",
+      "type": "array"
+    }
+  },
+  "required": [
+    "status",
+    "terminal_state",
+    "structured_result",
+    "prose"
+  ],
+  "title": "ResultEnvelope",
+  "type": "object"
+}

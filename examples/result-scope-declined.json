@@ -1,0 +1,43 @@
+{
+  "capability": "control-translation",
+  "run_id": "example-run-id-3",
+  "status": "declined",
+  "terminal_state": "scope-declined",
+  "structured_result": {
+    "contract_id": "control-translation@1.0",
+    "result_id": "control-translation-result:CVE-EXAMPLE:unknown-tech:1",
+    "produced_at": "2026-08-10T00:00:00Z",
+    "subject": {
+      "vulnerability_id": "CVE-EXAMPLE",
+      "proven_pattern_id": "proven-pattern:CVE-EXAMPLE:waf:3",
+      "selected_control_class": "waf"
+    },
+    "input_bindings": {
+      "target_technology": "unknown-tech",
+      "target_policy_context_id": "some-context",
+      "current_policy_snapshot_id": null,
+      "translation_policy_id": "control-translation-policy:mvp1",
+      "proof_record_ids": [
+        "mitigation-check-result:CVE-EXAMPLE:3",
+        "bypass-validation-result:CVE-EXAMPLE:3"
+      ]
+    },
+    "terminal_state": "scope-declined",
+    "outcome_reason": {
+      "code": "invalid-input",
+      "detail": "Target technology 'unknown-tech' is outside configured coverage."
+    },
+    "primary_candidate": null,
+    "evidence_bindings": [],
+    "prose_summary": "Target technology 'unknown-tech' is outside configured coverage."
+  },
+  "prose": "Target technology 'unknown-tech' is outside configured coverage.",
+  "reference_bundle": {},
+  "provenance": [
+    "mitigation-check-result:CVE-EXAMPLE:3",
+    "bypass-validation-result:CVE-EXAMPLE:3"
+  ],
+  "confidence": {},
+  "warnings": [],
+  "trace": ["terminal_state=scope-declined"]
+}

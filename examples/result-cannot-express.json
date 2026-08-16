@@ -1,0 +1,43 @@
+{
+  "capability": "control-translation",
+  "run_id": "example-run-id-4",
+  "status": "declined",
+  "terminal_state": "cannot-express",
+  "structured_result": {
+    "contract_id": "control-translation@1.0",
+    "result_id": "control-translation-result:CVE-EXAMPLE:edr-s1:1",
+    "produced_at": "2026-08-10T00:00:00Z",
+    "subject": {
+      "vulnerability_id": "CVE-EXAMPLE",
+      "proven_pattern_id": "proven-pattern:CVE-EXAMPLE:waf:3",
+      "selected_control_class": "waf"
+    },
+    "input_bindings": {
+      "target_technology": "edr-s1",
+      "target_policy_context_id": "edr-context:none",
+      "current_policy_snapshot_id": null,
+      "translation_policy_id": "control-translation-policy:mvp1",
+      "proof_record_ids": [
+        "mitigation-check-result:CVE-EXAMPLE:3",
+        "bypass-validation-result:CVE-EXAMPLE:3"
+      ]
+    },
+    "terminal_state": "cannot-express",
+    "outcome_reason": {
+      "code": "unsupported-feature",
+      "detail": "edr-s1 adapter does not recognize a supported feature for discriminator: Blocks OGNL/EL expression syntax appearing in the Content-Type header."
+    },
+    "primary_candidate": null,
+    "evidence_bindings": [],
+    "prose_summary": "edr-s1 adapter does not recognize a supported feature for discriminator: Blocks OGNL/EL expression syntax appearing in the Content-Type header."
+  },
+  "prose": "edr-s1 adapter does not recognize a supported feature for discriminator: Blocks OGNL/EL expression syntax appearing in the Content-Type header.",
+  "reference_bundle": {},
+  "provenance": [
+    "mitigation-check-result:CVE-EXAMPLE:3",
+    "bypass-validation-result:CVE-EXAMPLE:3"
+  ],
+  "confidence": {},
+  "warnings": [],
+  "trace": ["terminal_state=cannot-express"]
+}

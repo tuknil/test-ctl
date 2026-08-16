@@ -1,0 +1,15 @@
+.env
+.git
+.gitignore
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+tests/
+docs/
+.windsurf/
+runs_store.json
+README.md

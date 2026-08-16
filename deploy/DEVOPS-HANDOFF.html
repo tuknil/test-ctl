@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>control-translation-service — DevOps handoff</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --border: #2a2f3a; --text: #e6e8ee;
+    --muted: #9aa2b1; --accent: #4f8cff; --code-bg: #10131a;
+    font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+  }
+  body { margin: 0; background: var(--bg); color: var(--text); padding: 32px; line-height: 1.55; }
+  .wrap { max-width: 880px; margin: 0 auto; }
+  h1 { font-size: 24px; margin-bottom: 4px; }
+  h2 { font-size: 18px; margin-top: 36px; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+  h3 { font-size: 15px; margin-top: 22px; color: var(--accent); }
+  p, li { font-size: 14px; }
+  .subtitle { color: var(--muted); margin-bottom: 24px; }
+  code, pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px; }
+  code { padding: 2px 6px; font-size: 13px; }
+  pre { padding: 12px 14px; overflow-x: auto; font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 13px; }
+  th, td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; vertical-align: top; }
+  th { background: var(--panel); color: var(--muted); }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin: 14px 0; }
+  .warn { border-left: 3px solid #e0a52c; padding-left: 12px; }
+  .ok { border-left: 3px solid #35c07a; padding-left: 12px; }
+  ul { padding-left: 22px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>control-translation-service — DevOps handoff</h1>
+  <p class="subtitle">
+    Everything needed to build the container image and deploy this service to
+    Azure Container Apps. A working <code>Dockerfile</code>,
+    <code>.dockerignore</code>, and <code>docker-compose.yml</code> are already
+    included in this repo as a starting point — adapt them to your standard
+    CI/CD pipeline and Azure conventions. No Bicep/Terraform or CI workflow is
+    authored by the app team in this handoff; that is DevOps-owned.
+  </p>
+
+  <h2>1. App summary</h2>
+  <table>
+    <tr><th>Runtime</th><td>Python 3.11+ (built/tested on 3.11)</td></tr>
+    <tr><th>Framework</th><td>FastAPI, served by Uvicorn</td></tr>
+    <tr><th>Entrypoint</th><td><code>uvicorn control_translation.api:app --host 0.0.0.0 --port 8000</code></td></tr>
+    <tr><th>Port</th><td>8000 (configurable via <code>PORT</code> env var)</td></tr>
+    <tr><th>Static UI</th><td>Served by the same app at <code>/</code> (mounted from <code>ui/</code>)</td></tr>
+    <tr><th>API docs</th><td><code>/docs</code> (Swagger UI), <code>/openapi.json</code></td></tr>
+    <tr><th>Health endpoint</th><td><code>GET /health</code> → <code>{"status": "ok"}</code></td></tr>
+  </table>
+
+  <h2>2. Repository layout relevant to the build</h2>
+  <pre>pyproject.toml       # dependency manifest (uv-managed)
+Dockerfile           # already provided; adjust as needed
+.dockerignore        # already provided
+docker-compose.yml   # local/dev convenience; not for production use as-is
+src/control_translation/   # application code
+ui/                          # static demo UI, served by the app
+.env.example                 # documents required variable names (no secrets)</pre>
+
+  <h2>3. Dependency management</h2>
+  <p>Dependencies are declared in <code>pyproject.toml</code> and managed with
+    <a href="https://docs.astral.sh/uv/" style="color:var(--accent)">uv</a>. Provided install commands:</p>
+  <pre>uv sync                       # local/dev
+# or, inside a container without uv.lock committed:
+uv pip install --system -r pyproject.toml</pre>
+  <p>If your org's build pipeline prefers <code>pip</code> + <code>requirements.txt</code>,
+    the runtime dependency set is small and pinned in <code>pyproject.toml</code>:
+    <code>fastapi</code>, <code>pydantic</code>, <code>pydantic-ai</code>, <code>uvicorn</code>,
+    <code>python-dotenv</code>.</p>
+
+  <h3>Included Dockerfile (summary)</h3>
+  <p>The provided <code>Dockerfile</code> uses <code>python:3.11-slim</code>, installs
+    dependencies via <code>uv</code>, copies <code>src/</code> and <code>ui/</code>, sets
+    <code>PYTHONPATH=/app/src</code>, exposes port 8000, and defines a container
+    <code>HEALTHCHECK</code> against <code>/health</code>. Treat it as a working starting
+    point — adjust base image, multi-stage build, and layer caching to match your
+    org's hardened base images and registry scanning policy.</p>
+
+  <h2>4. Required environment variables</h2>
+  <p>Names documented in <code>.env.example</code>. <strong>Do not bake real values into the image.</strong></p>
+  <table>
+    <tr><th>Variable</th><th>Purpose</th><th>Required?</th></tr>
+    <tr><td><code>RUN_MODE</code></td><td><code>fixture</code> (default, offline) or <code>live</code> (real model calls)</td><td>No — defaults to <code>fixture</code></td></tr>
+    <tr><td><code>MODEL_PROVIDER</code></td><td>Model provider id (e.g. <code>openai</code>)</td><td>Only if <code>RUN_MODE=live</code></td></tr>
+    <tr><td><code>MODEL_NAME</code></td><td>Model/deployment name</td><td>Only if <code>RUN_MODE=live</code></td></tr>
+    <tr><td><code>OPENAI_API_KEY</code></td><td>API key for the model provider</td><td>Only if <code>RUN_MODE=live</code> and using OpenAI</td></tr>
+    <tr><td><code>AZURE_OPENAI_ENDPOINT</code> / <code>AZURE_OPENAI_API_KEY</code> / <code>AZURE_OPENAI_API_VERSION</code></td><td>Azure OpenAI alternative</td><td>Only if using Azure OpenAI in live mode</td></tr>
+    <tr><td><code>HOST</code></td><td>Bind host</td><td>No — defaults to <code>0.0.0.0</code></td></tr>
+    <tr><td><code>PORT</code></td><td>Bind port</td><td>No — defaults to <code>8000</code></td></tr>
+  </table>
+
+  <div class="panel warn">
+    <strong>Secrets handling:</strong> the API key must be injected as an Azure
+    Container App <em>secret</em> (or a Key Vault reference), never as a plain
+    environment variable and never baked into the image or committed to source
+    control. The app reads standard environment variables at runtime — it does
+    not require a mounted <code>.env</code> file in production; DevOps can inject
+    real environment variables directly via the Container App secret/reference
+    mechanism.
+  </div>
+
+  <h2>5. Azure Container Apps requirements</h2>
+  <ul>
+    <li>An <strong>Azure Container Registry (ACR)</strong> to push the built image to.</li>
+    <li>A <strong>Container Apps Environment</strong> (with a Log Analytics workspace) to host the app.</li>
+    <li><strong>Ingress:</strong> HTTP, target port <code>8000</code>. External ingress only if the demo UI/API must be reachable outside the environment's private network.</li>
+    <li><strong>Scaling:</strong> this is a stateless-ish service (in-memory run store only — see note below); min replicas can be 0–1, max replicas per your standard sizing for a lightweight FastAPI service.</li>
+    <li><strong>Secrets:</strong> configure the model API key as a Container App secret and reference it in the container's env var list (e.g. <code>OPENAI_API_KEY</code> → secretref).</li>
+    <li><strong>Health probe:</strong> point liveness/readiness probes at <code>GET /health</code>.</li>
+  </ul>
+
+  <div class="panel warn">
+    <strong>Known limitation to flag internally:</strong> run results are stored
+    in an in-memory dictionary inside the process. If Container Apps scales to
+    multiple replicas or restarts the container, <code>GET /runs/&#123;run_id&#125;</code>
+    lookups will not be consistent across replicas/restarts. This is acceptable
+    for a demo/POC deployment; flag it if persistent run history is required —
+    the app-side follow-up is a durable store swap (see
+    <code>docs/assumptions-and-followups.md</code> in the repo).
+  </div>
+
+  <h2>6. CI/CD</h2>
+  <p>No pipeline YAML is authored by the app team. Suggested pipeline shape for
+    your standard tooling (GitHub Actions / Azure DevOps / other):</p>
+  <ol>
+    <li>Checkout repo.</li>
+    <li><code>docker build -t &lt;registry&gt;/control-translation-service:&lt;tag&gt; .</code></li>
+    <li><code>docker push &lt;registry&gt;/control-translation-service:&lt;tag&gt;</code></li>
+    <li><code>az containerapp update --name &lt;app&gt; --resource-group &lt;rg&gt; --image &lt;registry&gt;/control-translation-service:&lt;tag&gt;</code>
+      (or your org's standard Container Apps deployment task).</li>
+  </ol>
+
+  <h2>7. Local verification before handoff</h2>
+  <p>To sanity-check the image locally before pushing to a registry:</p>
+  <pre>docker compose build
+docker compose up
+curl http://localhost:8000/health</pre>
+
+  <h2>8. Contact points</h2>
+  <p>For behavior, contract, and testing details beyond this deployment scope,
+    see <code>README.md</code> and <code>docs/LLD.md</code> in the repository root.</p>
+
+</div>
+</body>
+</html>

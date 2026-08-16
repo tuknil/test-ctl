@@ -1,0 +1,43 @@
+{
+  "capability": "control-translation",
+  "run_id": "example-run-id-2",
+  "status": "declined",
+  "terminal_state": "insufficient-context",
+  "structured_result": {
+    "contract_id": "control-translation@1.0",
+    "result_id": "control-translation-result:CVE-EXAMPLE:akamai-waf:1",
+    "produced_at": "2026-08-10T00:00:00Z",
+    "subject": {
+      "vulnerability_id": "CVE-EXAMPLE",
+      "proven_pattern_id": "proven-pattern:CVE-EXAMPLE:waf:3",
+      "selected_control_class": "waf"
+    },
+    "input_bindings": {
+      "target_technology": "akamai-waf",
+      "target_policy_context_id": "akamai-policy:does-not-exist",
+      "current_policy_snapshot_id": null,
+      "translation_policy_id": "control-translation-policy:mvp1",
+      "proof_record_ids": [
+        "mitigation-check-result:CVE-EXAMPLE:3",
+        "bypass-validation-result:CVE-EXAMPLE:3"
+      ]
+    },
+    "terminal_state": "insufficient-context",
+    "outcome_reason": {
+      "code": "insufficient-policy-context",
+      "detail": "No current policy snapshot available for akamai-waf/akamai-policy:does-not-exist; cannot safely translate without reading current policy."
+    },
+    "primary_candidate": null,
+    "evidence_bindings": [],
+    "prose_summary": "No current policy snapshot available for akamai-waf/akamai-policy:does-not-exist; cannot safely translate without reading current policy."
+  },
+  "prose": "No current policy snapshot available for akamai-waf/akamai-policy:does-not-exist; cannot safely translate without reading current policy.",
+  "reference_bundle": {},
+  "provenance": [
+    "mitigation-check-result:CVE-EXAMPLE:3",
+    "bypass-validation-result:CVE-EXAMPLE:3"
+  ],
+  "confidence": {},
+  "warnings": [],
+  "trace": ["terminal_state=insufficient-context"]
+}

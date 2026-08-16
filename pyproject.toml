@@ -1,0 +1,29 @@
+[project]
+name = "control-translation-service"
+version = "0.1.0"
+description = "Janus control-translation capability service"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "fastapi>=0.116,<1",
+  "pydantic>=2.8,<3",
+  "pydantic-ai>=0.7,<1",
+  "uvicorn>=0.30,<1",
+  "python-dotenv>=1.0,<2",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8,<10",
+  "httpx>=0.27,<1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/control_translation"]

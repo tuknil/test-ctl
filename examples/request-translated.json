@@ -1,0 +1,20 @@
+{
+  "input": {
+    "proven_pattern": {
+      "proven_pattern_id": "proven-pattern:CVE-EXAMPLE:waf:3",
+      "vulnerability_id": "CVE-EXAMPLE",
+      "selected_control_class": "waf",
+      "discriminator_id": "discriminator:CVE-EXAMPLE:cmd-param",
+      "discriminator_description": "Blocks OGNL/EL expression syntax appearing in the Content-Type header.",
+      "pattern_summary": "Block requests whose Content-Type header contains OGNL/EL expression syntax.",
+      "proof_record_ids": [
+        "mitigation-check-result:CVE-EXAMPLE:3",
+        "bypass-validation-result:CVE-EXAMPLE:3"
+      ]
+    },
+    "target_context": {
+      "target_technology": "akamai-waf",
+      "target_policy_context_id": "akamai-policy:example:rev-17"
+    }
+  }
+}

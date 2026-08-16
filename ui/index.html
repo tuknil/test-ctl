@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>control-translation demo</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <h1>control-translation — demo</h1>
+  <p class="subtitle">
+    Submit a fixture proven mitigation pattern against a target control technology
+    and view the <code>ControlTranslationResult</code>. Fixture-backed unless the
+    service is running in live mode.
+  </p>
+
+  <div class="layout">
+    <div class="panel">
+      <label for="pattern">Proven mitigation pattern</label>
+      <select id="pattern">
+        <option value="proven-pattern:CVE-EXAMPLE:waf:3">
+          CVE-EXAMPLE — OGNL/EL in Content-Type (waf)
+        </option>
+        <option value="proven-pattern:CVE-EXAMPLE:firewall:1">
+          CVE-EXAMPLE — exposed management port (firewall)
+        </option>
+        <option value="proven-pattern:CVE-EXAMPLE:edr:1">
+          CVE-EXAMPLE — process spawn chain (edr)
+        </option>
+      </select>
+
+      <label for="target">Target technology</label>
+      <select id="target">
+        <option value="akamai-waf">akamai-waf</option>
+        <option value="firewall-generic">firewall-generic</option>
+        <option value="edr-s1">edr-s1</option>
+      </select>
+
+      <label for="context">Target policy context id</label>
+      <select id="context">
+        <option value="akamai-policy:example:rev-17">akamai-policy:example:rev-17</option>
+        <option value="firewall-policy:example:rev-4">firewall-policy:example:rev-4</option>
+        <option value="unknown-context:none">unknown-context:none (no fixture snapshot)</option>
+      </select>
+
+      <button id="submit">Translate</button>
+    </div>
+
+    <div class="panel result-card" id="result">
+      <p class="empty">Submit a request to see the result here.</p>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

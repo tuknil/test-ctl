@@ -1,0 +1,193 @@
+{
+  "$defs": {
+    "ControlTranslationRequest": {
+      "description": "Input contract for a single control-translation invocation.",
+      "properties": {
+        "proven_pattern": {
+          "$ref": "#/$defs/ProvenMitigationPattern"
+        },
+        "target_context": {
+          "$ref": "#/$defs/TargetContext"
+        },
+        "translation_policy": {
+          "$ref": "#/$defs/TranslationPolicy"
+        },
+        "current_policy_snapshot_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Caller-supplied snapshot id. If omitted, the capability will attempt to read one via the configured PolicyReader provider.",
+          "title": "Current Policy Snapshot Id"
+        }
+      },
+      "required": [
+        "proven_pattern",
+        "target_context"
+      ],
+      "title": "ControlTranslationRequest",
+      "type": "object"
+    },
+    "ProvenMitigationPattern": {
+      "description": "A proven mitigation pattern produced upstream by the fast proof loop\n(defense-generation -> mitigation-check + bypass-validation).",
+      "properties": {
+        "proven_pattern_id": {
+          "title": "Proven Pattern Id",
+          "type": "string"
+        },
+        "vulnerability_id": {
+          "title": "Vulnerability Id",
+          "type": "string"
+        },
+        "selected_control_class": {
+          "title": "Selected Control Class",
+          "type": "string"
+        },
+        "discriminator_id": {
+          "title": "Discriminator Id",
+          "type": "string"
+        },
+        "discriminator_description": {
+          "title": "Discriminator Description",
+          "type": "string"
+        },
+        "pattern_summary": {
+          "title": "Pattern Summary",
+          "type": "string"
+        },
+        "proof_record_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Proof Record Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "proven_pattern_id",
+        "vulnerability_id",
+        "selected_control_class",
+        "discriminator_id",
+        "discriminator_description",
+        "pattern_summary"
+      ],
+      "title": "ProvenMitigationPattern",
+      "type": "object"
+    },
+    "Provenance": {
+      "properties": {
+        "caller": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Caller"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source"
+        }
+      },
+      "title": "Provenance",
+      "type": "object"
+    },
+    "TargetContext": {
+      "description": "Identifies the target control technology and policy context.",
+      "properties": {
+        "target_technology": {
+          "description": "e.g. akamai-waf, firewall-generic, edr-s1",
+          "title": "Target Technology",
+          "type": "string"
+        },
+        "target_policy_context_id": {
+          "title": "Target Policy Context Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_technology",
+        "target_policy_context_id"
+      ],
+      "title": "TargetContext",
+      "type": "object"
+    },
+    "TranslationPolicy": {
+      "description": "Dials/config for how aggressive or conservative translation should be.",
+      "properties": {
+        "translation_policy_id": {
+          "default": "control-translation-policy:mvp1",
+          "title": "Translation Policy Id",
+          "type": "string"
+        },
+        "allow_narrower_translation": {
+          "default": true,
+          "title": "Allow Narrower Translation",
+          "type": "boolean"
+        },
+        "allow_equivalent_translation": {
+          "default": true,
+          "title": "Allow Equivalent Translation",
+          "type": "boolean"
+        }
+      },
+      "title": "TranslationPolicy",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "input": {
+      "$ref": "#/$defs/ControlTranslationRequest"
+    },
+    "scope_config": {
+      "additionalProperties": true,
+      "title": "Scope Config",
+      "type": "object"
+    },
+    "request_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Request Id"
+    },
+    "provenance": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Provenance"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "input"
+  ],
+  "title": "InvokeRequestEnvelope",
+  "type": "object"
+}

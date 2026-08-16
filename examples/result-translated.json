@@ -1,0 +1,96 @@
+{
+  "capability": "control-translation",
+  "run_id": "example-run-id-1",
+  "status": "succeeded",
+  "terminal_state": "translated",
+  "structured_result": {
+    "contract_id": "control-translation@1.0",
+    "result_id": "control-translation-result:CVE-EXAMPLE:akamai-waf:1",
+    "produced_at": "2026-08-10T00:00:00Z",
+    "subject": {
+      "vulnerability_id": "CVE-EXAMPLE",
+      "proven_pattern_id": "proven-pattern:CVE-EXAMPLE:waf:3",
+      "selected_control_class": "waf"
+    },
+    "input_bindings": {
+      "target_technology": "akamai-waf",
+      "target_policy_context_id": "akamai-policy:example:rev-17",
+      "current_policy_snapshot_id": null,
+      "translation_policy_id": "control-translation-policy:mvp1",
+      "proof_record_ids": [
+        "mitigation-check-result:CVE-EXAMPLE:3",
+        "bypass-validation-result:CVE-EXAMPLE:3"
+      ]
+    },
+    "terminal_state": "translated",
+    "outcome_reason": {
+      "code": "translated",
+      "detail": "Translation succeeded."
+    },
+    "primary_candidate": {
+      "candidate_id": "control-candidate:CVE-EXAMPLE:akamai-waf:1",
+      "target_control_class": "waf",
+      "target_technology": "akamai-waf",
+      "target_policy_context_id": "akamai-policy:example:rev-17",
+      "candidate_artifact": {
+        "artifact_type": "akamai-waf-rule",
+        "content_ref": "rule \"block-cve-example\": match header(\"Content-Type\") ~ /(%|\\$)\\{.*\\}/ -> block",
+        "content_hash": "sha256:example",
+        "emitted_as": "control-specific-mitigation-candidate"
+      },
+      "implements_discriminator": {
+        "source_discriminator_id": "discriminator:CVE-EXAMPLE:cmd-param",
+        "translation": "equivalent",
+        "justification": "Deterministic fixture template derived from the discriminator.",
+        "evidence_refs": [
+          "mitigation-check-result:CVE-EXAMPLE:3",
+          "bypass-validation-result:CVE-EXAMPLE:3"
+        ]
+      },
+      "placement": {
+        "policy_section": null,
+        "ordering_constraints": [],
+        "conflict_notes": []
+      },
+      "inherited_collateral_impact_prior": {
+        "verdict": "unknown",
+        "confidence": "unknown",
+        "basis": "Not measured by control-translation; inherited placeholder.",
+        "measured": false
+      },
+      "translation_assumptions": [
+        "Fixture doer: no live policy read, no live model call."
+      ],
+      "limitations": [
+        "Candidate is a template, not verified against a real target tenant."
+      ],
+      "provenance": [
+        "mitigation-check-result:CVE-EXAMPLE:3",
+        "bypass-validation-result:CVE-EXAMPLE:3"
+      ]
+    },
+    "evidence_bindings": [
+      {
+        "claim": "discriminator-preserved",
+        "evidence_refs": [
+          "mitigation-check-result:CVE-EXAMPLE:3",
+          "bypass-validation-result:CVE-EXAMPLE:3"
+        ]
+      },
+      {
+        "claim": "target-feature-supported",
+        "evidence_refs": ["akamai-waf"]
+      }
+    ],
+    "prose_summary": "Translated proven pattern proven-pattern:CVE-EXAMPLE:waf:3 into a akamai-waf-rule candidate (equivalent translation) for akamai-waf."
+  },
+  "prose": "Translated proven pattern proven-pattern:CVE-EXAMPLE:waf:3 into a akamai-waf-rule candidate (equivalent translation) for akamai-waf.",
+  "reference_bundle": {},
+  "provenance": [
+    "mitigation-check-result:CVE-EXAMPLE:3",
+    "bypass-validation-result:CVE-EXAMPLE:3"
+  ],
+  "confidence": {},
+  "warnings": [],
+  "trace": ["terminal_state=translated"]
+}
