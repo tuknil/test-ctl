@@ -21,6 +21,7 @@ not care which mode produced the proposal.
 
 from __future__ import annotations
 
+import json
 from typing import Protocol
 
 from pydantic import BaseModel, Field
@@ -69,26 +70,85 @@ class FixtureTranslationDoer:
         snapshot: PolicySnapshot | None,
     ) -> TranslationProposal:
         if target_technology == "akamai-waf":
-            content = (
-                f'rule "block-{pattern.vulnerability_id.lower()}": '
-                f'match header("Content-Type") ~ /(%|\\$)\\{{.*\\}}/ -> block'
+            content = json.dumps(
+                {
+                    "name": f"block-{pattern.vulnerability_id.lower()}",
+                    "description": pattern.pattern_summary,
+                    "operation": "AND",
+                    "conditions": [
+                        {
+                            "type": "requestHeaderValueMatch",
+                            "positiveMatch": True,
+                            "header": "content-type",
+                            "valueCase": False,
+                            "valueWildcard": True,
+                            "value": ["text/xml", "application/xml"],
+                        },
+                        {
+                            "type": "argsPostXMLMatch",
+                            "positiveMatch": True,
+                            "valueCase": True,
+                            "valueWildcard": True,
+                            "value": ["*%{*", "*${*"],
+                        },
+                    ],
+                    "tag": ["OGNL", "EL", pattern.vulnerability_id],
+                },
+                indent=2,
             )
             label = "equivalent"
+            limitations = [
+                "Candidate is a template, not verified against a real Akamai tenant.",
+                "Action (deny/alert) is assigned separately when the rule is "
+                "attached to a security policy; recommended action: deny.",
+            ]
         elif target_technology == "firewall-generic":
             content = (
-                f'rule "block-{pattern.vulnerability_id.lower()}": '
-                f"deny inbound tcp/8443 from any to any"
+                f'set rulebase security rules "block-{pattern.vulnerability_id.lower()}" '
+                "from untrust to trust source any destination mgmt-server "
+                "application any service tcp-8443 action deny"
             )
             label = "narrower"
+            limitations = [
+                "Candidate is a template, not verified against a real PAN-OS tenant.",
+                "Referenced address/service objects (mgmt-server, tcp-8443) must "
+                "exist and the change must be committed before it takes effect.",
+            ]
         elif target_technology == "edr-s1":
-            content = (
-                "detect process-chain: web-server -> shell -> network "
-                "=> block"
+            content = json.dumps(
+                {
+                    "data": {
+                        "name": f"detect-{pattern.vulnerability_id.lower()}",
+                        "description": pattern.pattern_summary,
+                        "severity": "Medium",
+                        "queryType": "events",
+                        "queryLang": "2.0",
+                        "s1ql": (
+                            "EventType = 'Process Creation' AND "
+                            "SrcProcName ContainsCIS 'httpd' AND "
+                            "TgtProcName In Contains Anycase ('sh','bash','cmd.exe')"
+                        ),
+                        "expirationMode": "Permanent",
+                        "networkQuarantine": False,
+                        "treatAsThreat": "UNDEFINED",
+                    },
+                    "filter": {"siteIds": ["<SITE_ID>"]},
+                },
+                indent=2,
             )
             label = "exact"
+            limitations = [
+                "Candidate is a template, not verified against a real S1 console.",
+                "Defaults to alert-only (treatAsThreat=UNDEFINED, "
+                "networkQuarantine=false); kill/quarantine is an explicit opt-in.",
+                "STAR is cloud-only and requires an authenticated console token.",
+            ]
         else:
             content = ""
             label = "narrower"
+            limitations = [
+                "Candidate is a template, not verified against a real target tenant."
+            ]
 
         return TranslationProposal(
             candidate_content=content,
@@ -100,10 +160,7 @@ class FixtureTranslationDoer:
             translation_assumptions=[
                 "Fixture doer: no live policy read, no live model call."
             ],
-            limitations=[
-                "Candidate is a template, not verified against a real "
-                "target tenant."
-            ],
+            limitations=limitations,
         )
 
 
@@ -127,11 +184,24 @@ class LiveTranslationDoer:
                 "You are a translation doer for a security-control-translation "
                 "capability. Given a proven mitigation pattern's discriminator "
                 "and a target control technology, propose a candidate rule/config "
-                "artifact in that target's syntax. State whether your translation "
-                "is exact, equivalent, or narrower relative to the discriminator, "
-                "and list any assumptions or limitations. Do not claim the "
-                "candidate has been tested or is safe for production -- that is "
-                "decided elsewhere. Return only the structured fields requested."
+                "artifact in that target's real syntax:\n"
+                "- akamai-waf: an Akamai Application Security custom-rule JSON "
+                "object with 'operation' (AND/OR) and a 'conditions' array; do "
+                "NOT embed an action (alert/deny) in the rule body.\n"
+                "- firewall-generic: a PAN-OS security rule as a CLI "
+                "'set rulebase security rules ...' command or an XML <entry>, "
+                "with from/to zones, source, destination, application, service, "
+                "and action.\n"
+                "- edr-s1: a SentinelOne STAR rule JSON body "
+                "(data{name, s1ql, severity, queryLang:'2.0', treatAsThreat}); "
+                "default treatAsThreat to 'UNDEFINED' (alert-only) and "
+                "networkQuarantine to false unless containment is explicitly "
+                "required.\n"
+                "State whether your translation is exact, equivalent, or narrower "
+                "relative to the discriminator, and list any assumptions or "
+                "limitations. Do not claim the candidate has been tested or is "
+                "safe for production -- that is decided elsewhere. Return only the "
+                "structured fields requested."
             ),
         )
 

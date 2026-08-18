@@ -3,9 +3,11 @@
 ## Explicit assumptions made in this build
 
 - No live Akamai/Palo Alto/SentinelOne API access exists yet — all policy
-  reads and target syntax are **fixture-based approximations** built from
-  the CFS's illustrative example and public documentation patterns, not
-  verified against real tenant configs.
+  reads are **fixture-based approximations**. Target **rule syntax** is now
+  sourced from documented real formats (see `docs/syntexresearch.md`:
+  Akamai custom-rule JSON, PAN-OS security-rule CLI/XML, SentinelOne STAR
+  JSON), but the generated artifacts are still **not validated against a
+  real tenant**.
 - Real proven-mitigation-pattern inputs from `defense-generation` /
   `mitigation-check` / `bypass-validation` do not exist yet — fixtures
   synthesize plausible proven patterns (e.g. the OGNL/Content-Type example
@@ -25,8 +27,9 @@
   names only. Default/offline tests use `FixtureTranslationDoer` and
   require no key or network access.
 - Whether EDR/SentinelOne is even in MVP scope is unconfirmed; the
-  `edr-s1` adapter is a minimal typed stub, not a target the Janus MVP has
-  committed to.
+  `edr-s1` adapter now validates the SentinelOne STAR custom-rule JSON
+  shape (`docs/syntexresearch.md`), so this is a **scope** question, not a
+  feasibility one.
 
 ## Backlog — add once available/confirmed
 
