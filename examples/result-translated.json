@@ -34,7 +34,7 @@
       "target_policy_context_id": "akamai-policy:example:rev-17",
       "candidate_artifact": {
         "artifact_type": "akamai-waf-rule",
-        "content_ref": "rule \"block-cve-example\": match header(\"Content-Type\") ~ /(%|\\$)\\{.*\\}/ -> block",
+        "content_ref": "{\"name\": \"block-cve-example\", \"description\": \"Block requests whose Content-Type header contains OGNL/EL expression syntax.\", \"operation\": \"AND\", \"conditions\": [{\"type\": \"requestHeaderValueMatch\", \"positiveMatch\": true, \"header\": \"content-type\", \"valueCase\": false, \"valueWildcard\": true, \"value\": [\"text/xml\", \"application/xml\"]}, {\"type\": \"argsPostXMLMatch\", \"positiveMatch\": true, \"valueCase\": true, \"valueWildcard\": true, \"value\": [\"*%{*\", \"*${*\"]}], \"tag\": [\"OGNL\", \"EL\", \"CVE-EXAMPLE\"]}",
         "content_hash": "sha256:example",
         "emitted_as": "control-specific-mitigation-candidate"
       },
@@ -62,7 +62,8 @@
         "Fixture doer: no live policy read, no live model call."
       ],
       "limitations": [
-        "Candidate is a template, not verified against a real target tenant."
+        "Candidate is a template, not verified against a real target tenant.",
+        "Action (deny/alert) is assigned separately when the rule is attached to a security policy; recommended action: deny."
       ],
       "provenance": [
         "mitigation-check-result:CVE-EXAMPLE:3",

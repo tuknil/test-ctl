@@ -5,8 +5,9 @@
 Implements the `control-translation` CFS (see `docs/cfs-source.md`): turns a
 proven mitigation pattern into a control-specific mitigation candidate for a
 target technology, or emits a grounded non-positive terminal state. Scope of
-this build: Akamai WAF, generic firewall, and an EDR/S1 stub target, all
-fixture-backed, with a real Pydantic AI agent as the translation doer.
+this build: Akamai WAF, PAN-OS firewall, and a SentinelOne (S1) STAR EDR
+target, all fixture-backed (real documented syntax, no live tenant), with a
+real Pydantic AI agent as the translation doer.
 
 ## 2. Component diagram
 
@@ -71,8 +72,18 @@ and reason codes live in `terminal.py`.
 - `validate_syntax(candidate_content) -> SyntaxValidationResult`
 - `detect_conflicts(candidate_content, snapshot) -> list[str]`
 
-Implementations: `AkamaiWafAdapter`, `FirewallGenericAdapter`, `EdrS1Adapter`
-(all fixture-backed; see `docs/assumptions-and-followups.md`).
+Implementations validate the documented real target syntax (see
+`docs/syntexresearch.md`); none is vendor-API-backed yet:
+
+- `AkamaiWafAdapter` — Akamai custom-rule JSON (`operation` + `conditions[]`);
+  rejects an action embedded in the rule body (action is set separately on
+  the security policy).
+- `FirewallGenericAdapter` — PAN-OS security rule in CLI
+  `set rulebase security rules ...` form or XML `<entry>` form (requires
+  from/to zones, source, destination, application, service, action).
+- `EdrS1Adapter` — SentinelOne STAR rule JSON
+  (`data{name, s1ql, severity, queryLang, treatAsThreat}`); defaults are
+  alert-only (`treatAsThreat=UNDEFINED`).
 
 ## 6. Terminal-state decision table
 
@@ -94,7 +105,7 @@ Implemented in `capability.py::invoke`; precedence constants declared in
 | PolicyReader | `FixturePolicyReader`, 2 canned snapshots | Not implemented — no real adapter exists |
 | Proven pattern source | `providers/fixtures.py`, 3 canned patterns | Caller supplies real pattern via request body (upstream capabilities not yet built) |
 | Translation doer | `FixtureTranslationDoer`, deterministic templates | `LiveTranslationDoer`, real Pydantic AI agent call, needs `.env` model config |
-| Adapters (syntax/conflict) | Deterministic regex + fixture snapshot comparison | Same code path; not vendor-API-backed either way |
+| Adapters (syntax/conflict) | Deterministic real-format validation (JSON / PAN-OS CLI+XML / STAR JSON) + fixture snapshot comparison | Same code path; not vendor-API-backed either way |
 
 ## 8. Error handling & malfunction paths
 

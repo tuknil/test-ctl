@@ -4,6 +4,8 @@ from control_translation.adapters.edr_s1 import EdrS1Adapter
 from control_translation.adapters.firewall_generic import FirewallGenericAdapter
 from control_translation.policy_reader.fixtures import FixturePolicyReader
 
+import json
+
 
 def test_registry_resolves_known_adapters():
     assert isinstance(get_adapter("akamai-waf"), AkamaiWafAdapter)
@@ -17,7 +19,20 @@ def test_registry_returns_none_for_unknown_target():
 
 def test_akamai_adapter_validates_expected_shape():
     adapter = AkamaiWafAdapter()
-    valid = 'rule "block-cve-example": match header("Content-Type") ~ /(%|\\$)\\{.*\\}/ -> block'
+    valid = json.dumps(
+        {
+            "name": "block-cve-example",
+            "operation": "AND",
+            "conditions": [
+                {
+                    "type": "requestHeaderValueMatch",
+                    "positiveMatch": True,
+                    "header": "content-type",
+                    "value": ["text/xml"],
+                }
+            ],
+        }
+    )
     result = adapter.validate_syntax(valid)
     assert result.valid is True
 
@@ -27,9 +42,30 @@ def test_akamai_adapter_validates_expected_shape():
     assert result.errors
 
 
+def test_akamai_adapter_rejects_embedded_action():
+    adapter = AkamaiWafAdapter()
+    with_action = json.dumps(
+        {
+            "name": "bad",
+            "operation": "AND",
+            "action": "deny",
+            "conditions": [
+                {"type": "pathMatch", "positiveMatch": True, "value": ["/x"]}
+            ],
+        }
+    )
+    result = adapter.validate_syntax(with_action)
+    assert result.valid is False
+    assert any("action" in e.lower() for e in result.errors)
+
+
 def test_firewall_adapter_validates_expected_shape():
     adapter = FirewallGenericAdapter()
-    valid = 'rule "block-cve-example": deny inbound tcp/8443 from any to any'
+    valid = (
+        'set rulebase security rules "block-cve-example" from untrust to trust '
+        "source any destination mgmt-server application any service tcp-8443 "
+        "action deny"
+    )
     result = adapter.validate_syntax(valid)
     assert result.valid is True
 
@@ -38,9 +74,34 @@ def test_firewall_adapter_validates_expected_shape():
     assert result.valid is False
 
 
+def test_firewall_adapter_validates_xml_shape():
+    adapter = FirewallGenericAdapter()
+    valid_xml = (
+        '<entry name="block-cve-example">'
+        "<from><member>untrust</member></from>"
+        "<to><member>trust</member></to>"
+        "<source><member>any</member></source>"
+        "<destination><member>mgmt-server</member></destination>"
+        "<action>deny</action>"
+        "</entry>"
+    )
+    result = adapter.validate_syntax(valid_xml)
+    assert result.valid is True
+
+
 def test_edr_adapter_validates_expected_shape():
     adapter = EdrS1Adapter()
-    valid = "detect process-chain: web-server -> shell -> network => block"
+    valid = json.dumps(
+        {
+            "data": {
+                "name": "detect-cve-example",
+                "severity": "Medium",
+                "queryLang": "2.0",
+                "s1ql": "EventType = 'Process Creation'",
+                "treatAsThreat": "UNDEFINED",
+            }
+        }
+    )
     result = adapter.validate_syntax(valid)
     assert result.valid is True
 
