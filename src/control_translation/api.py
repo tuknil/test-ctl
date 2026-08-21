@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, status
 from fastapi.staticfiles import StaticFiles
 
 from control_translation import capability
@@ -22,6 +22,8 @@ from control_translation.contracts import InvokeRequestEnvelope, ResultEnvelope
 from control_translation.terminal import TerminalState
 
 
+_SETTINGS = get_settings()
+
 app = FastAPI(
     title="control-translation",
     description=(
@@ -29,6 +31,9 @@ app = FastAPI(
         "mitigation candidate for a target technology."
     ),
     version="0.1.0",
+    docs_url="/docs" if _SETTINGS.enable_docs else None,
+    redoc_url="/redoc" if _SETTINGS.enable_docs else None,
+    openapi_url="/openapi.json" if _SETTINGS.enable_docs else None,
 )
 
 _RUNS: dict[str, ResultEnvelope] = {}
@@ -39,6 +44,34 @@ _UI_DIR = Path(__file__).resolve().parents[2] / "ui"
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/ready")
+def readiness() -> dict[str, str]:
+    """Deployment readiness check with safe configuration diagnostics."""
+    settings = get_settings()
+    if not settings.ready:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "status": "not-ready",
+                "configuration_errors": settings.configuration_errors,
+            },
+        )
+    return {"status": "ready"}
+
+
+@app.get("/inference")
+def inference_status() -> dict[str, str | bool]:
+    """Safe, browser-consumable inference status (never returns secrets)."""
+    settings = get_settings()
+    return {
+        "execution_mode": "live" if settings.is_live else "fixture",
+        "provider": settings.model_provider,
+        "model": settings.model_name,
+        "credentials_configured": settings.credentials_configured,
+        "switching_requires_restart": True,
+    }
 
 
 @app.get("/schema")
@@ -52,6 +85,7 @@ def schema() -> dict[str, Any]:
         "response_model_fields": list(ResultEnvelope.model_fields.keys()),
         "terminal_states": [state.value for state in TerminalState],
         "run_mode": settings.run_mode,
+        "inference": inference_status(),
         "supported_adapters": {
             name: {
                 "artifact_type": adapter.artifact_type,

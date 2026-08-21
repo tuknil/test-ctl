@@ -204,3 +204,4 @@ class ResultEnvelope(BaseModel):
     confidence: dict[str, Any] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
     trace: list[str] = Field(default_factory=list)
+    inference: dict[str, Any] = Field(default_factory=dict)

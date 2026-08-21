@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import json
 from typing import Protocol
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 from pydantic import BaseModel, Field
 
@@ -199,9 +201,30 @@ class LiveTranslationDoer:
     def _build_agent(self):
         from pydantic_ai import Agent
 
-        model_id = f"{self._settings.model_provider}:{self._settings.model_name}"
+        # AT&T Inference exposes an OpenAI-compatible chat-completions API.
+        # A model object is required here (rather than a provider:model string)
+        # so Pydantic AI sends requests to the configured internal endpoint.
+        if self._settings.is_att_inference:
+            if not self._settings.credentials_configured:
+                raise ValueError(
+                    "AT&T Inference live mode requires ATT_INFERENCE_BASE_URL "
+                    "and ATT_INFERENCE_API_KEY."
+                )
+            from pydantic_ai.models.openai import OpenAIModel
+            from pydantic_ai.providers.openai import OpenAIProvider
+
+            model = OpenAIModel(
+                self._settings.model_name,
+                provider=OpenAIProvider(
+                    base_url=self._settings.att_inference_base_url,
+                    api_key=self._settings.att_inference_api_key,
+                ),
+            )
+        else:
+            model = f"{self._settings.model_provider}:{self._settings.model_name}"
+
         return Agent(
-            model_id,
+            model,
             output_type=TranslationProposal,
             system_prompt=(
                 "You are a translation doer for a security-control-translation "
@@ -254,9 +277,125 @@ class LiveTranslationDoer:
         return result.output
 
 
+class AttInferenceTranslationDoer:
+    """AT&T Inference doer for its OpenAI-compatible chat-completions API.
+
+    This direct adapter keeps the AT&T live path usable in minimal runtime
+    images where the optional ``pydantic-ai`` package is not installed. Its
+    output is still parsed into ``TranslationProposal`` and always passes the
+    same deterministic syntax and policy-conflict gates as other doers.
+    """
+
+    def __init__(self, settings: Settings) -> None:
+        self._settings = settings
+
+    def propose(
+        self,
+        pattern: ProvenMitigationPattern,
+        target_technology: str,
+        artifact_type: str,
+        snapshot: PolicySnapshot | None,
+    ) -> TranslationProposal:
+        if not self._settings.credentials_configured:
+            raise ValueError(
+                "AT&T Inference live mode requires ATT_INFERENCE_BASE_URL "
+                "and ATT_INFERENCE_API_KEY."
+            )
+
+        snapshot_desc = (
+            "no current policy snapshot available"
+            if snapshot is None
+            else f"existing rules: {', '.join(snapshot.existing_rule_summaries)}"
+        )
+        system_prompt = (
+            "You translate proven security mitigation patterns into one target "
+            "control artifact. Return a JSON object only, with exactly these "
+            "fields: candidate_content (string), translation_label (exact, "
+            "equivalent, or narrower), justification (string), "
+            "translation_assumptions (array of strings), limitations (array of "
+            "strings), and answer_kind (construction). Do not claim the "
+            "candidate is tested or production-safe. "
+            "For akamai-waf, candidate_content must be an Akamai custom-rule "
+            "JSON string with operation (AND or OR) and conditions (no action). "
+            "Each condition needs type=requestHeaderValueMatch, positiveMatch "
+            "(boolean), header, and a non-empty value string or array. For "
+            "firewall-generic, provide a PAN-OS security-rule CLI set command "
+            "or XML entry including from/to/source/destination/application/"
+            "service/action. For edr-s1, provide SentinelOne STAR rule JSON "
+            "with data.name, data.s1ql, data.severity, data.queryLang='2.0', "
+            "and data.treatAsThreat; default to alert-only."
+        )
+        user_prompt = (
+            f"Target technology: {target_technology}\n"
+            f"Target artifact type: {artifact_type}\n"
+            f"Discriminator: {pattern.discriminator_description}\n"
+            f"Pattern summary: {pattern.pattern_summary}\n"
+            f"Current policy context: {snapshot_desc}\n"
+        )
+        payload = {
+            "model": self._settings.model_name,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": 0,
+            "response_format": {"type": "json_object"},
+        }
+        request = Request(
+            f"{self._settings.att_inference_base_url.rstrip('/')}/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {self._settings.att_inference_api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urlopen(
+                request, timeout=self._settings.model_request_timeout_seconds
+            ) as response:
+                response_body = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            raise RuntimeError(f"AT&T Inference returned HTTP {exc.code}.") from exc
+        except URLError as exc:
+            raise RuntimeError("Unable to reach AT&T Inference.") from exc
+
+        try:
+            content = response_body["choices"][0]["message"]["content"]
+            if isinstance(content, list):
+                content = "".join(
+                    part.get("text", "") for part in content if isinstance(part, dict)
+                )
+            proposal_data = json.loads(content)
+            if isinstance(proposal_data.get("candidate_content"), (dict, list)):
+                proposal_data["candidate_content"] = json.dumps(
+                    proposal_data["candidate_content"], indent=2
+                )
+            for field in ("translation_assumptions", "limitations"):
+                if isinstance(proposal_data.get(field), str):
+                    proposal_data[field] = [proposal_data[field]]
+
+            # A model may provide explanatory text rather than the constrained
+            # label. Preserve the conservative label in that case; downstream
+            # policy and syntax judges still decide whether it can be emitted.
+            label = str(proposal_data.get("translation_label", "")).lower()
+            proposal_data["translation_label"] = next(
+                (item for item in ("exact", "equivalent", "narrower") if item in label),
+                "narrower",
+            )
+            proposal_data["answer_kind"] = "construction"
+            return TranslationProposal.model_validate(proposal_data)
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "AT&T Inference returned an invalid structured translation response."
+            ) from exc
+
+
 def build_translation_doer(settings: Settings) -> TranslationDoer:
     """Factory: returns the fixture or live doer based on settings.run_mode."""
 
+    if settings.is_live and settings.is_att_inference:
+        return AttInferenceTranslationDoer(settings)
     if settings.is_live:
         return LiveTranslationDoer(settings)
     return FixtureTranslationDoer()

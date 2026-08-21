@@ -98,6 +98,65 @@ const patternSelect = document.getElementById("pattern");
 const targetSelect = document.getElementById("target");
 const contextSelect = document.getElementById("context");
 const formExplanation = document.getElementById("formExplanation");
+const inferenceStatusEl = document.getElementById("inferenceStatus");
+const inferenceModeSelect = document.getElementById("inferenceMode");
+const copyInferenceConfigBtn = document.getElementById("copyInferenceConfig");
+const inferenceSwitchHelp = document.getElementById("inferenceSwitchHelp");
+
+let inferenceRuntime = null;
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function renderInferenceStatus(runtime) {
+  inferenceRuntime = runtime;
+  const live = runtime.execution_mode === "live";
+  inferenceStatusEl.className = live ? "inference-live" : "inference-fixture";
+  inferenceStatusEl.innerHTML = `<strong>${live ? "Live LLM enabled" : "Fixture mode"}</strong> · Provider: <code>${escapeHtml(runtime.provider)}</code> · Model: <code>${escapeHtml(runtime.model)}</code>${live && !runtime.credentials_configured ? " · credentials missing" : ""}`;
+  inferenceModeSelect.value = runtime.provider === "att-inference" && live ? "att-inference" : "fixture";
+  updateInferenceSwitchHelp();
+}
+
+function updateInferenceSwitchHelp() {
+  const selected = inferenceModeSelect.value;
+  if (selected === "att-inference") {
+    inferenceSwitchHelp.textContent = "To switch safely, copy the configuration, add the AT&T base URL and API key to .env, then restart the service. Browser controls never receive or save credentials.";
+  } else {
+    inferenceSwitchHelp.textContent = "Fixture mode is deterministic and makes no LLM call. Copy the configuration and restart the service to switch back.";
+  }
+}
+
+async function loadInferenceStatus() {
+  try {
+    const response = await fetch("/inference");
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    renderInferenceStatus(await response.json());
+  } catch (error) {
+    inferenceStatusEl.textContent = `Unable to load inference status: ${String(error)}`;
+  }
+}
+
+inferenceModeSelect.addEventListener("change", updateInferenceSwitchHelp);
+copyInferenceConfigBtn.addEventListener("click", async () => {
+  const config = inferenceModeSelect.value === "att-inference"
+    ? "RUN_MODE=live\nMODEL_PROVIDER=att-inference\nMODEL_NAME=<ATT_INFERENCE_MODEL_ID>\nATT_INFERENCE_BASE_URL=<ATT_INFERENCE_OPENAI_COMPATIBLE_BASE_URL>\nATT_INFERENCE_API_KEY=<SET_IN_YOUR_SECRET_STORE>"
+    : "RUN_MODE=fixture\nMODEL_PROVIDER=openai\nMODEL_NAME=gpt-4o-mini";
+  try {
+    await navigator.clipboard.writeText(config);
+    copyInferenceConfigBtn.textContent = "Configuration copied";
+  } catch (_) {
+    copyInferenceConfigBtn.textContent = "Copy unavailable";
+  }
+  setTimeout(() => { copyInferenceConfigBtn.textContent = "Copy configuration"; }, 1800);
+});
+
+loadInferenceStatus();
 
 const PATTERN_EXPLANATIONS = {
   "proven-pattern:CVE-2017-5638:waf:fixture-1": {
@@ -276,6 +335,14 @@ function badgeClass(state) {
 function renderResult(envelope) {
   const r = envelope.structured_result;
   const candidate = r.primary_candidate;
+  const inference = envelope.inference || inferenceRuntime;
+
+  const inferenceHtml = inference ? `
+    <section class="inference-result">
+      <strong>Inference evidence</strong>
+      <p>Mode: <code>${escapeHtml(inference.execution_mode)}</code> · Provider: <code>${escapeHtml(inference.provider)}</code> · Model: <code>${escapeHtml(inference.model)}</code></p>
+      <p><strong>LLM invoked for this request: ${inference.llm_invoked ? "yes" : "no"}</strong>${inference.llm_invoked ? " — the request reached the live translation agent." : " — this was a fixture run or the request ended before model invocation."}</p>
+    </section>` : "";
 
   let candidateHtml = '<p class="empty">No candidate produced.</p>';
   if (candidate) {
@@ -326,6 +393,7 @@ function renderResult(envelope) {
     <p>${r.prose_summary}</p>
     <label>Outcome detail</label>
     <p>${r.outcome_reason.detail}</p>
+    ${inferenceHtml}
     <h3>Candidate</h3>
     ${candidateHtml}
   `;

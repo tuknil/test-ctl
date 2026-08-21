@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Control Translation — Team Demo Guide</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body class="demo-page">
+  <header class="demo-header">
+    <div>
+      <p class="eyebrow">TEAM DEMO GUIDE</p>
+      <h1>How Control Translation Works</h1>
+      <p class="subtitle">Turn a proven mitigation pattern into a reviewable candidate rule. The service never deploys a rule automatically.</p>
+    </div>
+    <a class="demo-page-link" href="/">← Back to translator</a>
+  </header>
+
+  <section class="inference-card" aria-labelledby="liveStatusTitle">
+    <div>
+      <h2 id="liveStatusTitle">Current demo runtime</h2>
+      <p id="demoInferenceStatus" class="empty">Loading runtime status…</p>
+    </div>
+    <div>
+      <strong>What to say:</strong>
+      <p class="inference-help">“This tells us whether the example will use AT&amp;T Inference or a local fixture template. Credentials always stay on the server.”</p>
+    </div>
+  </section>
+
+  <section class="demo-section">
+    <h2>1. Simple end-to-end flow</h2>
+    <p>The service starts with a known mitigation pattern and a selected target tool. It creates a candidate, validates it, and returns it for review.</p>
+    <div class="flow-row" aria-label="End-to-end translation flow">
+      <div class="flow-node"><strong>Proven mitigation</strong><span>Known security behavior and proof references</span></div>
+      <span class="flow-arrow">→</span>
+      <div class="flow-node"><strong>Target + policy context</strong><span>Choose Akamai, firewall, or EDR and its current policy</span></div>
+      <span class="flow-arrow">→</span>
+      <div class="flow-node active"><strong>Create candidate</strong><span>AT&amp;T LLM or local fixture template</span></div>
+      <span class="flow-arrow">→</span>
+      <div class="flow-node"><strong>Validate</strong><span>Syntax and policy-conflict checks</span></div>
+      <span class="flow-arrow">→</span>
+      <div class="flow-node success"><strong>Review result</strong><span>Candidate only — never auto-deployed</span></div>
+    </div>
+  </section>
+
+  <section class="demo-section two-column">
+    <div>
+      <h2>2. Where input comes from</h2>
+      <div class="flow-stack" aria-label="Upstream input flow">
+        <div class="flow-node"><strong>Defense generation</strong><span>Creates a mitigation idea</span></div>
+        <span class="flow-arrow down">↓</span>
+        <div class="flow-node"><strong>Mitigation and bypass checks</strong><span>Checks expected protection and bypass attempts</span></div>
+        <span class="flow-arrow down">↓</span>
+        <div class="flow-node active"><strong>Proven mitigation pattern</strong><span>Input received by this service</span></div>
+      </div>
+      <p class="callout">For the current demo, these upstream records are bundled fixtures. In production, they would come from connected security workflows.</p>
+    </div>
+    <div>
+      <h2>3. What is policy context?</h2>
+      <p>A policy context is the existing configuration environment where the candidate rule could eventually be used.</p>
+      <div class="context-example">
+        <code>akamai-policy:example:rev-17</code>
+        <span>Example policy-context ID</span>
+      </div>
+      <div class="flow-stack compact" aria-label="Policy context validation flow">
+        <div class="flow-node"><strong>Selected context ID</strong><span>Target tool and policy location</span></div>
+        <span class="flow-arrow down">↓</span>
+        <div class="flow-node"><strong>Policy snapshot found?</strong><span>Existing-rule summary is available</span></div>
+        <span class="flow-arrow down">↓</span>
+        <div class="flow-node success"><strong>Yes: continue safely</strong><span>Check overlap or conflicts</span></div>
+      </div>
+      <p class="callout"><strong>If no snapshot is found:</strong> the result is <code>insufficient-context</code>, and the service stops before an LLM call. This avoids guessing about an existing policy.</p>
+    </div>
+  </section>
+
+  <section class="demo-section">
+    <h2>4. Live LLM versus fixture mode</h2>
+    <div class="mode-comparison">
+      <article class="comparison-card live-card">
+        <h3>Live AT&amp;T LLM mode</h3>
+        <ol>
+          <li>Service checks scope and policy context.</li>
+          <li>AT&amp;T Inference proposes a structured target-rule candidate.</li>
+          <li>Service validates syntax and checks policy conflicts.</li>
+          <li>Result shows <code>LLM invoked: yes</code>.</li>
+        </ol>
+        <p><strong>Best for:</strong> demonstrating model-assisted rule construction.</p>
+      </article>
+      <article class="comparison-card">
+        <h3>Fixture mode</h3>
+        <ol>
+          <li>Service checks scope and policy context.</li>
+          <li>A local deterministic template proposes the candidate.</li>
+          <li>Service validates syntax and checks policy conflicts.</li>
+          <li>Result shows <code>LLM invoked: no</code>.</li>
+        </ol>
+        <p><strong>Best for:</strong> offline, repeatable demos and automated tests.</p>
+      </article>
+    </div>
+  </section>
+
+  <section class="demo-section">
+    <h2>5. What to do in the live demo</h2>
+    <ol class="demo-steps">
+      <li>Return to the <a href="/">translator page</a>.</li>
+      <li>Select <strong>CVE-2017-5638 — Apache Struts</strong>, target <strong>Akamai WAF</strong>, and context <code>akamai-policy:example:rev-17</code>.</li>
+      <li>Select <strong>Translate</strong>.</li>
+      <li>Show the <strong>translated</strong> state, candidate artifact, assumptions, and limitations.</li>
+      <li>Show <strong>Inference evidence</strong>: it identifies the mode, provider, model, and whether the LLM was actually invoked.</li>
+    </ol>
+  </section>
+
+  <section class="demo-section">
+    <h2>6. Simple team message</h2>
+    <blockquote>
+      “The LLM helps create the first candidate rule. The service then performs deterministic syntax and policy checks. The result is a reviewable candidate, not an automatic production deployment.”
+    </blockquote>
+  </section>
+
+  <script>
+    const status = document.getElementById('demoInferenceStatus');
+    fetch('/inference')
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
+      .then((runtime) => {
+        const live = runtime.execution_mode === 'live';
+        status.className = live ? 'inference-live' : 'inference-fixture';
+        status.textContent = `${live ? 'Live LLM enabled' : 'Fixture mode'} · Provider: ${runtime.provider} · Model: ${runtime.model}`;
+      })
+      .catch(() => { status.textContent = 'Runtime status is unavailable.'; });
+  </script>
+</body>
+</html>

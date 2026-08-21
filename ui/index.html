@@ -14,6 +14,22 @@
     service is running in live mode.
   </p>
 
+  <section class="inference-card" aria-labelledby="inferenceTitle">
+    <div>
+      <h2 id="inferenceTitle">Inference runtime</h2>
+      <p id="inferenceStatus" class="empty" aria-live="polite">Loading runtime status…</p>
+    </div>
+    <div class="inference-switcher">
+      <label for="inferenceMode">Prepare next server mode</label>
+      <select id="inferenceMode">
+        <option value="fixture">Fixture — deterministic, no LLM</option>
+        <option value="att-inference">AT&amp;T Inference — live LLM</option>
+      </select>
+      <button id="copyInferenceConfig" class="secondary-btn" type="button">Copy configuration</button>
+    </div>
+    <p id="inferenceSwitchHelp" class="inference-help"></p>
+  </section>
+
   <details class="help-section">
     <summary>ℹ️ How it works & what each example means</summary>
     <div class="help-content">
@@ -47,12 +63,29 @@
 
       <h3>Input → Output Flow</h3>
       <p><code>proven_pattern</code> + <code>target_context</code> → Translation Engine → Syntax Validation → Conflict Check → <code>ControlTranslationResult</code></p>
+
+      <h3>Live LLM demonstration</h3>
+      <p>The <strong>Inference runtime</strong> card identifies the active mode, provider, and model without exposing any credential. In a live run, the result panel reports <code>LLM invoked: yes</code> only after the request passes initial scope/context gates and reaches the configured model. Fixture runs report <code>no</code>.</p>
+
+      <h3>How live AT&amp;T LLM translation works</h3>
+      <ol>
+        <li>The browser sends the selected proven mitigation pattern and target-policy context to <code>POST /invoke</code>. API keys remain on the server.</li>
+        <li>The service first checks target scope, control-class compatibility, and the current policy snapshot. Requests that fail here do not consume an LLM call.</li>
+        <li>For an eligible request in <code>RUN_MODE=live</code>, the service sends the discriminator, pattern summary, target syntax requirements, and policy summary to AT&amp;T Inference's OpenAI-compatible <code>/chat/completions</code> endpoint.</li>
+        <li>The model must return a structured candidate. The service parses it and then performs deterministic syntax validation and policy-conflict checks.</li>
+        <li>Only a candidate that passes those non-LLM gates receives <span class="state translated">translated</span>. This demo generates a candidate; it never deploys a rule to Akamai, a firewall, or SentinelOne.</li>
+      </ol>
+
+      <h3>How fixture mode differs</h3>
+      <p>With <code>RUN_MODE=fixture</code>, the service skips AT&amp;T Inference completely. It uses local, deterministic per-target templates for the same sample patterns, then runs the same syntax and conflict gates. This mode is best for offline demos, repeatable tests, and showing terminal-state behavior without cost, network access, or model variability.</p>
+      <p><strong>Choosing a mode:</strong> use live mode when you want to demonstrate model-assisted rule construction and the response says <code>LLM invoked: yes</code>. Use fixture mode when you want the exact same output on every run. In both modes, review candidates before deployment and keep the vendor remediation/patch process in place.</p>
     </div>
   </details>
 
   <div class="mode-toggle">
     <button id="formModeBtn" class="mode-btn active">Form Mode</button>
     <button id="jsonModeBtn" class="mode-btn">JSON Mode</button>
+    <a class="demo-page-link" href="/demo.html">Team Demo Guide →</a>
   </div>
 
   <div class="layout">

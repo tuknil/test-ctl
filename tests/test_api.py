@@ -41,6 +41,12 @@ def test_health_ok():
     assert resp.json() == {"status": "ok"}
 
 
+def test_readiness_ok_for_fixture_mode():
+    resp = client.get("/ready")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ready"}
+
+
 def test_schema_names_capability_and_terminal_states():
     resp = client.get("/schema")
     assert resp.status_code == 200
@@ -48,6 +54,15 @@ def test_schema_names_capability_and_terminal_states():
     assert data["capability"] == "control-translation"
     assert "translated" in data["terminal_states"]
     assert "akamai-waf" in data["supported_adapters"]
+    assert data["inference"]["execution_mode"] == "fixture"
+
+
+def test_inference_status_never_returns_credentials():
+    resp = client.get("/inference")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["execution_mode"] == "fixture"
+    assert "api_key" not in data
 
 
 def test_invoke_returns_result_envelope():
@@ -58,6 +73,8 @@ def test_invoke_returns_result_envelope():
     data = resp.json()
     assert data["terminal_state"] == "translated"
     assert data["structured_result"]["primary_candidate"] is not None
+    assert data["inference"]["execution_mode"] == "fixture"
+    assert data["inference"]["llm_invoked"] is False
 
 
 def test_get_run_returns_recorded_result():
