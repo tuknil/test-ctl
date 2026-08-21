@@ -22,7 +22,10 @@ def _request_body(target_technology: str, context_id: str) -> dict:
                     "Block requests whose Content-Type header contains "
                     "OGNL/EL expression syntax."
                 ),
-                "proof_record_ids": ["mitigation-check-result:CVE-EXAMPLE:3"],
+                "proof_record_ids": [
+                    "mitigation-check-result:CVE-EXAMPLE:3",
+                    "bypass-validation-result:CVE-EXAMPLE:3",
+                ],
             },
             "target_context": {
                 "target_technology": target_technology,

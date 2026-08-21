@@ -41,3 +41,19 @@ def test_request_rejects_malformed_input():
 def test_proven_mitigation_pattern_requires_fields():
     with pytest.raises(ValidationError):
         ProvenMitigationPattern(proven_pattern_id="only-id")
+
+
+def test_proven_mitigation_pattern_requires_both_proof_capabilities():
+    with pytest.raises(ValidationError):
+        ProvenMitigationPattern(
+            proven_pattern_id="proven-pattern:test:waf:1",
+            vulnerability_id="CVE-TEST",
+            selected_control_class="waf",
+            discriminator_id="discriminator:test:1",
+            discriminator_description="Suspicious HTTP header value",
+            pattern_summary="Block the suspicious HTTP header value.",
+            proof_record_ids=[
+                "mitigation-check-result:test:1",
+                "mitigation-check-result:test:2",
+            ],
+        )

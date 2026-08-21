@@ -128,3 +128,170 @@ ul.compact {
   color: var(--muted);
   font-size: 13px;
 }
+
+.selection-explanation {
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid rgba(79, 140, 255, 0.4);
+  border-left: 4px solid var(--accent);
+  border-radius: 6px;
+  background: rgba(79, 140, 255, 0.07);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.selection-explanation h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.selection-explanation p {
+  margin: 5px 0;
+  color: var(--muted);
+}
+
+.selection-explanation strong {
+  color: var(--text);
+}
+
+.selection-explanation .selection-warning {
+  color: var(--warn);
+}
+
+.selection-explanation code {
+  color: var(--text);
+  word-break: break-word;
+}
+
+.mode-toggle {
+  margin-bottom: 16px;
+  display: flex;
+  gap: 8px;
+}
+
+.mode-btn {
+  width: auto;
+  padding: 8px 16px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  cursor: pointer;
+  font-weight: 500;
+}
+
+.mode-btn.active {
+  background: var(--accent);
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.json-input-panel textarea {
+  width: 100%;
+  padding: 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: #10131a;
+  color: var(--text);
+  font-family: monospace;
+  font-size: 12px;
+  resize: vertical;
+}
+
+.json-output-panel h3 {
+  font-size: 14px;
+  margin: 0 0 8px 0;
+}
+
+.json-output-panel pre {
+  max-height: 500px;
+  overflow: auto;
+}
+
+.copy-btn {
+  width: auto;
+  margin-top: 10px;
+  padding: 6px 14px;
+  font-size: 12px;
+}
+
+/* Help section */
+.help-section {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 16px;
+  padding: 12px 16px;
+}
+
+.help-section summary {
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--accent);
+}
+
+.help-section summary:hover {
+  text-decoration: underline;
+}
+
+.help-content {
+  margin-top: 12px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.help-content h3 {
+  font-size: 13px;
+  margin: 16px 0 8px 0;
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 4px;
+}
+
+.help-content h3:first-child {
+  margin-top: 0;
+}
+
+.help-content p {
+  margin: 8px 0;
+  color: var(--muted);
+}
+
+.help-content code {
+  background: #10131a;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.help-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 8px 0;
+}
+
+.help-table td {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.help-table td:first-child {
+  width: 200px;
+  white-space: nowrap;
+}
+
+.state {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.state.translated { background: rgba(53, 192, 122, 0.15); color: var(--ok); }
+.state.scope-declined { background: rgba(224, 165, 44, 0.15); color: var(--warn); }
+.state.insufficient-context { background: rgba(224, 165, 44, 0.15); color: var(--warn); }
+.state.cannot-express { background: rgba(224, 165, 44, 0.15); color: var(--warn); }
+.state.malfunction { background: rgba(224, 90, 90, 0.15); color: var(--err); }

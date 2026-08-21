@@ -14,10 +14,63 @@
     service is running in live mode.
   </p>
 
+  <details class="help-section">
+    <summary>ℹ️ How it works & what each example means</summary>
+    <div class="help-content">
+      <h3>What this service does</h3>
+      <p>Takes a <strong>proven mitigation pattern</strong> (from upstream defense-generation) and translates it into a <strong>control-specific rule</strong> for a target technology (Akamai WAF, firewall, or EDR).</p>
+
+      <h3>Where the input comes from</h3>
+      <p><code>defense-generation: candidate-produced</code> → <code>mitigation-check: blocked</code> → <code>bypass-validation: no-bypass-found</code> (with at least one executed attempt) → orchestration promotes the candidate to a <code>ProvenMitigationPattern</code>. This service validates the two proof references but does not rerun either proof.</p>
+      <p><strong>Demo note:</strong> the CVE facts below are real, but IDs ending in <code>fixture-1</code> are illustrative proof lineage. This repository did not execute those upstream proof runs.</p>
+
+      <h3>Terminal States</h3>
+      <table class="help-table">
+        <tr><td class="state translated">translated</td><td>Success — a candidate rule was generated and passed this service's syntax and conflict checks.</td></tr>
+        <tr><td class="state scope-declined">scope-declined</td><td>Rejected — target is unsupported, input is invalid, or there's a policy conflict.</td></tr>
+        <tr><td class="state insufficient-context">insufficient-context</td><td>Missing data — no policy snapshot available for the target context.</td></tr>
+        <tr><td class="state cannot-express">cannot-express</td><td>The target technology cannot represent this mitigation pattern.</td></tr>
+        <tr><td class="state malfunction">malfunction</td><td>Internal error — provider failure or result assembly issue.</td></tr>
+      </table>
+
+      <h3>Example Requests (JSON Mode)</h3>
+      <table class="help-table">
+        <tr><td><strong>CVE-2017-5638 → Akamai WAF</strong></td><td>Real Apache Struts vulnerability behavior: malicious Content-Type values can trigger OGNL evaluation in affected Jakarta Multipart parser versions. Produces an Akamai custom-rule candidate matching OGNL markers in that header. Expected: <span class="state translated">translated</span>. This virtual patch does not replace the vendor upgrade.</td></tr>
+        <tr><td><strong>CVE-2021-44228 → Akamai WAF</strong></td><td>Log4Shell request-layer example. Produces a narrower Akamai rule matching direct <code>${jndi:</code> syntax in User-Agent. Obfuscation or other input locations can bypass this narrow rule; upgrading Log4j remains required.</td></tr>
+        <tr><td><strong>CVE-2021-44228 → SentinelOne</strong></td><td>Practical behavioral detection: alert when Java spawns a shell or download utility. This can detect suspicious post-exploitation behavior but does not prove Log4Shell attribution.</td></tr>
+        <tr><td><strong>CVE-2023-27997 → Firewall</strong></td><td>Emergency isolation for an affected FortiOS SSL-VPN listener: deny untrusted inbound TCP/443 to the gateway. This interrupts VPN availability and is only a temporary compensating control while patching.</td></tr>
+        <tr><td><strong>Firewall: mgmt port block</strong></td><td>Block inbound traffic to management port. Expected: <span class="state scope-declined">scope-declined</span> (policy conflict with existing rule)</td></tr>
+        <tr><td><strong>EDR: process chain</strong></td><td>SentinelOne rule for process spawn chain detection. Tests the EDR adapter.</td></tr>
+        <tr><td><strong>Missing policy context</strong></td><td>Uses an unknown policy context ID. Expected: <span class="state insufficient-context">insufficient-context</span></td></tr>
+        <tr><td><strong>Unsupported technology</strong></td><td>Uses a fake target technology. Expected: <span class="state scope-declined">scope-declined</span> (invalid input)</td></tr>
+      </table>
+
+      <h3>Input → Output Flow</h3>
+      <p><code>proven_pattern</code> + <code>target_context</code> → Translation Engine → Syntax Validation → Conflict Check → <code>ControlTranslationResult</code></p>
+    </div>
+  </details>
+
+  <div class="mode-toggle">
+    <button id="formModeBtn" class="mode-btn active">Form Mode</button>
+    <button id="jsonModeBtn" class="mode-btn">JSON Mode</button>
+  </div>
+
   <div class="layout">
     <div class="panel">
       <label for="pattern">Proven mitigation pattern</label>
       <select id="pattern">
+        <option value="proven-pattern:CVE-2017-5638:waf:fixture-1">
+          CVE-2017-5638 — Struts Content-Type OGNL (waf, real CVE demo)
+        </option>
+        <option value="proven-pattern:CVE-2021-44228:waf:fixture-1">
+          CVE-2021-44228 — Log4Shell JNDI in User-Agent (waf)
+        </option>
+        <option value="proven-pattern:CVE-2021-44228:edr:fixture-1">
+          CVE-2021-44228 — Java child-process behavior (edr)
+        </option>
+        <option value="proven-pattern:CVE-2023-27997:firewall:fixture-1">
+          CVE-2023-27997 — isolate FortiOS SSL-VPN (firewall)
+        </option>
         <option value="proven-pattern:CVE-EXAMPLE:waf:3">
           CVE-EXAMPLE — OGNL/EL in Content-Type (waf)
         </option>
@@ -40,14 +93,44 @@
       <select id="context">
         <option value="akamai-policy:example:rev-17">akamai-policy:example:rev-17</option>
         <option value="firewall-policy:example:rev-4">firewall-policy:example:rev-4</option>
+        <option value="firewall-policy:dmz:rev-1">firewall-policy:dmz:rev-1</option>
+        <option value="edr-policy:example:rev-1">edr-policy:example:rev-1</option>
         <option value="unknown-context:none">unknown-context:none (no fixture snapshot)</option>
       </select>
+
+      <section class="selection-explanation" id="formExplanation" aria-live="polite"></section>
 
       <button id="submit">Translate</button>
     </div>
 
+    <div class="panel json-input-panel" id="jsonInputPanel" style="display:none;">
+      <label for="exampleSelect">Load example</label>
+      <select id="exampleSelect">
+        <option value="">-- Select an example --</option>
+        <option value="cve-2017-5638-akamai">CVE-2017-5638 → Akamai WAF (real CVE demo)</option>
+        <option value="cve-2021-44228-akamai">CVE-2021-44228 → Akamai WAF (narrow virtual patch)</option>
+        <option value="cve-2021-44228-edr">CVE-2021-44228 → SentinelOne (behavior detection)</option>
+        <option value="cve-2023-27997-firewall">CVE-2023-27997 → Firewall (emergency isolation)</option>
+        <option value="waf-translated">WAF: OGNL/EL block (translated)</option>
+        <option value="firewall-conflict">Firewall: mgmt port block (scope-declined)</option>
+        <option value="edr-stub">EDR: process chain (edr-s1)</option>
+        <option value="missing-context">Missing policy context (insufficient-context)</option>
+        <option value="unsupported-tech">Unsupported technology (scope-declined)</option>
+      </select>
+      <section class="selection-explanation" id="jsonExplanation" aria-live="polite"></section>
+      <label for="jsonInput">Request JSON</label>
+      <textarea id="jsonInput" rows="18" placeholder='Paste your request JSON here...'></textarea>
+      <button id="submitJson">Send JSON</button>
+    </div>
+
     <div class="panel result-card" id="result">
       <p class="empty">Submit a request to see the result here.</p>
+    </div>
+
+    <div class="panel json-output-panel" id="jsonOutputPanel" style="display:none;">
+      <h3>Response JSON</h3>
+      <pre id="jsonOutput">Submit a request to see the JSON response here.</pre>
+      <button id="copyJson" class="copy-btn">Copy JSON</button>
     </div>
   </div>
 

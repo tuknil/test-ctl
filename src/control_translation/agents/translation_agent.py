@@ -70,6 +70,16 @@ class FixtureTranslationDoer:
         snapshot: PolicySnapshot | None,
     ) -> TranslationProposal:
         if target_technology == "akamai-waf":
+            if pattern.vulnerability_id == "CVE-2021-44228":
+                header = "user-agent"
+                values = ["*${jndi:*"]
+                tags = ["JNDI", "Log4Shell", pattern.vulnerability_id]
+                label = "narrower"
+            else:
+                header = "content-type"
+                values = ["*%{*", "*${*"]
+                tags = ["OGNL", "EL", pattern.vulnerability_id]
+                label = "equivalent"
             content = json.dumps(
                 {
                     "name": f"block-{pattern.vulnerability_id.lower()}",
@@ -79,55 +89,67 @@ class FixtureTranslationDoer:
                         {
                             "type": "requestHeaderValueMatch",
                             "positiveMatch": True,
-                            "header": "content-type",
-                            "valueCase": False,
-                            "valueWildcard": True,
-                            "value": ["text/xml", "application/xml"],
-                        },
-                        {
-                            "type": "argsPostXMLMatch",
-                            "positiveMatch": True,
+                            "header": header,
                             "valueCase": True,
                             "valueWildcard": True,
-                            "value": ["*%{*", "*${*"],
+                            "value": values,
                         },
                     ],
-                    "tag": ["OGNL", "EL", pattern.vulnerability_id],
+                    "tag": tags,
                 },
                 indent=2,
             )
-            label = "equivalent"
             limitations = [
                 "Candidate is a template, not verified against a real Akamai tenant.",
+                "Header-only matching can miss encoded or obfuscated variants and other input locations.",
+                "This virtual patch does not replace upgrading the vulnerable product.",
                 "Action (deny/alert) is assigned separately when the rule is "
                 "attached to a security policy; recommended action: deny.",
             ]
         elif target_technology == "firewall-generic":
+            if pattern.vulnerability_id == "CVE-2023-27997":
+                destination = "fortios-ssl-vpn-gateway"
+                service = "tcp-443"
+            else:
+                destination = "mgmt-server"
+                service = "tcp-8443"
             content = (
                 f'set rulebase security rules "block-{pattern.vulnerability_id.lower()}" '
-                "from untrust to trust source any destination mgmt-server "
-                "application any service tcp-8443 action deny"
+                f"from untrust to trust source any destination {destination} "
+                f"application any service {service} action deny"
             )
             label = "narrower"
             limitations = [
                 "Candidate is a template, not verified against a real PAN-OS tenant.",
-                "Referenced address/service objects (mgmt-server, tcp-8443) must "
+                f"Referenced address/service objects ({destination}, {service}) must "
                 "exist and the change must be committed before it takes effect.",
+                "Network isolation can interrupt legitimate service and does not replace vendor updates.",
             ]
         elif target_technology == "edr-s1":
+            if pattern.vulnerability_id == "CVE-2021-44228":
+                s1ql = (
+                    "EventType = 'Process Creation' AND "
+                    "SrcProcName ContainsCIS 'java' AND "
+                    "TgtProcName In Contains Anycase "
+                    "('sh','bash','cmd.exe','powershell.exe','curl','wget','certutil.exe')"
+                )
+                severity = "High"
+            else:
+                s1ql = (
+                    "EventType = 'Process Creation' AND "
+                    "SrcProcName ContainsCIS 'httpd' AND "
+                    "TgtProcName In Contains Anycase ('sh','bash','cmd.exe')"
+                )
+                severity = "Medium"
             content = json.dumps(
                 {
                     "data": {
                         "name": f"detect-{pattern.vulnerability_id.lower()}",
                         "description": pattern.pattern_summary,
-                        "severity": "Medium",
+                        "severity": severity,
                         "queryType": "events",
                         "queryLang": "2.0",
-                        "s1ql": (
-                            "EventType = 'Process Creation' AND "
-                            "SrcProcName ContainsCIS 'httpd' AND "
-                            "TgtProcName In Contains Anycase ('sh','bash','cmd.exe')"
-                        ),
+                        "s1ql": s1ql,
                         "expirationMode": "Permanent",
                         "networkQuarantine": False,
                         "treatAsThreat": "UNDEFINED",
@@ -139,6 +161,7 @@ class FixtureTranslationDoer:
             label = "exact"
             limitations = [
                 "Candidate is a template, not verified against a real S1 console.",
+                "Behavioral detections can produce false positives and do not prove exploit attribution.",
                 "Defaults to alert-only (treatAsThreat=UNDEFINED, "
                 "networkQuarantine=false); kill/quarantine is an explicit opt-in.",
                 "STAR is cloud-only and requires an authenticated console token.",
