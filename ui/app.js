@@ -159,23 +159,94 @@ const PATTERN_EXPLANATIONS = {
 };
 
 function renderSelectionExplanation(container, info, target, context, controlClass = "control") {
+  container.textContent = "";
+
   if (!info) {
-    container.innerHTML = '<p>Select an example to see what it demonstrates.</p>';
+    const p = document.createElement("p");
+    p.textContent = "Select an example to see what it demonstrates.";
+    container.appendChild(p);
     return;
   }
+
   const targetMismatch = target && target !== info.target;
   const contextMismatch = context && context !== info.context;
   const mismatch = targetMismatch || contextMismatch;
-  container.innerHTML = `
-    <h3>What this selection demonstrates</h3>
-    <p><strong>${info.title}</strong></p>
-    <p><strong>Generated control:</strong> ${info.translation}</p>
-    <p><strong>Expected result:</strong> <span class="state ${info.expected.split(" ")[0]}">${info.expected}</span></p>
-    <p><strong>Why this target:</strong> <code>${info.target}</code> can express the selected <code>${controlClass}</code> pattern.</p>
-    <p><strong>Policy snapshot:</strong> <code>${context || info.context}</code> is read to check for obvious conflicts.</p>
-    <p class="selection-warning"><strong>Important:</strong> ${info.caveat}</p>
-    ${mismatch ? '<p class="selection-warning"><strong>Selection mismatch:</strong> The target or policy context differs from the recommended values. The request may be declined or lack context.</p>' : ""}
-  `;
+
+  const h3 = document.createElement("h3");
+  h3.textContent = "What this selection demonstrates";
+  container.appendChild(h3);
+
+  const titleP = document.createElement("p");
+  const titleStrong = document.createElement("strong");
+  titleStrong.textContent = info.title;
+  titleP.appendChild(titleStrong);
+  container.appendChild(titleP);
+
+  const generatedP = document.createElement("p");
+  const generatedStrong = document.createElement("strong");
+  generatedStrong.textContent = "Generated control:";
+  generatedP.appendChild(generatedStrong);
+  generatedP.appendChild(document.createTextNode(" " + info.translation));
+  container.appendChild(generatedP);
+
+  const expectedP = document.createElement("p");
+  const expectedStrong = document.createElement("strong");
+  expectedStrong.textContent = "Expected result:";
+  expectedP.appendChild(expectedStrong);
+  expectedP.appendChild(document.createTextNode(" "));
+  const expectedSpan = document.createElement("span");
+  expectedSpan.className = `state ${info.expected.split(" ")[0]}`;
+  expectedSpan.textContent = info.expected;
+  expectedP.appendChild(expectedSpan);
+  container.appendChild(expectedP);
+
+  const whyP = document.createElement("p");
+  const whyStrong = document.createElement("strong");
+  whyStrong.textContent = "Why this target:";
+  whyP.appendChild(whyStrong);
+  whyP.appendChild(document.createTextNode(" "));
+  const targetCode = document.createElement("code");
+  targetCode.textContent = info.target;
+  whyP.appendChild(targetCode);
+  whyP.appendChild(document.createTextNode(" can express the selected "));
+  const controlCode = document.createElement("code");
+  controlCode.textContent = controlClass;
+  whyP.appendChild(controlCode);
+  whyP.appendChild(document.createTextNode(" pattern."));
+  container.appendChild(whyP);
+
+  const policyP = document.createElement("p");
+  const policyStrong = document.createElement("strong");
+  policyStrong.textContent = "Policy snapshot:";
+  policyP.appendChild(policyStrong);
+  policyP.appendChild(document.createTextNode(" "));
+  const contextCode = document.createElement("code");
+  contextCode.textContent = context || info.context;
+  policyP.appendChild(contextCode);
+  policyP.appendChild(document.createTextNode(" is read to check for obvious conflicts."));
+  container.appendChild(policyP);
+
+  const importantP = document.createElement("p");
+  importantP.className = "selection-warning";
+  const importantStrong = document.createElement("strong");
+  importantStrong.textContent = "Important:";
+  importantP.appendChild(importantStrong);
+  importantP.appendChild(document.createTextNode(" " + info.caveat));
+  container.appendChild(importantP);
+
+  if (mismatch) {
+    const mismatchP = document.createElement("p");
+    mismatchP.className = "selection-warning";
+    const mismatchStrong = document.createElement("strong");
+    mismatchStrong.textContent = "Selection mismatch:";
+    mismatchP.appendChild(mismatchStrong);
+    mismatchP.appendChild(
+      document.createTextNode(
+        " The target or policy context differs from the recommended values. The request may be declined or lack context.",
+      ),
+    );
+    container.appendChild(mismatchP);
+  }
 }
 
 function updateFormExplanation({ syncTarget = false } = {}) {
