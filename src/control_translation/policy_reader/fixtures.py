@@ -30,6 +30,24 @@ _FIXTURE_SNAPSHOTS: dict[tuple[str, str], PolicySnapshot] = {
             "fw-rule-11: allow outbound DNS",
         ],
     ),
+    ("firewall-generic", "firewall-policy:dmz:rev-1"): PolicySnapshot(
+        snapshot_id="policy-snapshot:firewall:dmz:rev-1",
+        target_technology="firewall-generic",
+        target_policy_context_id="firewall-policy:dmz:rev-1",
+        existing_rule_ids=["fw-rule-30"],
+        existing_rule_summaries=[
+            "fw-rule-30: deny deprecated administration service from untrust",
+        ],
+    ),
+    ("edr-s1", "edr-policy:example:rev-1"): PolicySnapshot(
+        snapshot_id="policy-snapshot:edr:example:rev-1",
+        target_technology="edr-s1",
+        target_policy_context_id="edr-policy:example:rev-1",
+        existing_rule_ids=["star-rule-20"],
+        existing_rule_summaries=[
+            "star-rule-20: detect suspicious script interpreter process chains",
+        ],
+    ),
 }
 
 

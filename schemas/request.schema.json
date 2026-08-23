@@ -64,6 +64,7 @@
           "items": {
             "type": "string"
           },
+          "minItems": 2,
           "title": "Proof Record Ids",
           "type": "array"
         }
@@ -74,7 +75,8 @@
         "selected_control_class",
         "discriminator_id",
         "discriminator_description",
-        "pattern_summary"
+        "pattern_summary",
+        "proof_record_ids"
       ],
       "title": "ProvenMitigationPattern",
       "type": "object"

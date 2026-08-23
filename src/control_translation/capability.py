@@ -34,6 +34,13 @@ from control_translation.terminal import (
 from control_translation.translation.engine import EngineFailure, EngineSuccess, translate
 
 
+_TARGET_CONTROL_CLASSES = {
+    "akamai-waf": "waf",
+    "firewall-generic": "firewall",
+    "edr-s1": "edr",
+}
+
+
 def _build_result(
     request: ControlTranslationRequest,
     terminal_state: TerminalState,
@@ -107,27 +114,54 @@ def invoke(
             OutcomeReasonCode.INVALID_INPUT,
             detail=f"Target technology '{target_technology}' is outside configured coverage.",
         )
-        return _envelope(result)
+        return _envelope(result, settings=settings, llm_invoked=False)
 
-    # Gate 2: insufficient-context -- no policy snapshot available and none
-    # was supplied by the caller.
-    snapshot = None
-    if request.current_policy_snapshot_id is None:
-        snapshot = policy_reader.read_snapshot(
-            target_technology, request.target_context.target_policy_context_id
+    expected_class = _TARGET_CONTROL_CLASSES[target_technology]
+    if pattern.selected_control_class.lower() != expected_class:
+        result = _build_result(
+            request,
+            TerminalState.SCOPE_DECLINED,
+            OutcomeReasonCode.INVALID_INPUT,
+            detail=(
+                f"Selected control class '{pattern.selected_control_class}' is not "
+                f"compatible with target technology '{target_technology}' "
+                f"(expected '{expected_class}')."
+            ),
         )
-        if snapshot is None:
-            result = _build_result(
-                request,
-                TerminalState.INSUFFICIENT_CONTEXT,
-                OutcomeReasonCode.INSUFFICIENT_POLICY_CONTEXT,
-                detail=(
-                    "No current policy snapshot available for "
-                    f"{target_technology}/{request.target_context.target_policy_context_id}; "
-                    "cannot safely translate without reading current policy."
-                ),
-            )
-            return _envelope(result)
+        return _envelope(result, settings=settings, llm_invoked=False)
+
+    # Gate 2: insufficient-context -- an ID alone is not policy content. Always
+    # resolve the current snapshot so conflict checks cannot be bypassed.
+    snapshot = policy_reader.read_snapshot(
+        target_technology, request.target_context.target_policy_context_id
+    )
+    if snapshot is None:
+        result = _build_result(
+            request,
+            TerminalState.INSUFFICIENT_CONTEXT,
+            OutcomeReasonCode.INSUFFICIENT_POLICY_CONTEXT,
+            detail=(
+                "No current policy snapshot available for "
+                f"{target_technology}/{request.target_context.target_policy_context_id}; "
+                "cannot safely translate without reading current policy."
+            ),
+        )
+        return _envelope(result, settings=settings, llm_invoked=False)
+
+    if (
+        request.current_policy_snapshot_id is not None
+        and request.current_policy_snapshot_id != snapshot.snapshot_id
+    ):
+        result = _build_result(
+            request,
+            TerminalState.SCOPE_DECLINED,
+            OutcomeReasonCode.INVALID_INPUT,
+            detail=(
+                f"Requested policy snapshot '{request.current_policy_snapshot_id}' "
+                f"does not match resolved snapshot '{snapshot.snapshot_id}'."
+            ),
+        )
+        return _envelope(result, settings=settings, llm_invoked=False)
 
     # Attempt translation via engine (agent doer + mechanical judge gates).
     engine_result = translate(
@@ -137,6 +171,8 @@ def invoke(
         adapter=adapter,
         doer=doer,
         snapshot=snapshot,
+        allow_narrower_translation=request.translation_policy.allow_narrower_translation,
+        allow_equivalent_translation=request.translation_policy.allow_equivalent_translation,
     )
 
     if isinstance(engine_result, EngineFailure):
@@ -154,7 +190,7 @@ def invoke(
                 OutcomeReasonCode.UNSUPPORTED_FEATURE,
                 detail=engine_result.detail,
             )
-        return _envelope(result)
+        return _envelope(result, settings=settings, llm_invoked=True)
 
     assert isinstance(engine_result, EngineSuccess)
     candidate = engine_result.candidate
@@ -171,7 +207,7 @@ def invoke(
             ),
             primary_candidate=candidate,
         )
-        return _envelope(result)
+        return _envelope(result, settings=settings, llm_invoked=True)
 
     result = _build_result(
         request,
@@ -186,10 +222,15 @@ def invoke(
             f"for {target_technology}."
         ),
     )
-    return _envelope(result)
+    return _envelope(result, settings=settings, llm_invoked=True)
 
 
-def _envelope(result: ControlTranslationResult) -> ResultEnvelope:
+def _envelope(
+    result: ControlTranslationResult,
+    *,
+    settings: Settings,
+    llm_invoked: bool,
+) -> ResultEnvelope:
     status = TERMINAL_STATE_TO_STATUS[result.terminal_state]
     return ResultEnvelope(
         run_id=str(uuid4()),
@@ -202,6 +243,13 @@ def _envelope(result: ControlTranslationResult) -> ResultEnvelope:
         confidence={},
         warnings=[],
         trace=[f"terminal_state={result.terminal_state.value}"],
+        inference={
+            "execution_mode": "live" if settings.is_live else "fixture",
+            "provider": settings.model_provider,
+            "model": settings.model_name,
+            "llm_invoked": llm_invoked and settings.is_live,
+            "credentials_configured": settings.credentials_configured,
+        },
     )
 
 

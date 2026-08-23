@@ -1,15 +1,15 @@
 {
   "input": {
     "proven_pattern": {
-      "proven_pattern_id": "proven-pattern:CVE-EXAMPLE:waf:3",
-      "vulnerability_id": "CVE-EXAMPLE",
+      "proven_pattern_id": "proven-pattern:CVE-2017-5638:waf:fixture-1",
+      "vulnerability_id": "CVE-2017-5638",
       "selected_control_class": "waf",
-      "discriminator_id": "discriminator:CVE-EXAMPLE:cmd-param",
-      "discriminator_description": "Blocks OGNL/EL expression syntax appearing in the Content-Type header.",
-      "pattern_summary": "Block requests whose Content-Type header contains OGNL/EL expression syntax.",
+      "discriminator_id": "discriminator:CVE-2017-5638:content-type-ognl",
+      "discriminator_description": "Blocks suspicious OGNL expression syntax in the HTTP Content-Type header used by attacks against the Apache Struts Jakarta Multipart parser.",
+      "pattern_summary": "Reject requests whose Content-Type header contains OGNL expression markers associated with CVE-2017-5638. This is a compensating control; upgrade Apache Struts to a fixed version.",
       "proof_record_ids": [
-        "mitigation-check-result:CVE-EXAMPLE:3",
-        "bypass-validation-result:CVE-EXAMPLE:3"
+        "mitigation-check-result:CVE-2017-5638:waf:fixture-1",
+        "bypass-validation-result:CVE-2017-5638:waf:fixture-1"
       ]
     },
     "target_context": {

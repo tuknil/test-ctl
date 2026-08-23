@@ -53,3 +53,49 @@ def test_build_translation_doer_returns_live_doer_in_live_mode():
     assert isinstance(doer, LiveTranslationDoer)
     # Do not call .propose() here: that would require a real API key and
     # network access. This test only verifies construction/wiring.
+
+
+def test_att_inference_settings_require_endpoint_and_key():
+    settings = Settings(
+        run_mode="live",
+        model_provider="att-inference",
+        model_name="att-approved-model",
+        att_inference_base_url="https://inference.example.att.com/v1",
+        att_inference_api_key="test-key",
+    )
+
+    assert settings.is_att_inference is True
+    assert settings.credentials_configured is True
+
+
+def test_att_inference_settings_report_missing_credentials():
+    settings = Settings(run_mode="live", model_provider="att-inference")
+    assert settings.credentials_configured is False
+    assert settings.ready is False
+    assert settings.configuration_errors
+
+
+def test_fixture_settings_need_no_model_configuration():
+    settings = Settings()
+    assert settings.run_mode == "fixture"
+    assert settings.ready is True
+
+
+def test_invalid_runtime_settings_are_not_ready():
+    settings = Settings(run_mode="unexpected", model_request_timeout_seconds=0)
+    assert settings.ready is False
+    assert "RUN_MODE must be either 'fixture' or 'live'." in settings.configuration_errors
+
+
+def test_build_translation_doer_returns_att_adapter_for_live_att_inference():
+    from control_translation.agents.translation_agent import AttInferenceTranslationDoer
+
+    settings = Settings(
+        run_mode="live",
+        model_provider="att-inference",
+        model_name="att-cso-gpt-4.1-mini",
+        att_inference_base_url="https://inference.example.att.com/v1",
+        att_inference_api_key="test-key",
+    )
+
+    assert isinstance(build_translation_doer(settings), AttInferenceTranslationDoer)

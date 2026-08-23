@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from control_translation.terminal import OutcomeReasonCode, TerminalState
 
@@ -32,7 +32,19 @@ class ProvenMitigationPattern(BaseModel):
     discriminator_id: str
     discriminator_description: str
     pattern_summary: str
-    proof_record_ids: list[str] = Field(default_factory=list)
+    proof_record_ids: list[str] = Field(min_length=2)
+
+    @field_validator("proof_record_ids")
+    @classmethod
+    def validate_proof_lineage(cls, value: list[str]) -> list[str]:
+        """Validate promotion lineage without re-performing upstream proof."""
+        if len(value) != len(set(value)):
+            raise ValueError("proof_record_ids must be unique")
+        if not any(item.startswith("mitigation-check-result:") for item in value):
+            raise ValueError("a mitigation-check result reference is required")
+        if not any(item.startswith("bypass-validation-result:") for item in value):
+            raise ValueError("a bypass-validation result reference is required")
+        return value
 
 
 class TargetContext(BaseModel):
@@ -192,3 +204,4 @@ class ResultEnvelope(BaseModel):
     confidence: dict[str, Any] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
     trace: list[str] = Field(default_factory=list)
+    inference: dict[str, Any] = Field(default_factory=dict)

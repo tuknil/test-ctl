@@ -46,6 +46,8 @@ def translate(
     adapter: TargetAdapter,
     doer: TranslationDoer,
     snapshot: PolicySnapshot | None,
+    allow_narrower_translation: bool = True,
+    allow_equivalent_translation: bool = True,
 ) -> EngineResult:
     # Mechanical gate 1: can this target technology plausibly express the
     # discriminator at all? Cheap check before spending an agent call.
@@ -76,6 +78,17 @@ def translate(
                 "Doer returned an invalid translation_label: "
                 f"{proposal.translation_label!r}"
             ),
+        )
+
+    if proposal.translation_label == "equivalent" and not allow_equivalent_translation:
+        return EngineFailure(
+            reason="unsupported-feature",
+            detail="Translation policy does not allow equivalent translations.",
+        )
+    if proposal.translation_label == "narrower" and not allow_narrower_translation:
+        return EngineFailure(
+            reason="unsupported-feature",
+            detail="Translation policy does not allow narrower translations.",
         )
 
     # Judge gate 1: syntax validation (mechanical).
