@@ -1,0 +1,81 @@
+name: CI - Python Build
+
+on:
+  schedule:
+    - cron: '00 02 * * *'
+
+  push:
+    branches: [ "main" ]
+
+  pull_request:
+    types: [ opened, synchronize, reopened ]
+    branches: [ "main" ]
+
+  workflow_dispatch:
+    ## This workflow can be manually triggered via the GitHub UI.
+    ## The inputs defined below determine the steps to execute.
+    ## The `default` value specifies the initial option displayed in the UI only.
+    inputs:
+      apps_to_build:
+        description: 'Application to Build (AUTO|ALL or empty for AUTO; use selected_projects for explicit selection)'
+        default: 'ALL'
+        required: true
+        type: string
+
+      selected_projects:
+        description: 'Comma-separated project keys to build (overrides apps_to_build when provided)'
+        default: ''
+        required: false
+        type: string
+
+      enable_sonar:
+        description: 'Enable Sonar'
+        default: true
+        required: true
+        type: boolean
+
+      enable_veracode_sast:
+        description: 'Enable VeraCode SAST'
+        default: true
+        required: true
+        type: boolean
+
+      enable_veracode_sca:
+        description: 'Enable VeraCode SCA'
+        default: true
+        required: true
+        type: boolean
+
+      enable_veracode_pipeline_scan:
+        description: 'Enable VeraCode Pipeline Scan'
+        default: true
+        required: false
+        type: boolean
+
+      enable_deployment:
+        description: 'Enable Deployment'
+        default: true
+        required: true
+        type: boolean
+
+      runner_group:
+        description: 'Runner group'
+        default: 'concordia-linux-cpu2-ram7gi'
+        required: false
+        type: string
+
+jobs:
+  run:
+    name: Run Python CI Workflow
+    secrets: inherit
+    uses: ATT-IDP/revup-workflows/.github/workflows/reusable_workflow_python_monorepo_ci.yaml@v5
+    with:
+      enable_sonar: ${{ inputs.enable_sonar }}
+      enable_veracode_sast: ${{ inputs.enable_veracode_sast }}
+      enable_veracode_sca: ${{ inputs.enable_veracode_sca }}
+      enable_veracode_pipeline_scan: ${{ inputs.enable_veracode_pipeline_scan }}
+      enable_deployment: ${{ inputs.enable_deployment }}
+      log_level: ${{ inputs.log_level }}
+      runner_group: ${{ inputs.runner_group }}
+      apps_to_build: ${{ github.event.inputs.apps_to_build }}
+      selected_projects: ${{ github.event.inputs.selected_projects }}

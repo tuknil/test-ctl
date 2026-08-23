@@ -1,0 +1,141 @@
+#+--------------------+
+#|    Build           |
+#+--------------------+
+build:
+  project-dir: '.'
+  install_dependencies: pip install .
+
+#+--------------------+
+#|    Sonar           |------------------------------------------------------------------------------------------------
+#+--------------------+
+sonar:
+  property: sonar-project.properties
+
+  properties:
+    sonar-debug: 'true'
+    sonar-sources: '.'
+    sonar-verbose: 'true'
+    sonar-inclusions: 'scripts/**/*.py'
+    sonar-exclusions: ''
+    sonar-qualitygate-wait: 'false' # if false -> Ignore Sonar QG check; if true -> enforce Sonar QG check.  RevUp waits for scan to finish either way.
+    sonar-python-coverage-reportPaths: 'coverage.xml'
+
+  ## Any other Sonar Analysis property keys can be added here
+  ## Refer to `https://docs.sonarqube.org/latest/analysis/analysis-parameters/`
+  additional-properties: >
+    -Dsonar.log_level='INFO'
+  domain: com.att.janus
+  name: Janus-control-translation
+
+#+--------------------+
+#|    SAST            |-----------------------------------------------------------------------------------------------
+#+--------------------+
+veracode-sast:
+
+  ## Code main language
+  language-type: 'python'
+
+  ## File types to be scanned
+  file-type-for-scan: "./scripts"
+
+  ## Maximum time (in minutes) to wait for Veracode scan completion.
+  ## Default: 120. Valid range: 1–359.
+  ## IMPORTANT: If increasing this value, also set 'timeout-minutes' on the
+  ## veracode-sast job in your workflow to a value >= this setting.
+  # scan-timeout-minutes: 120
+
+  ## VeraCode properties
+  properties:
+    ## The application name in Veracode
+    ## In case of MonoRepo project, please comment it
+    ## Veracode Profile Name should be as follow:
+    ## <mots-id>-<project-acronym>-<service-name>
+    {}
+    ## The criticality of the application
+    ## Valid values: VeryHigh, High, Medium, Low, VeryLow
+    ## Default: 'VeryHigh'
+    # criticality: 'VeryHigh'
+
+    ## Create a sandbox if not exists in Veracode
+    ## Default: false
+    # create-sandbox: true
+
+    ## The sandbox name if create-sandbox is set to true
+    ## Relevant only for Poly Repo project
+    ## Default: 'Default-Sandbox'
+    # sandbox-name: <sandbox name>
+
+    ## The debug mode
+    ## Default: false
+    # debug: true
+
+
+    #+--------------------+
+    #|  Veracode Pipeline |-----------------------------------------------------------------------------------------------
+    #|        Scan        |-----------------------------------------------------------------------------------------------
+    #+--------------------+
+
+    ## Pipeline scan uses variables from veracode-sast, in addition to below which can be used to reduce false positives
+    #veracode-pipeline-scan:
+    #timeout: 60
+    ## Wildcards can be used, for example: **/node_modules/**,coverage/**,dist/**
+    #file-types-to-exclude: ''
+    #max-retries: 5
+
+
+    #+--------------------+
+    #|    SCA             |-----------------------------------------------------------------------------------------------
+    #+--------------------+
+veracode-sca:
+
+  ## VeraCode SCA, Agent Based Scan,  workspace name
+  ## Usually its WS-<motsid>
+  {}
+  ## VeraCode SCA, Agent Based Scan, Project name
+  ## Each Workspace can have multiple projects
+  ## Set it to get customized name.
+  ## Relevant only for Poly Repo project
+  # name: '< Project Name >'
+
+  ## Enable SCA upload on PR events (default behavior is no upload on PR)
+  # upload-on-pr: 'true'
+
+
+
+
+  #+--------------------+
+  #|    Quality Gate    |------------------------------------------------------------------------------------------------
+  #+--------------------+
+qualitygate:
+  java-full-path: "/usr/bin/java"
+  project-path: "."
+  continues-improvement: 'false'
+
+#+--------------------+
+#|    Tests           |------------------------------------------------------------------------------------------------
+#+--------------------+
+tests:
+  package-name: '<package name>'
+  pythonpath: 'scripts'
+  pytest:
+    enable: '< true | false >'
+    result-file: 'report.html'
+  lint:
+    enable: '< true | false >'
+    tool: '< flake8 | turf | ...>'
+    command: 'How to invoke the selected linter'
+  tox:
+    enable: '< true | false >'
+
+#+--------------------+
+#|    Docker          |------------------------------------------------------------------------------------------------
+#+--------------------+
+docker:
+  dockerfile: 'Dockerfile'
+  build-path: '.'
+
+#+--------------------+
+#|    Deployment      |------------------------------------------------------------------------------------------------
+#+--------------------+
+deployment:
+  workflow-id: 'monorepo_cd.yaml'
