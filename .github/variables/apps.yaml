@@ -1,0 +1,7 @@
+#+--------------------+
+#|    Apps            |
+#+--------------------+
+apps:
+  control-translation:
+    service_directory: .
+trunk_name: main
