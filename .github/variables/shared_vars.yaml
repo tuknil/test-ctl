@@ -34,7 +34,7 @@ tools:
     version: '21'
     distribution: temurin
   python:
-    version: '3.10'
+    version: '3.12'
   helm:
     version: 'v3.12.1'
 
@@ -61,7 +61,7 @@ python:
 #+--------------------+
 docker:
   repository: 'apm0047460-dkr-group'
-  repository-path: '< repository path >'
+  repository-path: 'control-translation'
 
 #+--------------------+
 #|    Helm            |-------------------------------------------------------------------------------------------
