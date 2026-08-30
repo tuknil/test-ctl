@@ -79,8 +79,8 @@ jobs:
       apps_to_build: ${{ github.event.inputs.apps_to_build }}
       selected_projects: ${{ github.event.inputs.selected_projects }}
 
-  print-environment:
-    name: Print Environment Variables
+  call_devOp:
+    name: Call DevOps
     needs: run
     runs-on: concordia-linux-cpu2-ram7gi
     steps:
@@ -142,7 +142,9 @@ jobs:
                 images: [
                   {
                     name: 'janus-control-translation/control-translation',
-                    tag: `${{ steps.image-version.outputs.image_version }}`
+                    tag: `${{ steps.image-version.outputs.image_version }}`,
+                    aca: `${{ vars.ACA_CONTROL_TRANSLATION_NAME }}`,
+                    rg: `${{ vars.RESOURCE_GROUP }}`,
                   },
                 ]
               }
