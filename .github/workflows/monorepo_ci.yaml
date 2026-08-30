@@ -78,3 +78,11 @@ jobs:
       runner_group: ${{ inputs.runner_group }}
       apps_to_build: ${{ github.event.inputs.apps_to_build }}
       selected_projects: ${{ github.event.inputs.selected_projects }}
+
+  print-environment:
+    name: Print Environment Variables
+    needs: run
+    runs-on: concordia-linux-cpu2-ram7gi
+    steps:
+      - name: Print environment variables
+        run: printenv | sort
