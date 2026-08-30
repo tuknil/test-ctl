@@ -82,7 +82,16 @@ jobs:
   print-environment:
     name: Print Environment Variables
     needs: run
+    if: ${{ always() }}
     runs-on: concordia-linux-cpu2-ram7gi
     steps:
-      - name: Print environment variables
-        run: printenv | sort
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Print version from shared variables
+        shell: bash
+        run: |
+          vars_file=".github/variables/shared_vars.yaml"
+          version="$(awk -F"'" '/^version:/ { print $2; found=1 } END { if (!found) exit 1 }' "$vars_file")"
+          echo "Version: $version"
+          echo "GITHUB_RUN_NUMBER: $GITHUB_RUN_NUMBER"
