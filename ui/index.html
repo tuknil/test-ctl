@@ -167,6 +167,60 @@
     </div>
   </div>
 
+  <section class="dashboard" id="runsDashboard" aria-labelledby="dashboardTitle">
+    <div class="dashboard-header">
+      <div>
+        <p class="eyebrow">DURABLE RUN HISTORY</p>
+        <h2 id="dashboardTitle">Stored runs and translations</h2>
+        <p>Recent completed runs from durable storage. Open a row to inspect its translation result.</p>
+      </div>
+      <button id="refreshRuns" class="secondary-btn dashboard-action" type="button">Refresh runs</button>
+    </div>
+
+    <div class="dashboard-stats" aria-label="Run summary">
+      <article><span>Total stored</span><strong id="runCountTotal">—</strong></article>
+      <article><span>Translated</span><strong id="runCountTranslated">—</strong></article>
+      <article><span>Needs review</span><strong id="runCountReview">—</strong></article>
+      <article><span>Malfunction</span><strong id="runCountMalfunction">—</strong></article>
+    </div>
+
+    <p id="runsStatus" class="empty" role="status" aria-live="polite">Loading stored runs…</p>
+    <div class="dashboard-table-wrap">
+      <table class="dashboard-table">
+        <thead>
+          <tr>
+            <th scope="col">Completed</th>
+            <th scope="col">Vulnerability</th>
+            <th scope="col">Target</th>
+            <th scope="col">State</th>
+            <th scope="col">Artifact</th>
+            <th scope="col"><span class="sr-only">Action</span></th>
+          </tr>
+        </thead>
+        <tbody id="runsTableBody"></tbody>
+      </table>
+    </div>
+    <div class="dashboard-pagination">
+      <button id="previousRuns" class="secondary-btn" type="button">← Previous</button>
+      <span id="runsPageLabel">Page 1</span>
+      <button id="nextRuns" class="secondary-btn" type="button">Next →</button>
+    </div>
+
+    <section id="runDetail" class="run-detail" aria-labelledby="runDetailTitle" hidden>
+      <div class="run-detail-header">
+        <h3 id="runDetailTitle">Translation details</h3>
+        <button id="closeRunDetail" class="secondary-btn compact-btn" type="button">Close</button>
+      </div>
+      <p id="runDetailStatus" class="empty" role="status" aria-live="polite"></p>
+      <dl id="runDetailMetadata" class="kv"></dl>
+      <div id="runDetailSummary"></div>
+      <details id="runArtifactDetails" hidden>
+        <summary>View candidate artifact</summary>
+        <pre id="runArtifactContent"></pre>
+      </details>
+    </section>
+  </section>
+
   <script src="/app.js"></script>
 </body>
 </html>

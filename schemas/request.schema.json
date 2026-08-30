@@ -4,10 +4,27 @@
       "description": "Input contract for a single control-translation invocation.",
       "properties": {
         "proven_pattern": {
-          "$ref": "#/$defs/ProvenMitigationPattern"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProvenMitigationPattern"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Legacy direct-input form. Omit when authoritative upstream Databricks result references are supplied in the envelope."
         },
         "target_context": {
-          "$ref": "#/$defs/TargetContext"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TargetContext"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "translation_policy": {
           "$ref": "#/$defs/TranslationPolicy"
@@ -26,11 +43,80 @@
           "title": "Current Policy Snapshot Id"
         }
       },
-      "required": [
-        "proven_pattern",
-        "target_context"
-      ],
       "title": "ControlTranslationRequest",
+      "type": "object"
+    },
+    "DatabricksResultReference": {
+      "description": "Authoritative pointer to one upstream result in Unity Catalog.",
+      "properties": {
+        "system": {
+          "title": "System",
+          "type": "string"
+        },
+        "catalog": {
+          "title": "Catalog",
+          "type": "string"
+        },
+        "schema": {
+          "title": "Schema",
+          "type": "string"
+        },
+        "table": {
+          "title": "Table",
+          "type": "string"
+        },
+        "key": {
+          "title": "Key",
+          "type": "string"
+        }
+      },
+      "required": [
+        "system",
+        "catalog",
+        "schema",
+        "table",
+        "key"
+      ],
+      "title": "DatabricksResultReference",
+      "type": "object"
+    },
+    "ProofLoopRoutingMetadata": {
+      "description": "Orchestration-owned routing facts for the latest candidate cycle.",
+      "properties": {
+        "loop_exhausted": {
+          "title": "Loop Exhausted",
+          "type": "boolean"
+        },
+        "completed_iterations": {
+          "minimum": 1,
+          "title": "Completed Iterations",
+          "type": "integer"
+        },
+        "max_iterations": {
+          "minimum": 1,
+          "title": "Max Iterations",
+          "type": "integer"
+        },
+        "bypass_validation_terminal_state": {
+          "enum": [
+            "no-bypass-found",
+            "bypass-found"
+          ],
+          "title": "Bypass Validation Terminal State",
+          "type": "string"
+        },
+        "bypass_validation_result_ref": {
+          "$ref": "#/$defs/DatabricksResultReference"
+        }
+      },
+      "required": [
+        "loop_exhausted",
+        "completed_iterations",
+        "max_iterations",
+        "bypass_validation_terminal_state",
+        "bypass_validation_result_ref"
+      ],
+      "title": "ProofLoopRoutingMetadata",
       "type": "object"
     },
     "ProvenMitigationPattern": {
@@ -115,19 +201,31 @@
       "description": "Identifies the target control technology and policy context.",
       "properties": {
         "target_technology": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
           "description": "e.g. akamai-waf, firewall-generic, edr-s1",
-          "title": "Target Technology",
-          "type": "string"
+          "title": "Target Technology"
         },
         "target_policy_context_id": {
-          "title": "Target Policy Context Id",
-          "type": "string"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target Policy Context Id"
         }
       },
-      "required": [
-        "target_technology",
-        "target_policy_context_id"
-      ],
       "title": "TargetContext",
       "type": "object"
     },
@@ -152,11 +250,54 @@
       },
       "title": "TranslationPolicy",
       "type": "object"
+    },
+    "UpstreamResultReferences": {
+      "description": "Role-bound proof-loop records required for referenced invocation.",
+      "properties": {
+        "defense_generation": {
+          "$ref": "#/$defs/DatabricksResultReference"
+        },
+        "mitigation_check": {
+          "$ref": "#/$defs/DatabricksResultReference"
+        },
+        "bypass_validation": {
+          "$ref": "#/$defs/DatabricksResultReference"
+        }
+      },
+      "required": [
+        "defense_generation",
+        "mitigation_check",
+        "bypass_validation"
+      ],
+      "title": "UpstreamResultReferences",
+      "type": "object"
     }
   },
   "properties": {
     "input": {
       "$ref": "#/$defs/ControlTranslationRequest"
+    },
+    "upstream_result_refs": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/UpstreamResultReferences"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "routing_metadata": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ProofLoopRoutingMetadata"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     },
     "scope_config": {
       "additionalProperties": true,
@@ -166,6 +307,7 @@
     "request_id": {
       "anyOf": [
         {
+          "maxLength": 255,
           "type": "string"
         },
         {
@@ -174,6 +316,49 @@
       ],
       "default": null,
       "title": "Request Id"
+    },
+    "correlation_id": {
+      "anyOf": [
+        {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Correlation Id"
+    },
+    "idempotency_key": {
+      "anyOf": [
+        {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Idempotency Key"
+    },
+    "subject_record_revision_id": {
+      "anyOf": [
+        {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Authoritative orchestration subject-record revision, when available.",
+      "title": "Subject Record Revision Id"
     },
     "provenance": {
       "anyOf": [

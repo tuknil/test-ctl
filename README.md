@@ -16,11 +16,20 @@ Janus `control-translation` Capability Functional Specification (CFS).
 - CFS extraction: `docs/cfs-extraction.md`
 - POC design: `docs/poc-design.md`
 - Implementation / low-level design: `docs/LLD.md`
+- Orchestration integration contract: `docs/orchestration-integration.md`
+- Databricks persistence runbook: `docs/databricks-persistence.md`
 - Assumptions and follow-ups: `docs/assumptions-and-followups.md`
 
 ## What this service does
 
-- Accepts a proven mitigation pattern + target technology/context.
+- Accepts authoritative Databricks result references from orchestration or a
+  legacy direct proven-pattern input.
+- Fetches exact Defense Generation, Mitigation Check, and Bypass Validation
+  result IDs and validates correlation, subject, vulnerability, candidate,
+  and terminal-state lineage before translation.
+- Accepts both the validated (`no-bypass-found`) and ten-cycle PoC exhaustion
+  (`bypass-found` + `loop_exhausted`) routes without mislabeling an exhausted
+  candidate as bypass-cleared.
 - Reads a current policy snapshot (fixture-backed).
 - Calls a translation agent (doer) to propose a candidate rule/config.
 - Gates the proposal through deterministic syntax validation and conflict
@@ -39,10 +48,16 @@ flowchart LR
   A[CVE or security finding] --> B[Upstream defense generation]
   B --> C[Mitigation check]
   C --> D[Bypass validation]
-  D --> E[Proven mitigation pattern]
-  E --> F[POST /invoke]
+  D --> E{Orchestration route}
+  E -- no-bypass-found --> F[Validated route]
+  E -- bypass-found after 10 cycles --> P[PoC exhaustion route]
+  F --> Q[Exact Databricks result references]
+  P --> Q
+  Q --> R[Fetch and validate proof lineage]
+  R --> S[POST /invoke translation]
   G[Target technology and policy context] --> F
-  F --> H{Scope and context valid?}
+  G --> P
+  S --> H{Scope and context valid?}
   H -- No --> I[Typed declined result\nNo LLM call]
   H -- Yes --> J{RUN_MODE}
   J -- live --> K[LLM proposes candidate]
@@ -53,9 +68,10 @@ flowchart LR
   N --> O[Reviewable result\nNever auto-deployed]
 ```
 
-The CVE is not itself the control. An upstream workflow uses the CVE or
-finding to generate and prove a mitigation. This service receives that
-`ProvenMitigationPattern` and translates it to a selected target.
+The CVE is not itself the control. Orchestration runs the candidate proof
+loop and passes exact result references. This service reads those rows,
+assembles a lineage-checked internal pattern, and translates it to one target.
+It never selects a conveniently recent row and never changes upstream data.
 
 ## What is sent to the LLM
 
@@ -90,14 +106,15 @@ sequenceDiagram
 
 ## What is real vs. fixture-backed
 
-- **Real:** FastAPI HTTP surface, Pydantic contracts, terminal-state
-  routing, deterministic syntax/conflict gates, and (when `RUN_MODE=live`)
-  a real model call. AT&T Inference uses its OpenAI-compatible HTTP API;
-  other configured providers use Pydantic AI.
+- **Real:** FastAPI HTTP surface, Pydantic contracts, exact Databricks SQL
+  reads from three upstream result tables, cross-record lineage and route
+  validation, SQLite/Databricks result persistence, terminal-state routing,
+  deterministic syntax/conflict gates, and (when `RUN_MODE=live`) a real model
+  call. AT&T Inference uses its OpenAI-compatible HTTP API; other configured
+  providers use Pydantic AI.
 - **Fixture-backed:** policy snapshot reads (no live Akamai/Palo
-  Alto/SentinelOne API access), proven-mitigation-pattern samples (no real
-  upstream `defense-generation`/`mitigation-check`/`bypass-validation`
-  capabilities yet), and the default `FixtureTranslationDoer`.
+  Alto/SentinelOne API access), legacy direct-input samples, and the default
+  `FixtureTranslationDoer`.
 
 See `docs/assumptions-and-followups.md` for the full list and backlog.
 
@@ -139,6 +156,19 @@ model ID, or API key is hardcoded in application code or the image.
 | `AZURE_OPENAI_API_KEY` | Azure live | Secret-store reference/value |
 | `AZURE_OPENAI_API_VERSION` | Azure live | Provider API version |
 | `MODEL_REQUEST_TIMEOUT_SECONDS` | No | Model timeout, `1-300`; default `60` |
+| `PERSISTENCE_BACKEND` | No | `sqlite` (default) or `databricks` |
+| `DATABASE_PATH` | No | SQLite file path; default `./data/control_translation.db` |
+| `DATABRICKS_SERVER_HOSTNAME` | Databricks | SQL workspace hostname (without `https://`) |
+| `DATABRICKS_HTTP_PATH` | Databricks | SQL warehouse HTTP path |
+| `DATABRICKS_AUTH_TYPE` | Databricks | `oauth-m2m` (recommended/default) or `pat` for temporary local testing |
+| `DATABRICKS_TOKEN` | Databricks PAT | Personal access token; secret and never committed |
+| `DATABRICKS_CLIENT_ID` | Databricks OAuth | OAuth M2M service-principal application ID |
+| `DATABRICKS_CLIENT_SECRET` | Databricks OAuth | Secret-store injected OAuth secret; never committed |
+| `DATABRICKS_CATALOG` | Databricks | Unity Catalog catalog; defaults to `36889_janus_dev` |
+| `DATABRICKS_SCHEMA` | Databricks | Unity Catalog schema; defaults to `control_translation` |
+| `DATABRICKS_RESULTS_TABLE` | Databricks | Existing results table; defaults to `control_translation_results` |
+| `DEFAULT_TARGET_TECHNOLOGY` | No | PoC fallback target; caller value wins; default `akamai-waf` |
+| `DEFAULT_TARGET_POLICY_CONTEXT_ID` | No | PoC fallback policy context; caller value wins |
 | `HOST` | No | Bind host; default `0.0.0.0` |
 | `PORT` | No | Bind port; default `8000` |
 | `ENABLE_DOCS` | No | Enable `/docs`, `/redoc`, and `/openapi.json` |
@@ -192,6 +222,46 @@ translation stage, it correctly reports `LLM invoked: no` even in live mode.
 
 ## Invoke
 
+### Orchestration route (recommended)
+
+Orchestration calls `POST /invoke` after completing either accepted route:
+
+1. **Validated:** Mitigation Check is `blocked`, Bypass Validation is
+  `no-bypass-found`, and `loop_exhausted=false`.
+2. **PoC exhaustion:** Mitigation Check is `blocked`, the latest Bypass
+  Validation result is `bypass-found`, and orchestration supplies
+  `loop_exhausted=true`, `completed_iterations=10`, and `max_iterations=10`.
+
+Every referenced request includes `correlation_id`,
+`subject_record_revision_id`, all three `upstream_result_refs`, and
+`routing_metadata`. The routing Bypass Validation reference must exactly match
+the authoritative reference in `upstream_result_refs`.
+
+Complete request templates:
+
+- `examples/request-referenced-validated.json`
+- `examples/request-referenced-exhausted.json`
+
+The service reads exactly the referenced IDs from:
+
+- `36889_janus_dev.defense_generation.defense_generation_results`;
+- ``36889_janus_dev.`mitigation-check`.mitigation_check``;
+- `36889_janus_dev.bypass_validation.bypass_validation_results`.
+
+It requires one matching candidate, vulnerability, correlation, and subject
+revision across those rows. Missing or ambiguous lineage produces
+`insufficient-context`; the service does not guess or fall back to a recent
+row. See `docs/orchestration-integration.md` for the full contract, examples,
+response handling, retries, permissions, and source-column details.
+
+The response preserves the route in
+`structured_result.proof_loop_qualification`. For PoC exhaustion,
+`bypass_cleared` remains `false`, the latest `bypass-found` state/reference is
+retained, and the candidate contains an explicit not-bypass-cleared limitation.
+One invocation produces at most one primary candidate.
+
+### Legacy direct route
+
 Direct Python:
 
 ```python
@@ -217,11 +287,17 @@ curl -sS -X POST http://127.0.0.1:8000/invoke \
   -d @examples/request-translated.json | jq
 ```
 
-The full upstream object is accepted in every request; it is not tied to the
-bundled CVE examples. A future upstream service can call `/invoke` directly as
-long as it follows `schemas/request.schema.json`. Required proof lineage
-includes at least one `mitigation-check-result:` and one
-`bypass-validation-result:` reference.
+The direct proven-pattern route remains for fixtures and backward
+compatibility. Production orchestration should use exact references so Control
+Translation can retrieve and verify the authoritative records itself.
+
+The optional `correlation_id` is preserved across the durable result and
+response. Callers may also provide an `idempotency_key`; repeating the same
+validated request with that key returns the original run, while reusing the
+key for different input returns HTTP `409`. Orchestration may provide the
+optional `subject_record_revision_id`; it must identify the authoritative
+subject revision. Input, upstream references, routing metadata, scope, subject
+revision, and provenance participate in the semantic idempotency hash.
 
 ### Changing input or target output formats
 
@@ -263,9 +339,17 @@ decides whether that proposal is structurally acceptable.
 | `GET` | `/inference` | Safe mode/provider/model status; never returns keys/endpoints |
 | `GET` | `/schema` | Capability and supported-target summary |
 | `POST` | `/invoke` | Submit one translation request |
-| `GET` | `/runs/{run_id}` | Read a result stored in this process |
+| `GET` | `/v1/runs?limit=25&offset=0` | List safe, newest-first run summaries for the dashboard |
+| `GET` | `/runs/{run_id}` | Read a durable completion envelope by execution ID |
+| `GET` | `/v1/results/{result_id}` | Read the durable structured business result |
 | `GET` | `/docs` | Swagger UI when `ENABLE_DOCS=true` |
 | `GET` | `/demo.html` | Team-friendly flow and demo guide |
+
+The main UI includes a **Stored runs and translations** dashboard. It refreshes
+after a successful invocation, supports bounded pagination, and loads a full
+translation only when **View** is selected. The list response intentionally
+excludes request JSON and candidate artifact content; candidate content is
+available only in the on-demand run detail and should be treated as sensitive.
 
 ## Terminal states
 
@@ -296,6 +380,10 @@ docker run --rm -p 8000:8000 --env-file .env control-translation-service:local
 The image does not contain `.env`, tests, local caches, or credentials. Its
 startup command reads `HOST` and `PORT` from the environment. Its health check
 uses `/ready`, so an invalid live-model configuration does not enter service.
+The image runs as a non-root user. When `PERSISTENCE_BACKEND=sqlite`, use
+Docker Compose or mount a writable volume at `/app/data`; SQLite data must not
+be written into the container image layer. Azure deployments can instead use
+Databricks SQL as the shared backend.
 
 For an orchestrator, configure:
 
@@ -305,25 +393,29 @@ For an orchestrator, configure:
 4. TLS, authentication, authorization, rate limits, and request-size limits
    at the API gateway;
 5. centralized logs/metrics with input and candidate redaction rules;
-6. one process replica until durable run storage is implemented.
+6. `PERSISTENCE_BACKEND=databricks` for the Azure shared store, or one process
+  replica and a persistent volume while SQLite is configured.
 
 Use `deploy/DEPLOYMENT.md` as the authoritative DevOps runbook. The older
 `deploy/DEVOPS-HANDOFF.html` remains a presentation-oriented handoff.
 
 ## Release status and production limitations
 
-**Current status: deployable as an internal POC, not ready for unrestricted
-production or direct Internet exposure.** The API and model integration work,
-but the following controls are required before production use:
+**Current status: the Control Translation side of orchestration integration is
+implemented and ready for controlled end-to-end integration.** It fetches
+authoritative upstream Databricks rows, validates both accepted routes,
+translates, and persists its completion. It is not approved for unrestricted
+production or direct Internet exposure. The following controls remain:
 
 - Replace `FixturePolicyReader` with authenticated, read-only target-policy
   integrations. Current conflict decisions use bundled snapshots.
-- Connect a trusted upstream source and verify proof-record existence; today
-  the API validates lineage shape but does not retrieve the proof records.
 - Put the service behind enterprise authentication/authorization, TLS, rate
   limiting, request-size limits, and network allowlists.
-- Replace the in-memory `_RUNS` dictionary with a durable store if run lookup,
-  multiple workers, restarts, or horizontal scaling are required.
+- Provision and validate the deployment service principal's least-privilege
+  grants for all three source tables, the result table, and SQL warehouse.
+- Initially retain one writer replica because idempotency lookup in the existing
+  table is not protected by a dedicated unique constraint; add a concurrency
+  strategy before unrestricted horizontal scaling.
 - Add provider retry/backoff, circuit breaking, quotas, and production
   telemetry. The current model call has a configurable timeout but no retry.
 - Complete target-owner acceptance tests against non-production Akamai,

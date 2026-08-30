@@ -11,6 +11,9 @@ services:
     environment:
       - HOST=0.0.0.0
       - PORT=8000
+      - DATABASE_PATH=/app/data/control_translation.db
+    volumes:
+      - control-translation-data:/app/data
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready')"]
       interval: 30s
@@ -18,3 +21,6 @@ services:
       start_period: 10s
       retries: 3
     restart: unless-stopped
+
+volumes:
+  control-translation-data:

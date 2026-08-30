@@ -1,8 +1,17 @@
 {
   "capability": "control-translation",
+  "contract_id": "control-translation@1.0",
   "run_id": "example-run-id-2",
+  "result_id": "control-translation-result:CVE-EXAMPLE:akamai-waf:1",
   "status": "declined",
   "terminal_state": "insufficient-context",
+  "correlation_id": "example-correlation-id-2",
+  "result_ref": {
+    "system": "control-translation",
+    "type": "result-api",
+    "result_id": "control-translation-result:CVE-EXAMPLE:akamai-waf:1",
+    "href": "/v1/results/control-translation-result:CVE-EXAMPLE:akamai-waf:1"
+  },
   "structured_result": {
     "contract_id": "control-translation@1.0",
     "result_id": "control-translation-result:CVE-EXAMPLE:akamai-waf:1",

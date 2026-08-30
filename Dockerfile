@@ -12,6 +12,9 @@ WORKDIR /app
 # failures intentionally fail the image build rather than being ignored.
 RUN pip install --no-cache-dir uv
 
+# Run the service and its durable store without root privileges.
+RUN addgroup --system app && adduser --system --ingroup app app
+
 # Install dependencies first for better layer caching
 COPY pyproject.toml ./
 COPY src ./src
@@ -20,9 +23,14 @@ RUN uv pip install --system --no-cache .
 # Static assets are served by FastAPI and contain no runtime secrets.
 COPY ui ./ui
 
+RUN mkdir -p /app/data && chown -R app:app /app
+
 ENV PYTHONPATH=/app/src \
     HOST=0.0.0.0 \
-    PORT=8000
+    PORT=8000 \
+    DATABASE_PATH=/app/data/control_translation.db
+
+USER app
 
 EXPOSE 8000
 

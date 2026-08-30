@@ -88,6 +88,17 @@
         "outcome_reason": {
           "$ref": "#/$defs/OutcomeReason"
         },
+        "proof_loop_qualification": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProofLoopQualification"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "primary_candidate": {
           "anyOf": [
             {
@@ -120,6 +131,40 @@
         "prose_summary"
       ],
       "title": "ControlTranslationResult",
+      "type": "object"
+    },
+    "DatabricksResultReference": {
+      "description": "Authoritative pointer to one upstream result in Unity Catalog.",
+      "properties": {
+        "system": {
+          "title": "System",
+          "type": "string"
+        },
+        "catalog": {
+          "title": "Catalog",
+          "type": "string"
+        },
+        "schema": {
+          "title": "Schema",
+          "type": "string"
+        },
+        "table": {
+          "title": "Table",
+          "type": "string"
+        },
+        "key": {
+          "title": "Key",
+          "type": "string"
+        }
+      },
+      "required": [
+        "system",
+        "catalog",
+        "schema",
+        "table",
+        "key"
+      ],
+      "title": "DatabricksResultReference",
       "type": "object"
     },
     "EvidenceBinding": {
@@ -183,6 +228,11 @@
         "target_policy_context_id": {
           "title": "Target Policy Context Id",
           "type": "string"
+        },
+        "configured_poc_defaults_used": {
+          "default": false,
+          "title": "Configured Poc Defaults Used",
+          "type": "boolean"
         },
         "current_policy_snapshot_id": {
           "anyOf": [
@@ -345,6 +395,86 @@
       "title": "PrimaryCandidate",
       "type": "object"
     },
+    "ProofLoopQualification": {
+      "description": "Result qualification; loop exhaustion is not bypass clearance.",
+      "properties": {
+        "route": {
+          "enum": [
+            "validated",
+            "poc-exhaustion"
+          ],
+          "title": "Route",
+          "type": "string"
+        },
+        "bypass_cleared": {
+          "title": "Bypass Cleared",
+          "type": "boolean"
+        },
+        "loop_exhausted": {
+          "title": "Loop Exhausted",
+          "type": "boolean"
+        },
+        "completed_iterations": {
+          "title": "Completed Iterations",
+          "type": "integer"
+        },
+        "max_iterations": {
+          "title": "Max Iterations",
+          "type": "integer"
+        },
+        "bypass_validation_terminal_state": {
+          "enum": [
+            "no-bypass-found",
+            "bypass-found"
+          ],
+          "title": "Bypass Validation Terminal State",
+          "type": "string"
+        },
+        "bypass_validation_result_ref": {
+          "$ref": "#/$defs/DatabricksResultReference"
+        }
+      },
+      "required": [
+        "route",
+        "bypass_cleared",
+        "loop_exhausted",
+        "completed_iterations",
+        "max_iterations",
+        "bypass_validation_terminal_state",
+        "bypass_validation_result_ref"
+      ],
+      "title": "ProofLoopQualification",
+      "type": "object"
+    },
+    "ResultReference": {
+      "description": "Stable API reference to a durable capability result.",
+      "properties": {
+        "system": {
+          "default": "control-translation",
+          "title": "System",
+          "type": "string"
+        },
+        "type": {
+          "default": "result-api",
+          "title": "Type",
+          "type": "string"
+        },
+        "result_id": {
+          "title": "Result Id",
+          "type": "string"
+        },
+        "href": {
+          "title": "Href",
+          "type": "string"
+        }
+      },
+      "required": [
+        "result_id",
+        "href"
+      ],
+      "title": "ResultReference",
+      "type": "object"
+    },
     "Subject": {
       "properties": {
         "vulnerability_id": {
@@ -387,8 +517,17 @@
       "title": "Capability",
       "type": "string"
     },
+    "contract_id": {
+      "default": "control-translation@1.0",
+      "title": "Contract Id",
+      "type": "string"
+    },
     "run_id": {
       "title": "Run Id",
+      "type": "string"
+    },
+    "result_id": {
+      "title": "Result Id",
       "type": "string"
     },
     "status": {
@@ -397,6 +536,13 @@
     },
     "terminal_state": {
       "$ref": "#/$defs/TerminalState"
+    },
+    "correlation_id": {
+      "title": "Correlation Id",
+      "type": "string"
+    },
+    "result_ref": {
+      "$ref": "#/$defs/ResultReference"
     },
     "structured_result": {
       "$ref": "#/$defs/ControlTranslationResult"
@@ -435,11 +581,19 @@
       },
       "title": "Trace",
       "type": "array"
+    },
+    "inference": {
+      "additionalProperties": true,
+      "title": "Inference",
+      "type": "object"
     }
   },
   "required": [
+    "result_id",
     "status",
     "terminal_state",
+    "correlation_id",
+    "result_ref",
     "structured_result",
     "prose"
   ],
