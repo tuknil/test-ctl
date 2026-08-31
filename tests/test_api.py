@@ -82,6 +82,34 @@ def test_invoke_returns_result_envelope():
     assert data["correlation_id"]
 
 
+def test_invoke_logs_lifecycle_and_sanitized_contracts(caplog):
+    body = _request_body("akamai-waf", "akamai-policy:example:rev-17")
+    body.update(
+        {
+            "request_id": "request-diagnostic-log",
+            "correlation_id": "correlation-diagnostic-log",
+            "idempotency_key": "raw-idempotency-secret",
+        }
+    )
+
+    with caplog.at_level("INFO", logger="control_translation.api"):
+        response = client.post("/invoke", json=body)
+
+    assert response.status_code == 200
+    candidate_content = response.json()["structured_result"]["primary_candidate"][
+        "candidate_artifact"
+    ]["content_ref"]
+    assert "HTTP request started method=POST path=/invoke" in caplog.text
+    assert "Invocation accepted request_id=request-diagnostic-log" in caplog.text
+    assert "Invocation result source=capability" in caplog.text
+    assert "Invocation durably persisted" in caplog.text
+    assert "HTTP request completed method=POST path=/invoke status_code=200" in caplog.text
+    assert '"idempotency_key":"[REDACTED]"' in caplog.text
+    assert '"content_ref":"[REDACTED]"' in caplog.text
+    assert "raw-idempotency-secret" not in caplog.text
+    assert candidate_content not in caplog.text
+
+
 def test_get_run_returns_recorded_result():
     invoke_resp = client.post(
         "/invoke", json=_request_body("akamai-waf", "akamai-policy:example:rev-17")
@@ -165,6 +193,40 @@ def test_correlation_id_is_preserved():
     assert response.json()["correlation_id"] == "corr-api-test"
 
 
+def test_request_id_is_generated_before_persistence(monkeypatch):
+    captured = {}
+
+    class CapturingRepository:
+        def save_completed_run(self, request, *args, **kwargs):
+            captured["request_id"] = request.request_id
+
+    monkeypatch.setattr(api_module, "_REPOSITORY", CapturingRepository())
+
+    response = client.post(
+        "/invoke", json=_request_body("akamai-waf", "akamai-policy:example:rev-17")
+    )
+
+    assert response.status_code == 200
+    assert captured["request_id"]
+
+
+def test_caller_request_id_is_preserved_before_persistence(monkeypatch):
+    captured = {}
+
+    class CapturingRepository:
+        def save_completed_run(self, request, *args, **kwargs):
+            captured["request_id"] = request.request_id
+
+    monkeypatch.setattr(api_module, "_REPOSITORY", CapturingRepository())
+    body = _request_body("akamai-waf", "akamai-policy:example:rev-17")
+    body["request_id"] = "request-provided-by-caller"
+
+    response = client.post("/invoke", json=body)
+
+    assert response.status_code == 200
+    assert captured["request_id"] == "request-provided-by-caller"
+
+
 def test_idempotent_retry_returns_the_original_result():
     body = _request_body("akamai-waf", "akamai-policy:example:rev-17")
     body["idempotency_key"] = "idem-api-test"
@@ -192,10 +254,52 @@ def test_idempotency_key_reuse_with_different_input_returns_conflict():
     assert second.status_code == 409
 
 
-def test_persistence_failure_returns_redacted_service_unavailable(monkeypatch):
+def test_persistence_failure_returns_redacted_service_unavailable(
+    monkeypatch, caplog
+):
+    class FailingRepository:
+        def get_by_idempotency_key(self, key):
+            return None
+
+        def save_completed_run(self, *args, **kwargs):
+            raise PersistenceError("Databricks principal lacks MODIFY permission")
+
+    monkeypatch.setattr(api_module, "_REPOSITORY", FailingRepository())
+    body = _request_body("akamai-waf", "akamai-policy:example:rev-17")
+    body.update(
+        {
+            "request_id": "request-storage-failure",
+            "correlation_id": "correlation-storage-failure",
+            "idempotency_key": "secret-idempotency-value",
+        }
+    )
+
+    with caplog.at_level("ERROR", logger="control_translation.api"):
+        response = client.post("/invoke", json=body)
+
+    assert response.status_code == 503
+    detail = response.json()["detail"]
+    assert detail["message"] == "Durable result storage is unavailable."
+    assert detail["diagnostic"]["operation"] == "save-completed-run"
+    assert detail["diagnostic"]["request_id"] == "request-storage-failure"
+    assert detail["diagnostic"]["correlation_id"] == "correlation-storage-failure"
+    assert detail["diagnostic"]["error_type"] == "PersistenceError"
+    assert "MODIFY permission" in detail["diagnostic"]["error"]
+    assert detail["diagnostic"]["server_traceback_logged"] is True
+    assert "secret-idempotency-value" not in response.text
+    assert "save-completed-run" in caplog.text
+    assert "request-storage-failure" in caplog.text
+    assert "correlation-storage-failure" in caplog.text
+    assert "Databricks principal lacks MODIFY permission" in caplog.text
+    assert "Traceback (most recent call last)" in caplog.text
+    assert "secret-idempotency-value" not in caplog.text
+
+
+def test_ui_diagnostic_redacts_credential_assignments(monkeypatch):
     class FailingRepository:
         def save_completed_run(self, *args, **kwargs):
-            raise PersistenceError("sensitive database detail")
+            cause = RuntimeError("PERMISSION_DENIED api_key=do-not-display")
+            raise PersistenceError("storage write failed") from cause
 
     monkeypatch.setattr(api_module, "_REPOSITORY", FailingRepository())
 
@@ -203,9 +307,20 @@ def test_persistence_failure_returns_redacted_service_unavailable(monkeypatch):
         "/invoke", json=_request_body("akamai-waf", "akamai-policy:example:rev-17")
     )
 
+    diagnostic = response.json()["detail"]["diagnostic"]
     assert response.status_code == 503
-    assert response.json()["detail"] == "Durable result storage is unavailable."
-    assert "sensitive" not in response.text
+    assert diagnostic["error_type"] == "RuntimeError"
+    assert "api_key=[REDACTED]" in diagnostic["error"]
+    assert "do-not-display" not in response.text
+
+
+def test_ui_app_renders_diagnostic_log():
+    response = client.get("/app.js")
+
+    assert response.status_code == 200
+    assert "Diagnostic log" in response.text
+    assert "Root cause" in response.text
+    assert "server/container log" in response.text
 
 
 def test_readiness_fails_when_storage_is_unavailable(monkeypatch):

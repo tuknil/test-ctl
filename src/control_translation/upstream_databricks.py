@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Callable
 from typing import Any, Protocol
+from time import perf_counter
 
 from control_translation.contracts import DatabricksResultReference
 from control_translation.upstream import UpstreamRecord, decode_json_object
 
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9_-]+$")
+logger = logging.getLogger(__name__)
 
 
 class _Cursor(Protocol):
@@ -90,22 +93,59 @@ class DatabricksUpstreamResultResolver:
             raise ValueError("Unsupported upstream result-reference key")
         connection: _Connection | None = None
         cursor: _Cursor | None = None
+        started = perf_counter()
+        logger.info(
+            "Upstream Databricks read started shape=%s table=%s result_id=%s",
+            shape,
+            table_name,
+            reference.key,
+        )
         try:
             connection = self._connection_factory()
             cursor = connection.cursor()
             cursor.execute(operation, (reference.key,))
             row = cursor.fetchone()
+            logger.info(
+                "Upstream Databricks read completed shape=%s table=%s "
+                "result_id=%s found=%s duration_ms=%.2f",
+                shape,
+                table_name,
+                reference.key,
+                row is not None,
+                (perf_counter() - started) * 1000,
+            )
+        except Exception as exc:
+            logger.exception(
+                "Upstream Databricks read failed shape=%s table=%s result_id=%s "
+                "duration_ms=%.2f error_type=%s error_code=%s sql_state=%s",
+                shape,
+                table_name,
+                reference.key,
+                (perf_counter() - started) * 1000,
+                type(exc).__name__,
+                getattr(exc, "error_code", None) or "-",
+                getattr(exc, "sql_state", None) or "-",
+            )
+            raise
         finally:
             if cursor is not None:
                 try:
                     cursor.close()
                 except Exception:
-                    pass
+                    logger.warning(
+                        "Upstream Databricks cursor close failed table=%s",
+                        table_name,
+                        exc_info=True,
+                    )
             if connection is not None:
                 try:
                     connection.close()
                 except Exception:
-                    pass
+                    logger.warning(
+                        "Upstream Databricks connection close failed table=%s",
+                        table_name,
+                        exc_info=True,
+                    )
         if row is None:
             return None
         if shape == "defense":

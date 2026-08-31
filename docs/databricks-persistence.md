@@ -75,6 +75,11 @@ All SQL values use parameter markers. Catalog, schema, and table identifiers
 are restricted to letters, digits, and underscores before being quoted.
 Successful API completion is returned only after the Databricks write succeeds.
 
+The target table requires a non-null `request_id`. The API normalizes every
+invocation before hashing or persistence: it preserves a caller-supplied value
+or generates a UUID when the field is omitted. The same rule applies to
+`correlation_id`.
+
 ## Idempotency limitation
 
 No table migration is required for the initial integration. Idempotency lookup
@@ -91,9 +96,10 @@ a unique-key, lock, or orchestration-level serialization strategy is approved.
 1. Set non-secret values and inject the selected authentication secret.
 2. Deploy one replica behind the approved internal gateway.
 3. Confirm `GET /health` returns `200`.
-4. Confirm `GET /ready` returns `200`; a `503` is intentionally redacted.
-5. Submit one approved fixture invocation with unique `request_id`,
-   `correlation_id`, and `idempotency_key` values.
+4. Confirm `GET /ready` returns `200`. This confirms connection/read health,
+   not write compatibility.
+5. Submit one approved fixture invocation with a unique `idempotency_key` but
+   omit `request_id` to exercise server-side normalization.
 6. Confirm the response is present in `GET /v1/runs` and
    `GET /v1/results/{result_id}`.
 7. Confirm exactly one target-table row exists and its hash/size match
@@ -103,3 +109,13 @@ a unique-key, lock, or orchestration-level serialization strategy is approved.
 9. Reuse the key with changed semantic input and verify HTTP `409`.
 10. Review application and Databricks audit logs for secret or candidate-data
     leakage before promotion.
+
+For write failures, correlate the sanitized HTTP 503 diagnostic identifiers
+with container logs. The application logs the operation, table, SQL statement
+type, duration, parameter count, Databricks error metadata, and traceback, but
+never SQL parameter values or credentials.
+
+The previously observed error
+`DELTA_NOT_NULL_CONSTRAINT_VIOLATED: request_id` was an application
+normalization defect, not evidence of a bad token. A successful connection or
+`SELECT` does not prove that a row satisfies target-table constraints.

@@ -9,6 +9,7 @@ function gates and interprets.
 
 from __future__ import annotations
 
+import logging
 from uuid import uuid4
 
 from control_translation.adapters import get_adapter
@@ -41,6 +42,8 @@ from control_translation.upstream import (
     resolve_proof_loop,
 )
 
+
+logger = logging.getLogger(__name__)
 
 _TARGET_CONTROL_CLASSES = {
     "akamai-waf": "waf",
@@ -416,6 +419,13 @@ def invoke_envelope(
                 routing_metadata=envelope.routing_metadata,
             )
         except UpstreamResolutionError as exc:
+            logger.error(
+                "Upstream proof-loop resolution failed correlation_id=%s "
+                "subject_record_revision_id=%s",
+                envelope.correlation_id or "-",
+                envelope.subject_record_revision_id or "-",
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
             return _insufficient_context_envelope(
                 detail=str(exc),
                 settings=settings,

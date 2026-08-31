@@ -399,8 +399,35 @@ function renderResult(envelope) {
   `;
 }
 
-function renderError(message) {
-  resultEl.innerHTML = `<p class="empty">Error: ${message}</p>`;
+function renderError(error, httpStatus = null) {
+  const detail = error && typeof error === "object" ? error.detail : null;
+  const message = typeof detail === "string"
+    ? detail
+    : detail?.message || (typeof error === "string" ? error : "Request failed.");
+  const diagnostic = detail?.diagnostic;
+  const diagnosticHtml = diagnostic ? `
+    <section class="diagnostic-log" aria-label="Failure diagnostic log">
+      <h3>Diagnostic log</h3>
+      <div class="kv">
+        <dt>Time</dt><dd>${escapeHtml(new Date().toISOString())}</dd>
+        <dt>HTTP status</dt><dd>${escapeHtml(httpStatus ?? "unknown")}</dd>
+        <dt>Operation</dt><dd>${escapeHtml(diagnostic.operation ?? "unknown")}</dd>
+        <dt>Backend</dt><dd>${escapeHtml(diagnostic.backend ?? "unknown")}</dd>
+        <dt>Error type</dt><dd>${escapeHtml(diagnostic.error_type ?? "unknown")}</dd>
+        <dt>Request id</dt><dd>${escapeHtml(diagnostic.request_id ?? "not available")}</dd>
+        <dt>Correlation id</dt><dd>${escapeHtml(diagnostic.correlation_id ?? "not available")}</dd>
+        <dt>Run id</dt><dd>${escapeHtml(diagnostic.run_id ?? "not available")}</dd>
+        <dt>Result id</dt><dd>${escapeHtml(diagnostic.result_id ?? "not available")}</dd>
+      </div>
+      <label>Root cause</label>
+      <pre>${escapeHtml(diagnostic.error ?? "No additional detail was provided.")}</pre>
+      <p class="diagnostic-note">The complete traceback was written to the server/container log.</p>
+    </section>` : "";
+  resultEl.innerHTML = `
+    <h2>Request failed</h2>
+    <p class="error-message">${escapeHtml(message)}</p>
+    ${diagnosticHtml}
+  `;
 }
 
 submitBtn.addEventListener("click", async () => {
@@ -434,7 +461,7 @@ submitBtn.addEventListener("click", async () => {
     });
     const data = await resp.json();
     if (!resp.ok) {
-      renderError(JSON.stringify(data));
+      renderError(data, resp.status);
     } else {
       renderResult(data);
       loadRuns(0);

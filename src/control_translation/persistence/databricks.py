@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Callable
 from datetime import datetime, timezone
 from hashlib import sha256
 from threading import Lock
+from time import perf_counter
 from typing import Any, Protocol
 
 from control_translation.contracts import InvokeRequestEnvelope, ResultEnvelope, RunSummary
@@ -19,6 +21,7 @@ from control_translation.persistence.base import (
 )
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9_]+$")
+logger = logging.getLogger(__name__)
 
 
 class _Cursor(Protocol):
@@ -139,6 +142,10 @@ class DatabricksRunRepository:
             row = self._execute("SELECT 1", fetch="one")
             return row is not None and row[0] == 1
         except Exception:
+            logger.exception(
+                "Databricks storage healthcheck failed table=%s",
+                self._table_name,
+            )
             return False
 
     def save_completed_run(
@@ -362,26 +369,70 @@ class DatabricksRunRepository:
     ) -> Any:
         connection: _Connection | None = None
         cursor: _Cursor | None = None
+        statement_type = operation.lstrip().split(maxsplit=1)[0].upper()
+        parameter_count = len(parameters) if parameters is not None else 0
+        started = perf_counter()
+        logger.info(
+            "Databricks SQL started statement_type=%s table=%s fetch=%s "
+            "parameter_count=%s",
+            statement_type,
+            self._table_name,
+            fetch or "none",
+            parameter_count,
+        )
         try:
             connection = self._connection_factory()
             cursor = connection.cursor()
             cursor.execute(operation, parameters)
             if fetch == "one":
-                return cursor.fetchone()
-            if fetch == "all":
-                return cursor.fetchall()
-            return None
+                result = cursor.fetchone()
+            elif fetch == "all":
+                result = cursor.fetchall()
+            else:
+                result = None
+            logger.info(
+                "Databricks SQL completed statement_type=%s table=%s fetch=%s "
+                "duration_ms=%.2f",
+                statement_type,
+                self._table_name,
+                fetch or "none",
+                (perf_counter() - started) * 1000,
+            )
+            return result
+        except Exception as exc:
+            logger.exception(
+                "Databricks SQL failed statement_type=%s table=%s fetch=%s "
+                "parameter_count=%s duration_ms=%.2f error_type=%s "
+                "error_code=%s sql_state=%s",
+                statement_type,
+                self._table_name,
+                fetch or "none",
+                parameter_count,
+                (perf_counter() - started) * 1000,
+                type(exc).__name__,
+                getattr(exc, "error_code", None) or "-",
+                getattr(exc, "sql_state", None) or "-",
+            )
+            raise
         finally:
             if cursor is not None:
                 try:
                     cursor.close()
                 except Exception:
-                    pass
+                    logger.warning(
+                        "Databricks cursor close failed table=%s",
+                        self._table_name,
+                        exc_info=True,
+                    )
             if connection is not None:
                 try:
                     connection.close()
                 except Exception:
-                    pass
+                    logger.warning(
+                        "Databricks connection close failed table=%s",
+                        self._table_name,
+                        exc_info=True,
+                    )
 
 
 def _quote_identifier(value: str, label: str) -> str:

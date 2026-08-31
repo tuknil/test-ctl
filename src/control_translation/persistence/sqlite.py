@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 from datetime import datetime, timezone
@@ -16,6 +17,9 @@ from control_translation.persistence.base import (
     RunSummaryPage,
 )
 from control_translation.persistence.migrations import MIGRATIONS
+
+
+logger = logging.getLogger(__name__)
 
 
 class SQLiteRunRepository:
@@ -95,6 +99,10 @@ class SQLiteRunRepository:
             with self._connect() as connection:
                 return connection.execute("SELECT 1").fetchone()[0] == 1
         except (PersistenceError, OSError, sqlite3.Error):
+            logger.exception(
+                "SQLite storage healthcheck failed database=%s",
+                self._path,
+            )
             return False
 
     def save_completed_run(

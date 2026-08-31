@@ -219,6 +219,61 @@ def test_invalid_stored_completion_is_redacted_as_persistence_error():
         repository.get_result("result-id")
 
 
+def test_healthcheck_logs_failure_context_without_credentials(caplog):
+    def fail_connection():
+        raise RuntimeError("PERMISSION_DENIED: principal lacks table access")
+
+    repository = DatabricksRunRepository(
+        server_hostname="adb.example.azuredatabricks.net",
+        http_path="/sql/1.0/warehouses/example",
+        auth_type="pat",
+        token="secret-token-that-must-not-be-logged",
+        catalog="36889_janus_dev",
+        schema="control_translation",
+        table="control_translation_results",
+        connection_factory=fail_connection,
+    )
+
+    with caplog.at_level(
+        "ERROR", logger="control_translation.persistence.databricks"
+    ):
+        assert repository.healthcheck() is False
+
+    assert "Databricks storage healthcheck failed" in caplog.text
+    assert "control_translation_results" in caplog.text
+    assert "PERMISSION_DENIED" in caplog.text
+    assert "Traceback (most recent call last)" in caplog.text
+    assert "secret-token-that-must-not-be-logged" not in caplog.text
+
+
+def test_sql_failure_logs_metadata_without_parameter_values(caplog):
+    class FailingCursor(FakeCursor):
+        def execute(self, operation: str, parameters=None):
+            self.executions.append((operation, parameters))
+            raise RuntimeError("PERMISSION_DENIED: MODIFY is required")
+
+    class FailingConnection(FakeConnection):
+        def __init__(self):
+            self.cursor_instance = FailingCursor(None, [])
+            self.closed = False
+
+    repository = _repository(ConnectionQueue(None))
+    repository._initialized = True
+    repository._connection_factory = FailingConnection
+
+    with caplog.at_level(
+        "INFO", logger="control_translation.persistence.databricks"
+    ):
+        with pytest.raises(PersistenceError, match="idempotency state"):
+            repository.get_by_idempotency_key("raw-query-parameter-secret")
+
+    assert "statement_type=SELECT" in caplog.text
+    assert "parameter_count=1" in caplog.text
+    assert "PERMISSION_DENIED" in caplog.text
+    assert "error_type=RuntimeError" in caplog.text
+    assert "raw-query-parameter-secret" not in caplog.text
+
+
 def test_repository_factory_preserves_sqlite_default(tmp_path):
     repository = create_run_repository(Settings(database_path=str(tmp_path / "runs.db")))
     assert isinstance(repository, SQLiteRunRepository)
