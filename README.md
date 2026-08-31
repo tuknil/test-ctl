@@ -28,8 +28,9 @@ Janus `control-translation` Capability Functional Specification (CFS).
   result IDs and validates correlation, subject, vulnerability, candidate,
   and terminal-state lineage before translation.
 - Accepts both the validated (`no-bypass-found`) and ten-cycle PoC exhaustion
-  (`bypass-found` + `loop_exhausted`) routes. Exhaustion is returned as a safe
-  `scope-declined` result with no candidate and is never sent to the LLM.
+  (`bypass-found` + `loop_exhausted`) routes. The temporary PoC exhaustion
+  route may emit a translated candidate, but always marks it as not
+  bypass-cleared and preserves the authoritative bypass qualification.
 - Reads a current policy snapshot (fixture-backed).
 - Calls a translation agent (doer) to propose a candidate rule/config.
 - Gates the proposal through deterministic syntax validation and conflict
@@ -56,7 +57,7 @@ flowchart LR
   E -- no-bypass-found --> F[Validated route]
   E -- bypass-found after 10 cycles --> P[PoC exhaustion route]
   F --> Q[Exact Databricks result references]
-  P --> X[Decline with bypass evidence\nNo candidate or LLM call]
+  P --> Q
   Q --> R[Fetch and validate proof lineage]
   R --> S[POST /invoke translation]
   G[Target technology and policy context] --> F
@@ -232,7 +233,7 @@ Orchestration calls `POST /invoke` after completing either accepted route:
 
 1. **Validated:** Mitigation Check is `blocked`, Bypass Validation is
   `no-bypass-found`, and `loop_exhausted=false`.
-2. **PoC exhaustion decline:** Mitigation Check is `blocked`, the latest Bypass
+2. **PoC exhaustion:** Mitigation Check is `blocked`, the latest Bypass
   Validation result is `bypass-found`, and orchestration supplies
   `loop_exhausted=true`, `completed_iterations=10`, and `max_iterations=10`.
 
@@ -261,9 +262,9 @@ response handling, retries, permissions, and source-column details.
 The response preserves the route in
 `structured_result.proof_loop_qualification`. For PoC exhaustion,
 `bypass_cleared` remains `false`, the latest `bypass-found` state/reference is
-retained, `outcome_reason.code` is `loop-exhausted-with-bypass`, and
-`primary_candidate` is `null`. Bounded counterexample and evidence references
-are retained when supplied by Bypass Validation.
+retained, and the primary candidate contains an explicit not-bypass-cleared
+limitation. Bounded counterexample and evidence references are retained when
+supplied by Bypass Validation.
 One invocation produces at most one primary candidate.
 
 ### Legacy direct route

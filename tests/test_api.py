@@ -372,6 +372,14 @@ def test_ui_app_renders_diagnostic_log():
     assert "server/container log" in response.text
 
 
+def test_ui_app_renders_candidate_artifact_and_limitations():
+    response = client.get("/app.js")
+
+    assert response.status_code == 200
+    assert "candidate.candidate_artifact.content_ref" in response.text
+    assert "candidate.limitations" in response.text
+
+
 def test_readiness_fails_when_storage_is_unavailable(monkeypatch):
     class UnavailableRepository:
         def healthcheck(self):
