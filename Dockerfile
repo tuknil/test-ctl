@@ -15,7 +15,9 @@ COPY pyproject.toml ./
 COPY src ./src
 # The corporate pip configuration is supplied as a build secret and exists
 # only for this layer. It is never copied into the image or build context.
-RUN --mount=type=secret,id=pip_conf,target=/etc/pip.conf,required=true \
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    if [ -s /run/secrets/pip_conf ]; then export PIP_CONFIG_FILE=/run/secrets/pip_conf; fi && \
     pip install --no-cache-dir .
 
 # Static assets are served by FastAPI and contain no runtime secrets.
