@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import pytest
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from control_translation import capability
+from control_translation import api as api_module
+from control_translation.api import app
 from control_translation.config import Settings
 from control_translation.contracts import InvokeRequestEnvelope
 from control_translation.terminal import TerminalState
@@ -222,7 +225,7 @@ def test_wrong_proof_state_returns_insufficient_context():
     assert "no-bypass-found" in result.structured_result.outcome_reason.detail
 
 
-def test_exhausted_bypass_found_route_translates_but_is_not_bypass_cleared():
+def test_exhausted_bypass_found_route_is_declined_with_bypass_evidence():
     body = _body()
     body["routing_metadata"].update(
         {
@@ -240,7 +243,17 @@ def test_exhausted_bypass_found_route_translates_but_is_not_bypass_cleared():
         correlation_id=bypass.correlation_id,
         subject_record_revision_id=bypass.subject_record_revision_id,
         request=bypass.request,
-        result={**bypass.result, "terminal_state": "bypass-found"},
+        result={
+            **bypass.result,
+            "terminal_state": "bypass-found",
+            "bypass_counterexample": {
+                "counterexample_id": "bypass:example:encoding",
+                "sample_ref": "evidence://bypass/example/sample",
+                "variant_family": "encoding",
+                "observed_behavior": "reached-protected-target",
+                "evidence_refs": ["evidence://target/example"],
+            },
+        },
     )
 
     result = capability.invoke_envelope(
@@ -249,7 +262,7 @@ def test_exhausted_bypass_found_route_translates_but_is_not_bypass_cleared():
         settings=_settings(),
     )
 
-    assert result.terminal_state == TerminalState.TRANSLATED
+    assert result.terminal_state == TerminalState.SCOPE_DECLINED
     qualification = result.structured_result.proof_loop_qualification
     assert qualification is not None
     assert qualification.route == "poc-exhaustion"
@@ -261,10 +274,13 @@ def test_exhausted_bypass_found_route_translates_but_is_not_bypass_cleared():
     assert result.structured_result.subject.proven_pattern_id.startswith(
         "loop-exhausted-pattern:"
     )
-    candidate = result.structured_result.primary_candidate
-    assert candidate is not None
-    assert any("not bypass-cleared" in item for item in candidate.limitations)
-    assert "not bypass-cleared" in result.structured_result.outcome_reason.detail
+    assert result.structured_result.primary_candidate is None
+    assert result.structured_result.outcome_reason.code.value == (
+        "loop-exhausted-with-bypass"
+    )
+    assert result.structured_result.bypass_counterexample is not None
+    assert result.structured_result.bypass_counterexample.variant_family == "encoding"
+    assert result.inference["llm_invoked"] is False
 
 
 @pytest.mark.parametrize(
@@ -312,20 +328,33 @@ def _temporal_body() -> dict:
         "upstream_inputs": [
             {
                 "capability": capability_name,
+                "contract_id": contract_id,
+                "run_id": run_id,
                 "result_id": reference["key"],
                 "terminal_state": terminal_state,
+                "status": "completed",
                 "correlation_id": CORRELATION_ID,
                 "result_ref": reference,
             }
-            for capability_name, reference, terminal_state in (
+            for capability_name, contract_id, run_id, reference, terminal_state in (
                 (
                     "defense-generation",
+                    "defense-generation@1.0",
+                    "defense-run-1",
                     references["defense_generation"],
                     "candidate-produced",
                 ),
-                ("mitigation-check", references["mitigation_check"], "blocked"),
+                (
+                    "mitigation-check",
+                    "mitigation-check@1.0",
+                    "mitigation-run-1",
+                    references["mitigation_check"],
+                    "blocked",
+                ),
                 (
                     "bypass-validation",
+                    "capability-completion@1.0",
+                    "bypass-run-1",
                     references["bypass_validation"],
                     "bypass-found",
                 ),
@@ -392,12 +421,22 @@ def _temporal_records() -> dict[str, UpstreamRecord]:
                 "vulnerability_id": CANDIDATE_ID,
                 "candidate_id": f"candidate:{CANDIDATE_ID}:waf:109555",
             },
+            "bypass_counterexample": {
+                "counterexample_id": "bypass:bypass-run-1:variant:encoding:1",
+                "sample_ref": "evidence://bypass/bypass-run-1/sample",
+                "variant_family": "encoding",
+                "observed_behavior": "reached-protected-target",
+                "evidence_refs": [
+                    "evidence://control/bypass-run-1:attempt-2",
+                    "evidence://target/bypass-run-1:attempt-2",
+                ],
+            },
         },
     )
     return records
 
 
-def test_temporal_envelope_is_normalized_and_translated_after_exhaustion():
+def test_temporal_envelope_is_normalized_and_declined_after_exhaustion():
     envelope = InvokeRequestEnvelope.model_validate(_temporal_body())
 
     assert envelope.input.proven_pattern is None
@@ -408,6 +447,7 @@ def test_temporal_envelope_is_normalized_and_translated_after_exhaustion():
     assert envelope.routing_metadata.completed_iterations == 10
     assert envelope.subject is not None
     assert envelope.subject.candidate_id == CANDIDATE_ID
+    assert envelope.idempotency_key == envelope.request_id
 
     result = capability.invoke_envelope(
         envelope,
@@ -415,11 +455,113 @@ def test_temporal_envelope_is_normalized_and_translated_after_exhaustion():
         settings=_settings(),
     )
 
-    assert result.terminal_state == TerminalState.TRANSLATED
+    assert result.terminal_state == TerminalState.SCOPE_DECLINED
     qualification = result.structured_result.proof_loop_qualification
     assert qualification is not None
     assert qualification.route == "poc-exhaustion"
     assert qualification.bypass_cleared is False
+    assert result.structured_result.primary_candidate is None
+    assert result.request_id == envelope.request_id
+    assert result.correlation_id == CORRELATION_ID
+    assert result.upstream_result_refs == envelope.upstream_result_refs
+
+
+def test_temporal_validated_route_translates_without_input_field():
+    body = _temporal_body()
+    body["upstream_inputs"][2]["terminal_state"] = "no-bypass-found"
+    body["routing_context"].update(
+        {
+            "route": "validated",
+            "bypass_validation_terminal_state": "no-bypass-found",
+            "loop_exhausted": False,
+            "completed_iterations": 1,
+        }
+    )
+    records = _temporal_records()
+    bypass = records["bypass-validation-result:bypass-1"]
+    records[bypass.result_id] = UpstreamRecord(
+        result_id=bypass.result_id,
+        terminal_state="no-bypass-found",
+        correlation_id=bypass.correlation_id,
+        subject_record_revision_id=bypass.subject_record_revision_id,
+        request=bypass.request,
+        result={**bypass.result, "terminal_state": "no-bypass-found"},
+    )
+
+    result = capability.invoke_envelope(
+        InvokeRequestEnvelope.model_validate(body),
+        resolver=FakeResolver(records),
+        settings=_settings(),
+    )
+
+    assert result.terminal_state == TerminalState.TRANSLATED
+    assert result.request_id == body["request_id"]
+    assert result.correlation_id == body["correlation_id"]
+
+
+def test_temporal_request_id_is_idempotent_at_invoke_endpoint(monkeypatch):
+    body = _temporal_body()
+    monkeypatch.setattr(
+        api_module,
+        "_UPSTREAM_RESOLVER",
+        FakeResolver(_temporal_records()),
+    )
+    client = TestClient(app)
+
+    first = client.post("/invoke", json=body)
+    second = client.post("/invoke", json=body)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["run_id"] == second.json()["run_id"]
+    assert first.json()["request_id"] == body["request_id"]
+    assert first.json()["correlation_id"] == body["correlation_id"]
+    assert first.json()["terminal_state"] == "scope-declined"
+    assert first.json()["structured_result"]["primary_candidate"] is None
+    assert (
+        first.json()["structured_result"]["bypass_counterexample"][
+            "variant_family"
+        ]
+        == "encoding"
+    )
+
+
+def test_temporal_missing_policy_snapshot_is_typed_decline():
+    body = _temporal_body()
+    body["upstream_inputs"][2]["terminal_state"] = "no-bypass-found"
+    body["routing_context"].update(
+        {
+            "route": "validated",
+            "bypass_validation_terminal_state": "no-bypass-found",
+            "loop_exhausted": False,
+            "completed_iterations": 1,
+        }
+    )
+    body["input"] = {
+        "target_context": {
+            "target_technology": "akamai-waf",
+            "target_policy_context_id": "akamai-policy:missing",
+        }
+    }
+    records = _temporal_records()
+    bypass = records["bypass-validation-result:bypass-1"]
+    records[bypass.result_id] = UpstreamRecord(
+        result_id=bypass.result_id,
+        terminal_state="no-bypass-found",
+        correlation_id=bypass.correlation_id,
+        subject_record_revision_id=bypass.subject_record_revision_id,
+        request=bypass.request,
+        result={**bypass.result, "terminal_state": "no-bypass-found"},
+    )
+
+    result = capability.invoke_envelope(
+        InvokeRequestEnvelope.model_validate(body),
+        resolver=FakeResolver(records),
+        settings=_settings(),
+    )
+
+    assert result.terminal_state == TerminalState.INSUFFICIENT_CONTEXT
+    assert result.structured_result.primary_candidate is None
 
 
 def test_temporal_subject_conflict_returns_insufficient_context():

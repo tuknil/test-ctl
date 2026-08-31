@@ -29,6 +29,8 @@ class OutcomeReasonCode(str, Enum):
     INSUFFICIENT_POLICY_CONTEXT = "insufficient-policy-context"
     INSUFFICIENT_PATTERN_CONTEXT = "insufficient-pattern-context"
     INVALID_INPUT = "invalid-input"
+    LOOP_EXHAUSTED_WITH_BYPASS = "loop-exhausted-with-bypass"
+    BYPASS_FOUND_REQUIRES_REGENERATION = "bypass-found-requires-regeneration"
     PROVIDER_FAILURE = "provider-failure"
     RESULT_ASSEMBLY_FAILURE = "result-assembly-failure"
 
@@ -60,6 +62,8 @@ VALID_REASON_CODES_FOR_STATE: dict[TerminalState, tuple[OutcomeReasonCode, ...]]
     TerminalState.SCOPE_DECLINED: (
         OutcomeReasonCode.INVALID_INPUT,
         OutcomeReasonCode.POLICY_CONFLICT,
+        OutcomeReasonCode.LOOP_EXHAUSTED_WITH_BYPASS,
+        OutcomeReasonCode.BYPASS_FOUND_REQUIRES_REGENERATION,
     ),
     TerminalState.MALFUNCTION: (
         OutcomeReasonCode.PROVIDER_FAILURE,

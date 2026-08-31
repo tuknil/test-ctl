@@ -28,8 +28,8 @@ Janus `control-translation` Capability Functional Specification (CFS).
   result IDs and validates correlation, subject, vulnerability, candidate,
   and terminal-state lineage before translation.
 - Accepts both the validated (`no-bypass-found`) and ten-cycle PoC exhaustion
-  (`bypass-found` + `loop_exhausted`) routes without mislabeling an exhausted
-  candidate as bypass-cleared.
+  (`bypass-found` + `loop_exhausted`) routes. Exhaustion is returned as a safe
+  `scope-declined` result with no candidate and is never sent to the LLM.
 - Reads a current policy snapshot (fixture-backed).
 - Calls a translation agent (doer) to propose a candidate rule/config.
 - Gates the proposal through deterministic syntax validation and conflict
@@ -56,7 +56,7 @@ flowchart LR
   E -- no-bypass-found --> F[Validated route]
   E -- bypass-found after 10 cycles --> P[PoC exhaustion route]
   F --> Q[Exact Databricks result references]
-  P --> Q
+  P --> X[Decline with bypass evidence\nNo candidate or LLM call]
   Q --> R[Fetch and validate proof lineage]
   R --> S[POST /invoke translation]
   G[Target technology and policy context] --> F
@@ -232,7 +232,7 @@ Orchestration calls `POST /invoke` after completing either accepted route:
 
 1. **Validated:** Mitigation Check is `blocked`, Bypass Validation is
   `no-bypass-found`, and `loop_exhausted=false`.
-2. **PoC exhaustion:** Mitigation Check is `blocked`, the latest Bypass
+2. **PoC exhaustion decline:** Mitigation Check is `blocked`, the latest Bypass
   Validation result is `bypass-found`, and orchestration supplies
   `loop_exhausted=true`, `completed_iterations=10`, and `max_iterations=10`.
 
@@ -261,10 +261,23 @@ response handling, retries, permissions, and source-column details.
 The response preserves the route in
 `structured_result.proof_loop_qualification`. For PoC exhaustion,
 `bypass_cleared` remains `false`, the latest `bypass-found` state/reference is
-retained, and the candidate contains an explicit not-bypass-cleared limitation.
+retained, `outcome_reason.code` is `loop-exhausted-with-bypass`, and
+`primary_candidate` is `null`. Bounded counterexample and evidence references
+are retained when supplied by Bypass Validation.
 One invocation produces at most one primary candidate.
 
 ### Legacy direct route
+
+`POST /invoke` also accepts a strict canonical `bypass-validation@1.0` result
+as a temporary compatibility input. Because this result describes mutation
+attempts for one candidate and does not prove that the orchestration candidate
+loop exhausted 10 iterations, the service always returns
+`scope-declined`/`bypass-found-requires-regeneration`, preserves its bounded
+counterexample and evidence references, emits no primary candidate, and never
+calls the LLM. Its `result_id` becomes the stable request/idempotency identity.
+See `examples/request-direct-bypass-found.json`.
+
+The legacy proven-pattern route remains available for existing direct clients.
 
 Direct Python:
 
@@ -383,8 +396,10 @@ must pass before an image is promoted.
 The repository is container-deployable for an internal POC/demo:
 
 ```bash
-docker build -t control-translation-service:local .
-docker run --rm -p 8000:8000 --env-file .env control-translation-service:local
+podman build --format docker \
+  --secret id=pip_conf,src="$HOME/.pip/pip.conf" \
+  -t control-translation-service:local .
+podman run --rm -p 8000:8000 --env-file .env control-translation-service:local
 ```
 
 The image does not contain `.env`, tests, local caches, or credentials. Its

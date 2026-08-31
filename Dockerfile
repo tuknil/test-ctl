@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
 
-FROM python:3.11-slim AS base
+ARG BASE_IMAGE=artifact.it.att.com/apm0014313-dkr-attcc-stage/python3.12-slim-instantclient:21_7.sshtest0.1
+FROM ${BASE_IMAGE} AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -8,17 +9,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Install uv and resolve dependencies from the project metadata. Dependency
-# failures intentionally fail the image build rather than being ignored.
-RUN pip install --no-cache-dir uv
-
 # Run the service and its durable store without root privileges.
 RUN addgroup --system app && adduser --system --ingroup app app
 
 # Install dependencies first for better layer caching
 COPY pyproject.toml ./
 COPY src ./src
-RUN uv pip install --system --no-cache .
+# The corporate pip configuration is supplied as a build secret and exists
+# only for this layer. It is never copied into the image or build context.
+RUN --mount=type=secret,id=pip_conf,target=/etc/pip.conf,required=true \
+    pip install --no-cache-dir .
 
 # Static assets are served by FastAPI and contain no runtime secrets.
 COPY ui ./ui
