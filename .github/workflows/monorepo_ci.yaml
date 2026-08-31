@@ -1,7 +1,6 @@
 name: CI - Python Build
 
-permissions:
-  contents: read
+
 
 on:
   schedule:
@@ -84,6 +83,8 @@ jobs:
 
   call_devOp:
     name: Call DevOps
+    permissions:
+      contents: read    
     needs: run
     runs-on: concordia-linux-cpu2-ram7gi
     steps:
