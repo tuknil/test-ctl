@@ -225,7 +225,7 @@ def test_wrong_proof_state_returns_insufficient_context():
     assert "no-bypass-found" in result.structured_result.outcome_reason.detail
 
 
-def test_exhausted_bypass_found_route_is_declined_with_bypass_evidence():
+def test_exhausted_bypass_found_route_translates_with_bypass_evidence():
     body = _body()
     body["routing_metadata"].update(
         {
@@ -262,7 +262,7 @@ def test_exhausted_bypass_found_route_is_declined_with_bypass_evidence():
         settings=_settings(),
     )
 
-    assert result.terminal_state == TerminalState.SCOPE_DECLINED
+    assert result.terminal_state == TerminalState.TRANSLATED
     qualification = result.structured_result.proof_loop_qualification
     assert qualification is not None
     assert qualification.route == "poc-exhaustion"
@@ -274,10 +274,12 @@ def test_exhausted_bypass_found_route_is_declined_with_bypass_evidence():
     assert result.structured_result.subject.proven_pattern_id.startswith(
         "loop-exhausted-pattern:"
     )
-    assert result.structured_result.primary_candidate is None
-    assert result.structured_result.outcome_reason.code.value == (
-        "loop-exhausted-with-bypass"
-    )
+    candidate = result.structured_result.primary_candidate
+    assert candidate is not None
+    assert candidate.candidate_artifact.artifact_type == "akamai-waf-rule"
+    assert candidate.candidate_artifact.content_ref
+    assert any("not bypass-cleared" in item for item in candidate.limitations)
+    assert result.structured_result.outcome_reason.code.value == "translated"
     assert result.structured_result.bypass_counterexample is not None
     assert result.structured_result.bypass_counterexample.variant_family == "encoding"
     assert result.inference["llm_invoked"] is False
@@ -436,7 +438,7 @@ def _temporal_records() -> dict[str, UpstreamRecord]:
     return records
 
 
-def test_temporal_envelope_is_normalized_and_declined_after_exhaustion():
+def test_temporal_envelope_is_normalized_and_translated_after_exhaustion():
     envelope = InvokeRequestEnvelope.model_validate(_temporal_body())
 
     assert envelope.input.proven_pattern is None
@@ -455,12 +457,17 @@ def test_temporal_envelope_is_normalized_and_declined_after_exhaustion():
         settings=_settings(),
     )
 
-    assert result.terminal_state == TerminalState.SCOPE_DECLINED
+    assert result.terminal_state == TerminalState.TRANSLATED
     qualification = result.structured_result.proof_loop_qualification
     assert qualification is not None
     assert qualification.route == "poc-exhaustion"
     assert qualification.bypass_cleared is False
-    assert result.structured_result.primary_candidate is None
+    candidate = result.structured_result.primary_candidate
+    assert candidate is not None
+    assert candidate.candidate_artifact.artifact_type == "akamai-waf-rule"
+    assert candidate.candidate_artifact.content_ref
+    assert any("not bypass-cleared" in item for item in candidate.limitations)
+    assert result.structured_result.bypass_counterexample is not None
     assert result.request_id == envelope.request_id
     assert result.correlation_id == CORRELATION_ID
     assert result.upstream_result_refs == envelope.upstream_result_refs
@@ -516,8 +523,10 @@ def test_temporal_request_id_is_idempotent_at_invoke_endpoint(monkeypatch):
     assert first.json()["run_id"] == second.json()["run_id"]
     assert first.json()["request_id"] == body["request_id"]
     assert first.json()["correlation_id"] == body["correlation_id"]
-    assert first.json()["terminal_state"] == "scope-declined"
-    assert first.json()["structured_result"]["primary_candidate"] is None
+    assert first.json()["terminal_state"] == "translated"
+    candidate = first.json()["structured_result"]["primary_candidate"]
+    assert candidate is not None
+    assert any("not bypass-cleared" in item for item in candidate["limitations"])
     assert (
         first.json()["structured_result"]["bypass_counterexample"][
             "variant_family"

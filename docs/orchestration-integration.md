@@ -74,17 +74,16 @@ Use this route only when the latest authoritative Bypass Validation result is `b
 
 The result reports:
 
-- `terminal_state: scope-declined`
-- `outcome_reason.code: loop-exhausted-with-bypass`
+- `terminal_state: translated` when the target translation succeeds
 - `proof_loop_qualification.route: poc-exhaustion`
 - `proof_loop_qualification.bypass_cleared: false`
 - the actual `bypass-found` state, counts, and authoritative result reference
-- `primary_candidate: null`
+- a primary-candidate limitation stating that it is not bypass-cleared
 - the bounded bypass counterexample and evidence references, when present
 
-Control Translation does not invoke the model for this route. Orchestration must
-route the completed decline to manual review or a new generation cycle rather
-than requiring a translated candidate.
+This is a temporary PoC behavior. A translated exhaustion result means only
+that the latest candidate was expressed for the target technology; it does not
+erase the bypass finding or make the candidate production-ready.
 
 ## Complete validated-route request
 

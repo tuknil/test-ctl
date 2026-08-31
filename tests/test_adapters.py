@@ -17,6 +17,16 @@ def test_registry_returns_none_for_unknown_target():
     assert get_adapter("unknown-tech") is None
 
 
+def test_akamai_adapter_recognizes_request_argument_sql_injection():
+    adapter = AkamaiWafAdapter()
+
+    assert adapter.supports_feature(
+        "Send a request to /public/submit.php targeting saveUser with a "
+        "crafted value in the Researcher argument and observe whether SQL "
+        "injection behavior occurs."
+    )
+
+
 def test_akamai_adapter_validates_expected_shape():
     adapter = AkamaiWafAdapter()
     valid = json.dumps(

@@ -49,11 +49,15 @@ class AkamaiWafAdapter:
         "query-string",
         "uri",
         "path",
+        "request",
         "body",
+        "argument",
+        "parameter",
         "cookie",
         "method",
         "ip",
         "regex",
+        "sql injection",
     )
 
     def supports_feature(self, discriminator_description: str) -> bool:

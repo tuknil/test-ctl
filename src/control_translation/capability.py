@@ -461,32 +461,6 @@ def invoke_envelope(
             }
         )
 
-        if resolved.qualification.route == "poc-exhaustion":
-            request, configured_defaults = _with_effective_target_context(
-                request, settings
-            )
-            declined = _build_result(
-                request,
-                TerminalState.SCOPE_DECLINED,
-                OutcomeReasonCode.LOOP_EXHAUSTED_WITH_BYPASS,
-                detail=(
-                    "The proof loop exhausted all 10 candidate iterations while "
-                    "the latest candidate retained a proven bypass. Translation "
-                    "was declined; manual review or a new generation cycle is required."
-                ),
-                configured_poc_defaults_used=configured_defaults,
-                proof_loop_qualification=resolved.qualification,
-                bypass_counterexample=resolved.bypass_counterexample,
-                bypass_evidence_refs=list(resolved.bypass_evidence_refs),
-            )
-            result = _envelope(
-                declined,
-                settings=settings,
-                llm_invoked=False,
-                correlation_id=envelope.correlation_id,
-            )
-            return _bind_request_context(result, envelope)
-
     result = invoke(
         request,
         settings=settings,
@@ -495,6 +469,26 @@ def invoke_envelope(
             resolved.qualification if references is not None else None
         ),
     )
+    if references is not None and resolved.qualification.route == "poc-exhaustion":
+        structured = result.structured_result
+        evidence_bindings = list(structured.evidence_bindings)
+        if resolved.bypass_evidence_refs:
+            evidence_bindings.append(
+                EvidenceBinding(
+                    claim="limitation",
+                    evidence_refs=list(resolved.bypass_evidence_refs),
+                )
+            )
+        result = result.model_copy(
+            update={
+                "structured_result": structured.model_copy(
+                    update={
+                        "bypass_counterexample": resolved.bypass_counterexample,
+                        "evidence_bindings": evidence_bindings,
+                    }
+                )
+            }
+        )
     return _bind_request_context(result, envelope)
 
 

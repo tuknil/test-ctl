@@ -77,7 +77,7 @@ rule to Akamai, a firewall, SentinelOne, or another target platform.
    Check, and Bypass Validation references.
 8. Verify a validated route reports `route=validated` and a 10/10 exhaustion
    route reports `route=poc-exhaustion`, `bypass_cleared=false`,
-   `terminal_state=scope-declined`, and `primary_candidate=null`.
+   `terminal_state=translated`, and an explicit not-bypass-cleared limitation.
 9. Verify no response or log contains credentials, authorization headers, raw
    idempotency keys, or candidate artifact content in general diagnostic logs.
 

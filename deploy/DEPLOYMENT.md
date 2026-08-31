@@ -12,8 +12,8 @@ The service:
 - supports deterministic fixture mode and live model mode;
 - fetches exact Defense Generation, Mitigation Check, and Bypass Validation
   records from Unity Catalog for orchestration requests;
-- translates validated routes and safely declines ten-cycle PoC-exhaustion
-  routes while preserving the actual Bypass Validation qualification;
+- translates validated and ten-cycle PoC-exhaustion routes while preserving
+  the actual Bypass Validation qualification;
 - can call AT&T Inference through an OpenAI-compatible endpoint;
 - validates model output with target-specific syntax and conflict checks;
 - returns a reviewable candidate and never deploys a control automatically.
@@ -238,8 +238,8 @@ tables; it is a read-only consumer of upstream capability results.
   result trio. Confirm `proof_loop_qualification.route=validated`.
 13. Test PoC exhaustion only when the referenced Bypass Validation row is
   actually `bypass-found`. Confirm `route=poc-exhaustion`,
-  `bypass_cleared=false`, `terminal_state=scope-declined`,
-  `outcome_reason.code=loop-exhausted-with-bypass`, and no primary candidate.
+  `bypass_cleared=false`, `terminal_state=translated`, and an explicit
+  not-bypass-cleared candidate limitation.
 
 The dashboard and full run/result retrieval endpoints expose operational and
 candidate data. Place them behind the same approved authentication,
