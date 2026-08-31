@@ -1,4 +1,7 @@
 .env
+.env.*
+!.env.example
+!.env.*.example
 __pycache__/
 *.pyc
 .venv/
@@ -14,6 +17,13 @@ data/
 *.db
 *.db-shm
 *.db-wal
+
+# Windows download/security metadata sidecars
+*:Zone.Identifier*
+*:sec.endpointdlp*
+
+# Local Azure deployment bundle
+Deploy/
 
 # Local Databricks inspection exports (may contain sensitive workflow data)
 control_translation.json
