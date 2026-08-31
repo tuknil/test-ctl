@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from control_translation.contracts import (
+    BypassCounterexample,
     DatabricksResultReference,
     ProofLoopQualification,
     ProofLoopRoutingMetadata,
@@ -49,6 +50,10 @@ class ResolvedProofLoop:
     pattern: ProvenMitigationPattern
     references: UpstreamResultReferences
     qualification: ProofLoopQualification
+    target_technology: str | None
+    target_policy_context_id: str | None
+    bypass_counterexample: BypassCounterexample | None
+    bypass_evidence_refs: tuple[str, ...]
 
 
 def resolve_proof_loop(
@@ -83,6 +88,8 @@ def resolve_proof_loop(
     for role, reference, required_state in role_refs:
         try:
             record = resolver.fetch(reference)
+        except UpstreamResolutionError:
+            raise
         except Exception as exc:
             raise UpstreamResolutionError(f"{role} result could not be fetched") from exc
         if record is None:
@@ -93,6 +100,7 @@ def resolve_proof_loop(
             raise UpstreamResolutionError(
                 f"{role} terminal state must be '{required_state}'"
             )
+        _validate_record_identity(role, record)
         records[role] = record
 
     for role, record in records.items():
@@ -192,10 +200,48 @@ def resolve_proof_loop(
         bypass_validation_terminal_state=required_bypass_state,
         bypass_validation_result_ref=routing_metadata.bypass_validation_result_ref,
     )
+    bypass_result = records["Bypass Validation"].result
+    raw_counterexample = bypass_result.get("bypass_counterexample")
+    bypass_counterexample = None
+    if raw_counterexample is not None:
+        try:
+            bypass_counterexample = BypassCounterexample.model_validate(
+                raw_counterexample
+            )
+        except ValueError as exc:
+            raise UpstreamResolutionError(
+                "Bypass Validation counterexample contract is malformed"
+            ) from exc
+    bypass_evidence_refs: set[str] = set()
+    if bypass_counterexample is not None:
+        bypass_evidence_refs.update(bypass_counterexample.evidence_refs)
+        bypass_evidence_refs.add(bypass_counterexample.sample_ref)
+    feedback = bypass_result.get("feedback")
+    if isinstance(feedback, dict):
+        evidence_refs = feedback.get("evidence_refs")
+        if isinstance(evidence_refs, list):
+            bypass_evidence_refs.update(
+                item for item in evidence_refs if isinstance(item, str) and item
+            )
+
+    target_technology = _preferred_string(
+        defense.result,
+        defense.request,
+        key="target_technology",
+    )
+    target_policy_context_id = _preferred_string(
+        defense.result,
+        defense.request,
+        key="target_policy_context_id",
+    )
     return ResolvedProofLoop(
         pattern=pattern,
         references=references,
         qualification=qualification,
+        target_technology=target_technology,
+        target_policy_context_id=target_policy_context_id,
+        bypass_counterexample=bypass_counterexample,
+        bypass_evidence_refs=tuple(sorted(bypass_evidence_refs)),
     )
 
 
@@ -292,3 +338,48 @@ def _role_candidate_id(role: str, record: UpstreamRecord) -> str | None:
                 return legacy_source
         return None
     return _one_value(record.document, "candidate_id")
+
+
+def _validate_record_identity(role: str, record: UpstreamRecord) -> None:
+    """Validate producer identity when the canonical result exposes it."""
+    expected = {
+        "Defense Generation": (
+            "defense-generation",
+            {"defense-generation@1.0"},
+        ),
+        "Mitigation Check": (
+            "mitigation-check",
+            {"mitigation-check@1.0"},
+        ),
+        "Bypass Validation": (
+            "bypass-validation",
+            {"bypass-validation@1.0"},
+        ),
+    }
+    expected_capability, accepted_contracts = expected[role]
+    capability = record.result.get("capability")
+    if capability is not None and capability != expected_capability:
+        raise UpstreamResolutionError(f"{role} capability identity is invalid")
+    contract_id = record.result.get("contract_id")
+    if contract_id is not None and contract_id not in accepted_contracts:
+        raise UpstreamResolutionError(f"{role} result contract is unsupported")
+
+
+def _preferred_string(*documents: Any, key: str) -> str | None:
+    for document in documents:
+        if not isinstance(document, dict):
+            continue
+        direct = document.get(key)
+        if isinstance(direct, str) and direct:
+            return direct
+        primary = document.get("primary_candidate")
+        if isinstance(primary, dict):
+            nested = primary.get(key)
+            if isinstance(nested, str) and nested:
+                return nested
+        target = document.get("target_context")
+        if isinstance(target, dict):
+            nested = target.get(key)
+            if isinstance(nested, str) and nested:
+                return nested
+    return None

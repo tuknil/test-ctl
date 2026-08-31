@@ -25,6 +25,8 @@ from control_translation.adapters import ADAPTER_REGISTRY
 from control_translation.config import get_settings
 from control_translation.contracts import (
     ControlTranslationResult,
+    DirectBypassValidationResult,
+    InvokeAPIRequest,
     InvokeRequestEnvelope,
     ResultEnvelope,
     RunListResponse,
@@ -192,7 +194,16 @@ def schema() -> dict[str, Any]:
 
 
 @app.post("/invoke", response_model=ResultEnvelope)
-def invoke_endpoint(envelope: InvokeRequestEnvelope) -> ResultEnvelope:
+def invoke_endpoint(payload: InvokeAPIRequest) -> ResultEnvelope:
+    direct_bypass_result = (
+        payload if isinstance(payload, DirectBypassValidationResult) else None
+    )
+    envelope = (
+        capability.normalize_direct_bypass_request(direct_bypass_result)
+        if direct_bypass_result is not None
+        else payload
+    )
+    assert isinstance(envelope, InvokeRequestEnvelope)
     effective_envelope = envelope.model_copy(
         update={
             "request_id": envelope.request_id or str(uuid4()),
@@ -237,11 +248,18 @@ def invoke_endpoint(envelope: InvokeRequestEnvelope) -> ResultEnvelope:
             return existing.result
 
     started_at = datetime.now(timezone.utc)
-    result_envelope = capability.invoke_envelope(
-        effective_envelope,
-        resolver=_UPSTREAM_RESOLVER,
-        settings=_SETTINGS,
-    )
+    if direct_bypass_result is not None:
+        result_envelope = capability.decline_direct_bypass(
+            effective_envelope,
+            direct_bypass_result,
+            settings=_SETTINGS,
+        )
+    else:
+        result_envelope = capability.invoke_envelope(
+            effective_envelope,
+            resolver=_UPSTREAM_RESOLVER,
+            settings=_SETTINGS,
+        )
     _log_invocation_result(result_envelope, source="capability")
     try:
         _REPOSITORY.save_completed_run(

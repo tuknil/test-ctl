@@ -12,8 +12,8 @@ The service:
 - supports deterministic fixture mode and live model mode;
 - fetches exact Defense Generation, Mitigation Check, and Bypass Validation
   records from Unity Catalog for orchestration requests;
-- accepts validated and ten-cycle PoC-exhaustion routes while preserving the
-  actual Bypass Validation qualification;
+- translates validated routes and safely declines ten-cycle PoC-exhaustion
+  routes while preserving the actual Bypass Validation qualification;
 - can call AT&T Inference through an OpenAI-compatible endpoint;
 - validates model output with target-specific syntax and conflict checks;
 - returns a reviewable candidate and never deploys a control automatically.
@@ -23,18 +23,23 @@ rollback guidance are in `deploy/RELEASE-HANDOFF.md`.
 
 ## 2. Build artifact
 
-Build from the repository root:
+Build from the repository root with rootless Podman. The corporate pip
+configuration is mounted only for the dependency-install layer and is not
+stored in the image:
 
 ```bash
-docker build -t <registry>/control-translation:<version> .
-docker push <registry>/control-translation:<version>
+podman build --format docker \
+  --secret id=pip_conf,src="$HOME/.pip/pip.conf" \
+  --build-arg BASE_IMAGE=artifact.it.att.com/apm0014313-dkr-attcc-stage/python3.12-slim-instantclient:21_7.sshtest0.1 \
+  --tag <registry>/control-translation:<version> .
+podman push <registry>/control-translation:<version>
 ```
 
 Use an immutable release tag or image digest in the deployment. Do not deploy `latest` as the only reference.
 
 The image:
 
-- uses Python 3.11;
+- uses the approved Python 3.12 slim/Instant Client base image;
 - starts with `python -m control_translation`;
 - reads its bind host and port from environment variables;
 - does not copy `.env`, tests, local virtual environments, caches, or credentials;
@@ -233,7 +238,8 @@ tables; it is a read-only consumer of upstream capability results.
   result trio. Confirm `proof_loop_qualification.route=validated`.
 13. Test PoC exhaustion only when the referenced Bypass Validation row is
   actually `bypass-found`. Confirm `route=poc-exhaustion`,
-  `bypass_cleared=false`, and an explicit not-bypass-cleared limitation.
+  `bypass_cleared=false`, `terminal_state=scope-declined`,
+  `outcome_reason.code=loop-exhausted-with-bypass`, and no primary candidate.
 
 The dashboard and full run/result retrieval endpoints expose operational and
 candidate data. Place them behind the same approved authentication,

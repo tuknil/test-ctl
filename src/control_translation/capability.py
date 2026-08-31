@@ -10,14 +10,18 @@ function gates and interprets.
 from __future__ import annotations
 
 import logging
+import re
+from hashlib import sha256
 from uuid import uuid4
 
 from control_translation.adapters import get_adapter
 from control_translation.agents.translation_agent import TranslationDoer, build_translation_doer
 from control_translation.config import Settings, get_settings
 from control_translation.contracts import (
+    BypassCounterexample,
     ControlTranslationRequest,
     ControlTranslationResult,
+    DirectBypassValidationResult,
     EvidenceBinding,
     InputBindings,
     InvokeRequestEnvelope,
@@ -51,6 +55,8 @@ _TARGET_CONTROL_CLASSES = {
     "edr-s1": "edr",
 }
 
+_CVE_ID = re.compile(r"CVE-\d{4}-\d+", re.IGNORECASE)
+
 
 def _build_result(
     request: ControlTranslationRequest,
@@ -61,6 +67,8 @@ def _build_result(
     prose_summary: str | None = None,
     configured_poc_defaults_used: bool = False,
     proof_loop_qualification: ProofLoopQualification | None = None,
+    bypass_counterexample: BypassCounterexample | None = None,
+    bypass_evidence_refs: list[str] | None = None,
 ) -> ControlTranslationResult:
     pattern = request.proven_pattern
     target_context = request.target_context
@@ -89,6 +97,7 @@ def _build_result(
         terminal_state=terminal_state,
         outcome_reason=OutcomeReason(code=reason_code, detail=detail),
         proof_loop_qualification=proof_loop_qualification,
+        bypass_counterexample=bypass_counterexample,
         primary_candidate=primary_candidate,
         evidence_bindings=(
             [
@@ -102,7 +111,16 @@ def _build_result(
                 ),
             ]
             if primary_candidate is not None
-            else []
+            else (
+                [
+                    EvidenceBinding(
+                        claim="limitation",
+                        evidence_refs=list(bypass_evidence_refs or []),
+                    )
+                ]
+                if bypass_evidence_refs
+                else []
+            )
         ),
         prose_summary=prose_summary or detail,
     )
@@ -124,24 +142,8 @@ def invoke(
     policy_reader = policy_reader or FixturePolicyReader()
     doer = doer or build_translation_doer(settings)
 
-    caller_target = request.target_context or TargetContext()
-    configured_poc_defaults_used = (
-        caller_target.target_technology is None
-        or caller_target.target_policy_context_id is None
-    )
-    request = request.model_copy(
-        update={
-            "target_context": TargetContext(
-                target_technology=(
-                    caller_target.target_technology
-                    or settings.default_target_technology
-                ),
-                target_policy_context_id=(
-                    caller_target.target_policy_context_id
-                    or settings.default_target_policy_context_id
-                ),
-            )
-        }
+    request, configured_poc_defaults_used = _with_effective_target_context(
+        request, settings
     )
     if request.proven_pattern is None:
         return _insufficient_context_envelope(
@@ -402,7 +404,7 @@ def invoke_envelope(
     references = envelope.upstream_result_refs
     if references is not None:
         if resolver is None:
-            return _insufficient_context_envelope(
+            result = _insufficient_context_envelope(
                 detail="Referenced upstream results cannot be fetched with the current configuration.",
                 settings=settings,
                 correlation_id=envelope.correlation_id,
@@ -410,6 +412,7 @@ def invoke_envelope(
                 configured_poc_defaults_used=request.target_context is None,
                 reference_bundle=references.model_dump(mode="json", by_alias=True),
             )
+            return _bind_request_context(result, envelope)
         try:
             resolved = resolve_proof_loop(
                 references,
@@ -432,7 +435,7 @@ def invoke_envelope(
                 envelope.subject_record_revision_id or "-",
                 exc_info=(type(exc), exc, exc.__traceback__),
             )
-            return _insufficient_context_envelope(
+            result = _insufficient_context_envelope(
                 detail=str(exc),
                 settings=settings,
                 correlation_id=envelope.correlation_id,
@@ -440,7 +443,49 @@ def invoke_envelope(
                 configured_poc_defaults_used=request.target_context is None,
                 reference_bundle=references.model_dump(mode="json", by_alias=True),
             )
-        request = request.model_copy(update={"proven_pattern": resolved.pattern})
+            return _bind_request_context(result, envelope)
+        caller_target = request.target_context or TargetContext()
+        request = request.model_copy(
+            update={
+                "proven_pattern": resolved.pattern,
+                "target_context": TargetContext(
+                    target_technology=(
+                        caller_target.target_technology
+                        or resolved.target_technology
+                    ),
+                    target_policy_context_id=(
+                        caller_target.target_policy_context_id
+                        or resolved.target_policy_context_id
+                    ),
+                ),
+            }
+        )
+
+        if resolved.qualification.route == "poc-exhaustion":
+            request, configured_defaults = _with_effective_target_context(
+                request, settings
+            )
+            declined = _build_result(
+                request,
+                TerminalState.SCOPE_DECLINED,
+                OutcomeReasonCode.LOOP_EXHAUSTED_WITH_BYPASS,
+                detail=(
+                    "The proof loop exhausted all 10 candidate iterations while "
+                    "the latest candidate retained a proven bypass. Translation "
+                    "was declined; manual review or a new generation cycle is required."
+                ),
+                configured_poc_defaults_used=configured_defaults,
+                proof_loop_qualification=resolved.qualification,
+                bypass_counterexample=resolved.bypass_counterexample,
+                bypass_evidence_refs=list(resolved.bypass_evidence_refs),
+            )
+            result = _envelope(
+                declined,
+                settings=settings,
+                llm_invoked=False,
+                correlation_id=envelope.correlation_id,
+            )
+            return _bind_request_context(result, envelope)
 
     result = invoke(
         request,
@@ -450,15 +495,154 @@ def invoke_envelope(
             resolved.qualification if references is not None else None
         ),
     )
-    if references is not None:
-        result = result.model_copy(
-            update={
-                "reference_bundle": references.model_dump(
+    return _bind_request_context(result, envelope)
+
+
+def normalize_direct_bypass_request(
+    bypass_result: DirectBypassValidationResult,
+) -> InvokeRequestEnvelope:
+    """Create a durable internal request for a direct bypass compatibility call."""
+    source_candidate_id = bypass_result.subject.vulnerability_id
+    vulnerability_match = _CVE_ID.search(source_candidate_id)
+    vulnerability_id = (
+        vulnerability_match.group(0).upper()
+        if vulnerability_match is not None
+        else "unknown"
+    )
+    request = ControlTranslationRequest(
+        proven_pattern={
+            "proven_pattern_id": f"bypass-found:{source_candidate_id}",
+            "vulnerability_id": vulnerability_id,
+            "selected_control_class": "waf",
+            "discriminator_id": source_candidate_id,
+            "discriminator_description": bypass_result.feedback.observed_failure,
+            "pattern_summary": bypass_result.feedback.do_not_repeat,
+            "proof_record_ids": [
+                bypass_result.mitigation_result_id,
+                bypass_result.result_id,
+            ],
+        }
+    )
+    return InvokeRequestEnvelope(
+        input=request,
+        subject={
+            "vulnerability_id": vulnerability_id,
+            "candidate_id": source_candidate_id,
+        },
+        request_id=bypass_result.result_id,
+        correlation_id=bypass_result.correlation_id,
+        idempotency_key=bypass_result.result_id,
+        scope_config={
+            "compatibility_input_contract": bypass_result.contract_id,
+            "source_bypass_result_id": bypass_result.result_id,
+            "source_bypass_result_sha256": sha256(
+                bypass_result.model_dump_json().encode("utf-8")
+            ).hexdigest(),
+        },
+        provenance={
+            "caller": "bypass-validation",
+            "source": "direct-result-compatibility",
+        },
+    )
+
+
+def decline_direct_bypass(
+    request: InvokeRequestEnvelope,
+    bypass_result: DirectBypassValidationResult,
+    *,
+    settings: Settings | None = None,
+) -> ResultEnvelope:
+    """Decline a directly submitted bypass result without inference."""
+    settings = settings or get_settings()
+    effective_request, configured_defaults = _with_effective_target_context(
+        request.input, settings
+    )
+    evidence_refs = sorted(
+        {
+            bypass_result.bypass_counterexample.sample_ref,
+            *bypass_result.bypass_counterexample.evidence_refs,
+            *bypass_result.feedback.evidence_refs,
+        }
+    )
+    result = _build_result(
+        effective_request,
+        TerminalState.SCOPE_DECLINED,
+        OutcomeReasonCode.BYPASS_FOUND_REQUIRES_REGENERATION,
+        detail=(
+            "Bypass Validation proved that this candidate is bypassable. "
+            "The direct result does not contain authoritative proof that the "
+            "orchestration candidate loop exhausted 10 iterations; start a new "
+            "generation cycle or submit the complete orchestration envelope."
+        ),
+        configured_poc_defaults_used=configured_defaults,
+        bypass_counterexample=bypass_result.bypass_counterexample,
+        bypass_evidence_refs=evidence_refs,
+    )
+    response = _envelope(
+        result,
+        settings=settings,
+        llm_invoked=False,
+        correlation_id=request.correlation_id,
+    )
+    response = _bind_request_context(response, request)
+    return response.model_copy(
+        update={
+            "reference_bundle": {
+                "mitigation_check": bypass_result.mitigation_result_ref.model_dump(
                     mode="json", by_alias=True
+                ),
+                "bypass_validation": bypass_result.result_ref.model_dump(
+                    mode="json", by_alias=True
+                ),
+            }
+        }
+    )
+
+
+def _with_effective_target_context(
+    request: ControlTranslationRequest,
+    settings: Settings,
+) -> tuple[ControlTranslationRequest, bool]:
+    caller_target = request.target_context or TargetContext()
+    configured_defaults_used = (
+        caller_target.target_technology is None
+        or caller_target.target_policy_context_id is None
+    )
+    return (
+        request.model_copy(
+            update={
+                "target_context": TargetContext(
+                    target_technology=(
+                        caller_target.target_technology
+                        or settings.default_target_technology
+                    ),
+                    target_policy_context_id=(
+                        caller_target.target_policy_context_id
+                        or settings.default_target_policy_context_id
+                    ),
                 )
             }
-        )
-    return result
+        ),
+        configured_defaults_used,
+    )
+
+
+def _bind_request_context(
+    result: ResultEnvelope,
+    request: InvokeRequestEnvelope,
+) -> ResultEnvelope:
+    references = request.upstream_result_refs
+    return result.model_copy(
+        update={
+            "request_id": request.request_id,
+            "upstream_result_refs": references,
+            "reference_bundle": (
+                references.model_dump(mode="json", by_alias=True)
+                if references is not None
+                else {}
+            ),
+        }
+    )
 
 
 def _insufficient_context_envelope(

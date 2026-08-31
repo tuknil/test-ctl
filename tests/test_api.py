@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 from control_translation import api as api_module
@@ -6,6 +9,11 @@ from control_translation.persistence import PersistenceError
 
 
 client = TestClient(app)
+DIRECT_BYPASS_EXAMPLE = (
+    Path(__file__).resolve().parents[1]
+    / "examples"
+    / "request-direct-bypass-found.json"
+)
 
 
 def _request_body(target_technology: str, context_id: str) -> dict:
@@ -80,6 +88,47 @@ def test_invoke_returns_result_envelope():
     assert data["result_id"] == data["structured_result"]["result_id"]
     assert data["result_ref"]["result_id"] == data["result_id"]
     assert data["correlation_id"]
+
+
+def test_direct_bypass_result_is_safely_declined_and_idempotent():
+    body = json.loads(DIRECT_BYPASS_EXAMPLE.read_text())
+
+    first = client.post("/invoke", json=body)
+    second = client.post("/invoke", json=body)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    data = first.json()
+    assert data["terminal_state"] == "scope-declined"
+    assert data["status"] == "declined"
+    assert data["request_id"] == body["result_id"]
+    assert data["correlation_id"] == (
+        body["input_bindings"]["prior_mitigation_check"]["correlation_id"]
+    )
+    assert data["run_id"] == second.json()["run_id"]
+    assert data["structured_result"]["outcome_reason"]["code"] == (
+        "bypass-found-requires-regeneration"
+    )
+    assert data["structured_result"]["primary_candidate"] is None
+    assert data["structured_result"]["bypass_counterexample"] == (
+        body["bypass_counterexample"]
+    )
+    assert data["inference"]["llm_invoked"] is False
+    assert data["reference_bundle"]["bypass_validation"] == body["result_ref"]
+    assert data["reference_bundle"]["mitigation_check"] == (
+        body["input_bindings"]["prior_mitigation_check"]["result_ref"]
+    )
+
+
+def test_direct_bypass_result_conflicts_when_same_id_payload_changes():
+    body = json.loads(DIRECT_BYPASS_EXAMPLE.read_text())
+    first = client.post("/invoke", json=body)
+    body["feedback"]["do_not_repeat"] += " Changed semantic input."
+
+    second = client.post("/invoke", json=body)
+
+    assert first.status_code == 200
+    assert second.status_code == 409
 
 
 def test_invoke_logs_lifecycle_and_sanitized_contracts(caplog):

@@ -9,7 +9,11 @@ from typing import Any, Protocol
 from time import perf_counter
 
 from control_translation.contracts import DatabricksResultReference
-from control_translation.upstream import UpstreamRecord, decode_json_object
+from control_translation.upstream import (
+    UpstreamRecord,
+    UpstreamResolutionError,
+    decode_json_object,
+)
 
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -18,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 class _Cursor(Protocol):
     def execute(self, operation: str, parameters: tuple[Any, ...] | None = None) -> Any: ...
-    def fetchone(self) -> Any: ...
+    def fetchall(self) -> list[Any]: ...
     def close(self) -> None: ...
 
 
@@ -55,6 +59,11 @@ class DatabricksUpstreamResultResolver:
         self._connection_factory = connection_factory or self._default_connection
 
     def fetch(self, reference: DatabricksResultReference) -> UpstreamRecord | None:
+        coordinates = (
+            reference.catalog,
+            reference.schema_name,
+            reference.table,
+        )
         table_name = ".".join(
             _quote_identifier(value, label)
             for value, label in (
@@ -64,33 +73,52 @@ class DatabricksUpstreamResultResolver:
             )
         )
         if reference.key.startswith("defense-generation-result:"):
+            expected_coordinates = (
+                "36889_janus_dev",
+                "defense_generation",
+                "defense_generation_results",
+            )
             operation = f"""
                 SELECT result_id, terminal_state, TO_JSON(request_json),
                        TO_JSON(result_json)
                 FROM {table_name}
                 WHERE result_id = ?
-                LIMIT 1
+                LIMIT 2
             """
             shape = "defense"
         elif reference.key.startswith("mitigation-check-result:"):
+            expected_coordinates = (
+                "36889_janus_dev",
+                "mitigation-check",
+                "mitigation_check",
+            )
             operation = f"""
                 SELECT result_id, result_json
                 FROM {table_name}
                 WHERE result_id = ?
-                LIMIT 1
+                LIMIT 2
             """
             shape = "mitigation"
         elif reference.key.startswith("bypass-validation-result:"):
+            expected_coordinates = (
+                "36889_janus_dev",
+                "bypass_validation",
+                "bypass_validation_results",
+            )
             operation = f"""
                 SELECT result_id, terminal_state, correlation_id,
                        request_json, result_json
                 FROM {table_name}
                 WHERE result_id = ?
-                LIMIT 1
+                LIMIT 2
             """
             shape = "bypass"
         else:
             raise ValueError("Unsupported upstream result-reference key")
+        if coordinates != expected_coordinates:
+            raise ValueError(
+                f"{shape} result reference does not match the approved table"
+            )
         connection: _Connection | None = None
         cursor: _Cursor | None = None
         started = perf_counter()
@@ -104,7 +132,12 @@ class DatabricksUpstreamResultResolver:
             connection = self._connection_factory()
             cursor = connection.cursor()
             cursor.execute(operation, (reference.key,))
-            row = cursor.fetchone()
+            rows = cursor.fetchall()
+            if len(rows) > 1:
+                raise UpstreamResolutionError(
+                    f"{shape} result reference resolved to multiple rows"
+                )
+            row = rows[0] if rows else None
             logger.info(
                 "Upstream Databricks read completed shape=%s table=%s "
                 "result_id=%s found=%s duration_ms=%.2f",

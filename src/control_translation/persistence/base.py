@@ -36,6 +36,7 @@ def canonical_request_hash(envelope: InvokeRequestEnvelope) -> str:
     payload = envelope.model_dump_json(
         include={
             "input",
+            "subject",
             "upstream_result_refs",
             "routing_metadata",
             "scope_config",

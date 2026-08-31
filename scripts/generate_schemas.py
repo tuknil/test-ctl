@@ -7,7 +7,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from control_translation.contracts import InvokeRequestEnvelope, ResultEnvelope
+from pydantic import TypeAdapter
+
+from control_translation.contracts import InvokeAPIRequest, ResultEnvelope
 
 
 def main() -> None:
@@ -16,7 +18,7 @@ def main() -> None:
     schemas_dir.mkdir(exist_ok=True)
 
     (schemas_dir / "request.schema.json").write_text(
-        json.dumps(InvokeRequestEnvelope.model_json_schema(), indent=2)
+        json.dumps(TypeAdapter(InvokeAPIRequest).json_schema(), indent=2)
     )
     (schemas_dir / "result.schema.json").write_text(
         json.dumps(ResultEnvelope.model_json_schema(), indent=2)

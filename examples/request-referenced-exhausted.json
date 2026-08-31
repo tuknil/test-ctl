@@ -1,52 +1,84 @@
 {
+  "contract_id": "control-translation@1.0",
+  "request_id": "janus-control-translation-request:CVE-2026-77392:exhausted-10",
+  "correlation_id": "uat-CVE-2026-77392-dev29-0004",
+  "subject": {
+    "vulnerability_id": "CVE-2026-77392",
+    "candidate_id": "candidate:CVE-2026-77392:waf:53d0ad133914d5c8"
+  },
   "input": {
     "target_context": {
       "target_technology": "akamai-waf",
       "target_policy_context_id": "akamai-policy:example:rev-17"
     }
   },
-  "request_id": "control-translation-request:example-exhausted",
-  "correlation_id": "janus-correlation:example-exhausted",
-  "idempotency_key": "control-translation:example-exhausted:v1",
-  "subject_record_revision_id": "canonical-vulnerability-revision:example-exhausted",
-  "upstream_result_refs": {
-    "defense_generation": {
-      "system": "databricks",
-      "catalog": "36889_janus_dev",
-      "schema": "defense_generation",
-      "table": "defense_generation_results",
-      "key": "defense-generation-result:example-exhausted"
+  "upstream_inputs": [
+    {
+      "capability": "defense-generation",
+      "contract_id": "defense-generation@1.0",
+      "run_id": "defense-run:58d33b15d533257dfed59819",
+      "result_id": "defense-generation-result:58d33b15d533257dfed59819",
+      "terminal_state": "candidate-produced",
+      "status": "completed",
+      "correlation_id": "uat-CVE-2026-77392-dev29-0004",
+      "result_ref": {
+        "system": "databricks",
+        "catalog": "36889_janus_dev",
+        "schema": "defense_generation",
+        "table": "defense_generation_results",
+        "key": "defense-generation-result:58d33b15d533257dfed59819"
+      },
+      "evidence_refs": []
     },
-    "mitigation_check": {
-      "system": "databricks",
-      "catalog": "36889_janus_dev",
-      "schema": "mitigation-check",
-      "table": "mitigation_check",
-      "key": "mitigation-check-result:example-exhausted"
+    {
+      "capability": "mitigation-check",
+      "contract_id": "mitigation-check@1.0",
+      "run_id": "mc-run-3c02971aa69dcbe450d49e2e",
+      "result_id": "mitigation-check-result:21f3f336083e2c509ac6f55c",
+      "terminal_state": "blocked",
+      "status": "completed",
+      "correlation_id": "uat-CVE-2026-77392-dev29-0004",
+      "result_ref": {
+        "system": "databricks",
+        "catalog": "36889_janus_dev",
+        "schema": "mitigation-check",
+        "table": "mitigation_check",
+        "key": "mitigation-check-result:21f3f336083e2c509ac6f55c"
+      },
+      "evidence_refs": []
     },
-    "bypass_validation": {
-      "system": "databricks",
-      "catalog": "36889_janus_dev",
-      "schema": "bypass_validation",
-      "table": "bypass_validation_results",
-      "key": "bypass-validation-result:example-exhausted"
+    {
+      "capability": "bypass-validation",
+      "contract_id": "capability-completion@1.0",
+      "run_id": "bvrun_c2624b83262547f1a19d62fb",
+      "result_id": "bypass-validation-result:bvrun_c2624b83262547f1a19d62fb",
+      "terminal_state": "bypass-found",
+      "status": "completed",
+      "correlation_id": "uat-CVE-2026-77392-dev29-0004",
+      "result_ref": {
+        "system": "databricks",
+        "catalog": "36889_janus_dev",
+        "schema": "bypass_validation",
+        "table": "bypass_validation_results",
+        "key": "bypass-validation-result:bvrun_c2624b83262547f1a19d62fb"
+      },
+      "evidence_refs": [
+        "evidence://control/bvrun_c2624b83262547f1a19d62fb:attempt-2",
+        "evidence://target/bvrun_c2624b83262547f1a19d62fb:attempt-2"
+      ]
     }
-  },
-  "routing_metadata": {
+  ],
+  "routing_context": {
+    "route": "loop-exhausted",
+    "mitigation_check_terminal_state": "blocked",
+    "mitigation_check_match": true,
+    "bypass_validation_terminal_state": "bypass-found",
     "loop_exhausted": true,
     "completed_iterations": 10,
-    "max_iterations": 10,
-    "bypass_validation_terminal_state": "bypass-found",
-    "bypass_validation_result_ref": {
-      "system": "databricks",
-      "catalog": "36889_janus_dev",
-      "schema": "bypass_validation",
-      "table": "bypass_validation_results",
-      "key": "bypass-validation-result:example-exhausted"
-    }
+    "max_iterations": 10
   },
   "provenance": {
     "caller": "janus-orchestration",
-    "source": "candidate-proof-loop"
+    "source": "temporal"
   }
 }
