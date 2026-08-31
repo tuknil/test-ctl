@@ -123,7 +123,7 @@ jobs:
           echo "Images:"
           echo " control-translation"
           echo ""
-          echo "Target Repository : amp0047460-devop"
+          echo "Target Repository : apm0047460-DevOPS"
           echo "Event Type        : feature-build"
           echo "======================================"
 
@@ -134,7 +134,7 @@ jobs:
           script: |
             await github.rest.repos.createDispatchEvent({
               owner: context.repo.owner,
-              repo: 'amp0047460-devop',
+              repo: 'apm0047460-DevOPS',
               event_type: 'feature-build',
 
               client_payload: {
