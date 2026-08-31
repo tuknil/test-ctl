@@ -1,5 +1,41 @@
 {
   "$defs": {
+    "BypassCounterexample": {
+      "description": "Bounded bypass evidence preserved for a declined exhausted route.",
+      "properties": {
+        "counterexample_id": {
+          "title": "Counterexample Id",
+          "type": "string"
+        },
+        "sample_ref": {
+          "title": "Sample Ref",
+          "type": "string"
+        },
+        "variant_family": {
+          "title": "Variant Family",
+          "type": "string"
+        },
+        "observed_behavior": {
+          "title": "Observed Behavior",
+          "type": "string"
+        },
+        "evidence_refs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence Refs",
+          "type": "array"
+        }
+      },
+      "required": [
+        "counterexample_id",
+        "sample_ref",
+        "variant_family",
+        "observed_behavior"
+      ],
+      "title": "BypassCounterexample",
+      "type": "object"
+    },
     "CandidateArtifact": {
       "properties": {
         "artifact_type": {
@@ -88,6 +124,28 @@
         "outcome_reason": {
           "$ref": "#/$defs/OutcomeReason"
         },
+        "proof_loop_qualification": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProofLoopQualification"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "bypass_counterexample": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BypassCounterexample"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "primary_candidate": {
           "anyOf": [
             {
@@ -120,6 +178,41 @@
         "prose_summary"
       ],
       "title": "ControlTranslationResult",
+      "type": "object"
+    },
+    "DatabricksResultReference": {
+      "additionalProperties": false,
+      "description": "Authoritative pointer to one upstream result in Unity Catalog.",
+      "properties": {
+        "system": {
+          "title": "System",
+          "type": "string"
+        },
+        "catalog": {
+          "title": "Catalog",
+          "type": "string"
+        },
+        "schema": {
+          "title": "Schema",
+          "type": "string"
+        },
+        "table": {
+          "title": "Table",
+          "type": "string"
+        },
+        "key": {
+          "title": "Key",
+          "type": "string"
+        }
+      },
+      "required": [
+        "system",
+        "catalog",
+        "schema",
+        "table",
+        "key"
+      ],
+      "title": "DatabricksResultReference",
       "type": "object"
     },
     "EvidenceBinding": {
@@ -184,6 +277,11 @@
           "title": "Target Policy Context Id",
           "type": "string"
         },
+        "configured_poc_defaults_used": {
+          "default": false,
+          "title": "Configured Poc Defaults Used",
+          "type": "boolean"
+        },
         "current_policy_snapshot_id": {
           "anyOf": [
             {
@@ -243,6 +341,8 @@
         "insufficient-policy-context",
         "insufficient-pattern-context",
         "invalid-input",
+        "loop-exhausted-with-bypass",
+        "bypass-found-requires-regeneration",
         "provider-failure",
         "result-assembly-failure"
       ],
@@ -345,6 +445,86 @@
       "title": "PrimaryCandidate",
       "type": "object"
     },
+    "ProofLoopQualification": {
+      "description": "Result qualification; loop exhaustion is not bypass clearance.",
+      "properties": {
+        "route": {
+          "enum": [
+            "validated",
+            "poc-exhaustion"
+          ],
+          "title": "Route",
+          "type": "string"
+        },
+        "bypass_cleared": {
+          "title": "Bypass Cleared",
+          "type": "boolean"
+        },
+        "loop_exhausted": {
+          "title": "Loop Exhausted",
+          "type": "boolean"
+        },
+        "completed_iterations": {
+          "title": "Completed Iterations",
+          "type": "integer"
+        },
+        "max_iterations": {
+          "title": "Max Iterations",
+          "type": "integer"
+        },
+        "bypass_validation_terminal_state": {
+          "enum": [
+            "no-bypass-found",
+            "bypass-found"
+          ],
+          "title": "Bypass Validation Terminal State",
+          "type": "string"
+        },
+        "bypass_validation_result_ref": {
+          "$ref": "#/$defs/DatabricksResultReference"
+        }
+      },
+      "required": [
+        "route",
+        "bypass_cleared",
+        "loop_exhausted",
+        "completed_iterations",
+        "max_iterations",
+        "bypass_validation_terminal_state",
+        "bypass_validation_result_ref"
+      ],
+      "title": "ProofLoopQualification",
+      "type": "object"
+    },
+    "ResultReference": {
+      "description": "Stable API reference to a durable capability result.",
+      "properties": {
+        "system": {
+          "default": "control-translation",
+          "title": "System",
+          "type": "string"
+        },
+        "type": {
+          "default": "result-api",
+          "title": "Type",
+          "type": "string"
+        },
+        "result_id": {
+          "title": "Result Id",
+          "type": "string"
+        },
+        "href": {
+          "title": "Href",
+          "type": "string"
+        }
+      },
+      "required": [
+        "result_id",
+        "href"
+      ],
+      "title": "ResultReference",
+      "type": "object"
+    },
     "Subject": {
       "properties": {
         "vulnerability_id": {
@@ -379,6 +559,28 @@
       ],
       "title": "TerminalState",
       "type": "string"
+    },
+    "UpstreamResultReferences": {
+      "additionalProperties": false,
+      "description": "Role-bound proof-loop records required for referenced invocation.",
+      "properties": {
+        "defense_generation": {
+          "$ref": "#/$defs/DatabricksResultReference"
+        },
+        "mitigation_check": {
+          "$ref": "#/$defs/DatabricksResultReference"
+        },
+        "bypass_validation": {
+          "$ref": "#/$defs/DatabricksResultReference"
+        }
+      },
+      "required": [
+        "defense_generation",
+        "mitigation_check",
+        "bypass_validation"
+      ],
+      "title": "UpstreamResultReferences",
+      "type": "object"
     }
   },
   "properties": {
@@ -387,8 +589,17 @@
       "title": "Capability",
       "type": "string"
     },
+    "contract_id": {
+      "default": "control-translation@1.0",
+      "title": "Contract Id",
+      "type": "string"
+    },
     "run_id": {
       "title": "Run Id",
+      "type": "string"
+    },
+    "result_id": {
+      "title": "Result Id",
       "type": "string"
     },
     "status": {
@@ -397,6 +608,36 @@
     },
     "terminal_state": {
       "$ref": "#/$defs/TerminalState"
+    },
+    "request_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Request Id"
+    },
+    "correlation_id": {
+      "title": "Correlation Id",
+      "type": "string"
+    },
+    "result_ref": {
+      "$ref": "#/$defs/ResultReference"
+    },
+    "upstream_result_refs": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/UpstreamResultReferences"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     },
     "structured_result": {
       "$ref": "#/$defs/ControlTranslationResult"
@@ -435,11 +676,19 @@
       },
       "title": "Trace",
       "type": "array"
+    },
+    "inference": {
+      "additionalProperties": true,
+      "title": "Inference",
+      "type": "object"
     }
   },
   "required": [
+    "result_id",
     "status",
     "terminal_state",
+    "correlation_id",
+    "result_ref",
     "structured_result",
     "prose"
   ],

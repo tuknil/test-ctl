@@ -1,0 +1,52 @@
+{
+  "input": {
+    "target_context": {
+      "target_technology": "akamai-waf",
+      "target_policy_context_id": "akamai-policy:example:rev-17"
+    }
+  },
+  "request_id": "control-translation-request:example-validated",
+  "correlation_id": "janus-correlation:example-validated",
+  "idempotency_key": "control-translation:example-validated:v1",
+  "subject_record_revision_id": "canonical-vulnerability-revision:example-validated",
+  "upstream_result_refs": {
+    "defense_generation": {
+      "system": "databricks",
+      "catalog": "36889_janus_dev",
+      "schema": "defense_generation",
+      "table": "defense_generation_results",
+      "key": "defense-generation-result:example-validated"
+    },
+    "mitigation_check": {
+      "system": "databricks",
+      "catalog": "36889_janus_dev",
+      "schema": "mitigation-check",
+      "table": "mitigation_check",
+      "key": "mitigation-check-result:example-validated"
+    },
+    "bypass_validation": {
+      "system": "databricks",
+      "catalog": "36889_janus_dev",
+      "schema": "bypass_validation",
+      "table": "bypass_validation_results",
+      "key": "bypass-validation-result:example-validated"
+    }
+  },
+  "routing_metadata": {
+    "loop_exhausted": false,
+    "completed_iterations": 4,
+    "max_iterations": 10,
+    "bypass_validation_terminal_state": "no-bypass-found",
+    "bypass_validation_result_ref": {
+      "system": "databricks",
+      "catalog": "36889_janus_dev",
+      "schema": "bypass_validation",
+      "table": "bypass_validation_results",
+      "key": "bypass-validation-result:example-validated"
+    }
+  },
+  "provenance": {
+    "caller": "janus-orchestration",
+    "source": "candidate-proof-loop"
+  }
+}

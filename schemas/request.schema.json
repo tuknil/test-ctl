@@ -1,13 +1,67 @@
 {
   "$defs": {
+    "BypassCounterexample": {
+      "description": "Bounded bypass evidence preserved for a declined exhausted route.",
+      "properties": {
+        "counterexample_id": {
+          "title": "Counterexample Id",
+          "type": "string"
+        },
+        "sample_ref": {
+          "title": "Sample Ref",
+          "type": "string"
+        },
+        "variant_family": {
+          "title": "Variant Family",
+          "type": "string"
+        },
+        "observed_behavior": {
+          "title": "Observed Behavior",
+          "type": "string"
+        },
+        "evidence_refs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence Refs",
+          "type": "array"
+        }
+      },
+      "required": [
+        "counterexample_id",
+        "sample_ref",
+        "variant_family",
+        "observed_behavior"
+      ],
+      "title": "BypassCounterexample",
+      "type": "object"
+    },
     "ControlTranslationRequest": {
+      "additionalProperties": false,
       "description": "Input contract for a single control-translation invocation.",
       "properties": {
         "proven_pattern": {
-          "$ref": "#/$defs/ProvenMitigationPattern"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProvenMitigationPattern"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Legacy direct-input form. Omit when authoritative upstream Databricks result references are supplied in the envelope."
         },
         "target_context": {
-          "$ref": "#/$defs/TargetContext"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TargetContext"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "translation_policy": {
           "$ref": "#/$defs/TranslationPolicy"
@@ -26,14 +80,674 @@
           "title": "Current Policy Snapshot Id"
         }
       },
-      "required": [
-        "proven_pattern",
-        "target_context"
-      ],
       "title": "ControlTranslationRequest",
       "type": "object"
     },
+    "DatabricksResultReference": {
+      "additionalProperties": false,
+      "description": "Authoritative pointer to one upstream result in Unity Catalog.",
+      "properties": {
+        "system": {
+          "title": "System",
+          "type": "string"
+        },
+        "catalog": {
+          "title": "Catalog",
+          "type": "string"
+        },
+        "schema": {
+          "title": "Schema",
+          "type": "string"
+        },
+        "table": {
+          "title": "Table",
+          "type": "string"
+        },
+        "key": {
+          "title": "Key",
+          "type": "string"
+        }
+      },
+      "required": [
+        "system",
+        "catalog",
+        "schema",
+        "table",
+        "key"
+      ],
+      "title": "DatabricksResultReference",
+      "type": "object"
+    },
+    "DirectBypassFeedback": {
+      "additionalProperties": false,
+      "properties": {
+        "feedback_id": {
+          "minLength": 1,
+          "title": "Feedback Id",
+          "type": "string"
+        },
+        "source": {
+          "const": "bypass-validation",
+          "title": "Source",
+          "type": "string"
+        },
+        "rejected_candidate_id": {
+          "minLength": 1,
+          "title": "Rejected Candidate Id",
+          "type": "string"
+        },
+        "failed_gate": {
+          "const": "bypass",
+          "title": "Failed Gate",
+          "type": "string"
+        },
+        "observed_failure": {
+          "minLength": 1,
+          "title": "Observed Failure",
+          "type": "string"
+        },
+        "why_it_sucks": {
+          "minLength": 1,
+          "title": "Why It Sucks",
+          "type": "string"
+        },
+        "do_not_repeat": {
+          "minLength": 1,
+          "title": "Do Not Repeat",
+          "type": "string"
+        },
+        "counterexample": {
+          "$ref": "#/$defs/DirectBypassFeedbackCounterexample"
+        },
+        "evidence_refs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence Refs",
+          "type": "array"
+        },
+        "reusable": {
+          "title": "Reusable",
+          "type": "boolean"
+        },
+        "reusable_reason": {
+          "minLength": 1,
+          "title": "Reusable Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "feedback_id",
+        "source",
+        "rejected_candidate_id",
+        "failed_gate",
+        "observed_failure",
+        "why_it_sucks",
+        "do_not_repeat",
+        "counterexample",
+        "evidence_refs",
+        "reusable",
+        "reusable_reason"
+      ],
+      "title": "DirectBypassFeedback",
+      "type": "object"
+    },
+    "DirectBypassFeedbackCounterexample": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "minLength": 1,
+          "title": "Kind",
+          "type": "string"
+        },
+        "reference": {
+          "minLength": 1,
+          "title": "Reference",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "reference"
+      ],
+      "title": "DirectBypassFeedbackCounterexample",
+      "type": "object"
+    },
+    "DirectBypassOutcome": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "bypass-found",
+          "title": "Code",
+          "type": "string"
+        },
+        "detail": {
+          "minLength": 1,
+          "title": "Detail",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "detail"
+      ],
+      "title": "DirectBypassOutcome",
+      "type": "object"
+    },
+    "DirectBypassSearchBounds": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt_budget": {
+          "minimum": 1,
+          "title": "Attempt Budget",
+          "type": "integer"
+        },
+        "attempts_executed": {
+          "minimum": 1,
+          "title": "Attempts Executed",
+          "type": "integer"
+        },
+        "stop_reason": {
+          "minLength": 1,
+          "title": "Stop Reason",
+          "type": "string"
+        },
+        "timeout_seconds": {
+          "minimum": 1,
+          "title": "Timeout Seconds",
+          "type": "integer"
+        },
+        "variant_families_attempted": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Variant Families Attempted",
+          "type": "array"
+        },
+        "variant_families_out_of_scope": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Variant Families Out Of Scope",
+          "type": "array"
+        },
+        "variant_families_requested": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Variant Families Requested",
+          "type": "array"
+        }
+      },
+      "required": [
+        "attempt_budget",
+        "attempts_executed",
+        "stop_reason",
+        "timeout_seconds",
+        "variant_families_attempted",
+        "variant_families_out_of_scope",
+        "variant_families_requested"
+      ],
+      "title": "DirectBypassSearchBounds",
+      "type": "object"
+    },
+    "DirectBypassSubject": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate_fingerprint_id": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Candidate Fingerprint Id",
+          "type": "string"
+        },
+        "candidate_id": {
+          "minLength": 1,
+          "title": "Candidate Id",
+          "type": "string"
+        },
+        "vulnerability_id": {
+          "minLength": 1,
+          "title": "Vulnerability Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "candidate_fingerprint_id",
+        "candidate_id",
+        "vulnerability_id"
+      ],
+      "title": "DirectBypassSubject",
+      "type": "object"
+    },
+    "DirectBypassValidationResult": {
+      "additionalProperties": false,
+      "description": "Deployed canonical bypass result accepted as a safe compatibility input.",
+      "properties": {
+        "contract_id": {
+          "const": "bypass-validation@1.0",
+          "title": "Contract Id",
+          "type": "string"
+        },
+        "result_id": {
+          "pattern": "^bypass-validation-result:.+",
+          "title": "Result Id",
+          "type": "string"
+        },
+        "run_id": {
+          "minLength": 1,
+          "title": "Run Id",
+          "type": "string"
+        },
+        "result_ref": {
+          "$ref": "#/$defs/DatabricksResultReference"
+        },
+        "produced_at": {
+          "format": "date-time",
+          "title": "Produced At",
+          "type": "string"
+        },
+        "subject": {
+          "$ref": "#/$defs/DirectBypassSubject"
+        },
+        "input_bindings": {
+          "additionalProperties": true,
+          "title": "Input Bindings",
+          "type": "object"
+        },
+        "terminal_state": {
+          "const": "bypass-found",
+          "title": "Terminal State",
+          "type": "string"
+        },
+        "outcome_reason": {
+          "$ref": "#/$defs/DirectBypassOutcome"
+        },
+        "search_bounds": {
+          "$ref": "#/$defs/DirectBypassSearchBounds"
+        },
+        "bypass_counterexample": {
+          "$ref": "#/$defs/BypassCounterexample"
+        },
+        "feedback": {
+          "$ref": "#/$defs/DirectBypassFeedback"
+        },
+        "limitations": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Limitations",
+          "type": "array"
+        },
+        "prose_summary": {
+          "title": "Prose Summary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "contract_id",
+        "result_id",
+        "run_id",
+        "result_ref",
+        "produced_at",
+        "subject",
+        "input_bindings",
+        "terminal_state",
+        "outcome_reason",
+        "search_bounds",
+        "bypass_counterexample",
+        "feedback",
+        "limitations",
+        "prose_summary"
+      ],
+      "title": "DirectBypassValidationResult",
+      "type": "object"
+    },
+    "InvocationSubject": {
+      "additionalProperties": false,
+      "description": "Orchestration-owned subject binding for the selected candidate.",
+      "properties": {
+        "vulnerability_id": {
+          "minLength": 1,
+          "title": "Vulnerability Id",
+          "type": "string"
+        },
+        "candidate_id": {
+          "minLength": 1,
+          "title": "Candidate Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "vulnerability_id",
+        "candidate_id"
+      ],
+      "title": "InvocationSubject",
+      "type": "object"
+    },
+    "InvokeRequestEnvelope": {
+      "additionalProperties": false,
+      "properties": {
+        "contract_id": {
+          "anyOf": [
+            {
+              "const": "control-translation@1.0",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Contract Id"
+        },
+        "input": {
+          "$ref": "#/$defs/ControlTranslationRequest"
+        },
+        "subject": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InvocationSubject"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "upstream_inputs": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/OrchestrationUpstreamInput"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Upstream Inputs"
+        },
+        "routing_context": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OrchestrationRoutingContext"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "upstream_result_refs": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UpstreamResultReferences"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "routing_metadata": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProofLoopRoutingMetadata"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "scope_config": {
+          "additionalProperties": true,
+          "title": "Scope Config",
+          "type": "object"
+        },
+        "request_id": {
+          "anyOf": [
+            {
+              "maxLength": 255,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Request Id"
+        },
+        "correlation_id": {
+          "anyOf": [
+            {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Correlation Id"
+        },
+        "idempotency_key": {
+          "anyOf": [
+            {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Idempotency Key"
+        },
+        "subject_record_revision_id": {
+          "anyOf": [
+            {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Authoritative orchestration subject-record revision, when available.",
+          "title": "Subject Record Revision Id"
+        },
+        "provenance": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Provenance"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "InvokeRequestEnvelope",
+      "type": "object"
+    },
+    "OrchestrationRoutingContext": {
+      "additionalProperties": false,
+      "description": "Temporal-owned routing decision for the completed proof loop.",
+      "properties": {
+        "route": {
+          "enum": [
+            "validated",
+            "loop-exhausted"
+          ],
+          "title": "Route",
+          "type": "string"
+        },
+        "mitigation_check_terminal_state": {
+          "const": "blocked",
+          "title": "Mitigation Check Terminal State",
+          "type": "string"
+        },
+        "mitigation_check_match": {
+          "const": true,
+          "title": "Mitigation Check Match",
+          "type": "boolean"
+        },
+        "bypass_validation_terminal_state": {
+          "enum": [
+            "no-bypass-found",
+            "bypass-found"
+          ],
+          "title": "Bypass Validation Terminal State",
+          "type": "string"
+        },
+        "loop_exhausted": {
+          "title": "Loop Exhausted",
+          "type": "boolean"
+        },
+        "completed_iterations": {
+          "minimum": 1,
+          "title": "Completed Iterations",
+          "type": "integer"
+        },
+        "max_iterations": {
+          "minimum": 1,
+          "title": "Max Iterations",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "route",
+        "mitigation_check_terminal_state",
+        "mitigation_check_match",
+        "bypass_validation_terminal_state",
+        "loop_exhausted",
+        "completed_iterations",
+        "max_iterations"
+      ],
+      "title": "OrchestrationRoutingContext",
+      "type": "object"
+    },
+    "OrchestrationUpstreamInput": {
+      "additionalProperties": false,
+      "description": "One immutable completion supplied by Temporal orchestration.",
+      "properties": {
+        "capability": {
+          "enum": [
+            "defense-generation",
+            "mitigation-check",
+            "bypass-validation"
+          ],
+          "title": "Capability",
+          "type": "string"
+        },
+        "contract_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Contract Id",
+          "type": "string"
+        },
+        "run_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "title": "Run Id",
+          "type": "string"
+        },
+        "result_id": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Result Id",
+          "type": "string"
+        },
+        "terminal_state": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Terminal State",
+          "type": "string"
+        },
+        "status": {
+          "const": "completed",
+          "title": "Status",
+          "type": "string"
+        },
+        "correlation_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "title": "Correlation Id",
+          "type": "string"
+        },
+        "result_ref": {
+          "$ref": "#/$defs/DatabricksResultReference"
+        },
+        "evidence_refs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence Refs",
+          "type": "array"
+        }
+      },
+      "required": [
+        "capability",
+        "contract_id",
+        "run_id",
+        "result_id",
+        "terminal_state",
+        "status",
+        "correlation_id",
+        "result_ref"
+      ],
+      "title": "OrchestrationUpstreamInput",
+      "type": "object"
+    },
+    "ProofLoopRoutingMetadata": {
+      "additionalProperties": false,
+      "description": "Orchestration-owned routing facts for the latest candidate cycle.",
+      "properties": {
+        "loop_exhausted": {
+          "title": "Loop Exhausted",
+          "type": "boolean"
+        },
+        "completed_iterations": {
+          "minimum": 1,
+          "title": "Completed Iterations",
+          "type": "integer"
+        },
+        "max_iterations": {
+          "minimum": 1,
+          "title": "Max Iterations",
+          "type": "integer"
+        },
+        "bypass_validation_terminal_state": {
+          "enum": [
+            "no-bypass-found",
+            "bypass-found"
+          ],
+          "title": "Bypass Validation Terminal State",
+          "type": "string"
+        },
+        "bypass_validation_result_ref": {
+          "$ref": "#/$defs/DatabricksResultReference"
+        }
+      },
+      "required": [
+        "loop_exhausted",
+        "completed_iterations",
+        "max_iterations",
+        "bypass_validation_terminal_state",
+        "bypass_validation_result_ref"
+      ],
+      "title": "ProofLoopRoutingMetadata",
+      "type": "object"
+    },
     "ProvenMitigationPattern": {
+      "additionalProperties": false,
       "description": "A proven mitigation pattern produced upstream by the fast proof loop\n(defense-generation -> mitigation-check + bypass-validation).",
       "properties": {
         "proven_pattern_id": {
@@ -82,6 +796,7 @@
       "type": "object"
     },
     "Provenance": {
+      "additionalProperties": false,
       "properties": {
         "caller": {
           "anyOf": [
@@ -112,26 +827,40 @@
       "type": "object"
     },
     "TargetContext": {
+      "additionalProperties": false,
       "description": "Identifies the target control technology and policy context.",
       "properties": {
         "target_technology": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
           "description": "e.g. akamai-waf, firewall-generic, edr-s1",
-          "title": "Target Technology",
-          "type": "string"
+          "title": "Target Technology"
         },
         "target_policy_context_id": {
-          "title": "Target Policy Context Id",
-          "type": "string"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target Policy Context Id"
         }
       },
-      "required": [
-        "target_technology",
-        "target_policy_context_id"
-      ],
       "title": "TargetContext",
       "type": "object"
     },
     "TranslationPolicy": {
+      "additionalProperties": false,
       "description": "Dials/config for how aggressive or conservative translation should be.",
       "properties": {
         "translation_policy_id": {
@@ -152,44 +881,36 @@
       },
       "title": "TranslationPolicy",
       "type": "object"
-    }
-  },
-  "properties": {
-    "input": {
-      "$ref": "#/$defs/ControlTranslationRequest"
     },
-    "scope_config": {
-      "additionalProperties": true,
-      "title": "Scope Config",
+    "UpstreamResultReferences": {
+      "additionalProperties": false,
+      "description": "Role-bound proof-loop records required for referenced invocation.",
+      "properties": {
+        "defense_generation": {
+          "$ref": "#/$defs/DatabricksResultReference"
+        },
+        "mitigation_check": {
+          "$ref": "#/$defs/DatabricksResultReference"
+        },
+        "bypass_validation": {
+          "$ref": "#/$defs/DatabricksResultReference"
+        }
+      },
+      "required": [
+        "defense_generation",
+        "mitigation_check",
+        "bypass_validation"
+      ],
+      "title": "UpstreamResultReferences",
       "type": "object"
-    },
-    "request_id": {
-      "anyOf": [
-        {
-          "type": "string"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "title": "Request Id"
-    },
-    "provenance": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/Provenance"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null
     }
   },
-  "required": [
-    "input"
-  ],
-  "title": "InvokeRequestEnvelope",
-  "type": "object"
+  "anyOf": [
+    {
+      "$ref": "#/$defs/InvokeRequestEnvelope"
+    },
+    {
+      "$ref": "#/$defs/DirectBypassValidationResult"
+    }
+  ]
 }

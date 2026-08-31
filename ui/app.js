@@ -399,8 +399,35 @@ function renderResult(envelope) {
   `;
 }
 
-function renderError(message) {
-  resultEl.innerHTML = `<p class="empty">Error: ${message}</p>`;
+function renderError(error, httpStatus = null) {
+  const detail = error && typeof error === "object" ? error.detail : null;
+  const message = typeof detail === "string"
+    ? detail
+    : detail?.message || (typeof error === "string" ? error : "Request failed.");
+  const diagnostic = detail?.diagnostic;
+  const diagnosticHtml = diagnostic ? `
+    <section class="diagnostic-log" aria-label="Failure diagnostic log">
+      <h3>Diagnostic log</h3>
+      <div class="kv">
+        <dt>Time</dt><dd>${escapeHtml(new Date().toISOString())}</dd>
+        <dt>HTTP status</dt><dd>${escapeHtml(httpStatus ?? "unknown")}</dd>
+        <dt>Operation</dt><dd>${escapeHtml(diagnostic.operation ?? "unknown")}</dd>
+        <dt>Backend</dt><dd>${escapeHtml(diagnostic.backend ?? "unknown")}</dd>
+        <dt>Error type</dt><dd>${escapeHtml(diagnostic.error_type ?? "unknown")}</dd>
+        <dt>Request id</dt><dd>${escapeHtml(diagnostic.request_id ?? "not available")}</dd>
+        <dt>Correlation id</dt><dd>${escapeHtml(diagnostic.correlation_id ?? "not available")}</dd>
+        <dt>Run id</dt><dd>${escapeHtml(diagnostic.run_id ?? "not available")}</dd>
+        <dt>Result id</dt><dd>${escapeHtml(diagnostic.result_id ?? "not available")}</dd>
+      </div>
+      <label>Root cause</label>
+      <pre>${escapeHtml(diagnostic.error ?? "No additional detail was provided.")}</pre>
+      <p class="diagnostic-note">The complete traceback was written to the server/container log.</p>
+    </section>` : "";
+  resultEl.innerHTML = `
+    <h2>Request failed</h2>
+    <p class="error-message">${escapeHtml(message)}</p>
+    ${diagnosticHtml}
+  `;
 }
 
 submitBtn.addEventListener("click", async () => {
@@ -434,9 +461,10 @@ submitBtn.addEventListener("click", async () => {
     });
     const data = await resp.json();
     if (!resp.ok) {
-      renderError(JSON.stringify(data));
+      renderError(data, resp.status);
     } else {
       renderResult(data);
+      loadRuns(0);
     }
   } catch (err) {
     renderError(String(err));
@@ -741,6 +769,7 @@ submitJsonBtn.addEventListener("click", async () => {
     const data = await resp.json();
     lastResponseJson = data;
     jsonOutput.textContent = JSON.stringify(data, null, 2);
+    if (resp.ok) loadRuns(0);
   } catch (err) {
     jsonOutput.textContent = "Error: " + String(err);
     lastResponseJson = null;
@@ -757,3 +786,148 @@ copyJsonBtn.addEventListener("click", () => {
     setTimeout(() => { copyJsonBtn.textContent = "Copy JSON"; }, 1500);
   }
 });
+
+// Durable runs dashboard
+const RUNS_PAGE_SIZE = 10;
+const runsTableBody = document.getElementById("runsTableBody");
+const runsStatus = document.getElementById("runsStatus");
+const refreshRunsBtn = document.getElementById("refreshRuns");
+const previousRunsBtn = document.getElementById("previousRuns");
+const nextRunsBtn = document.getElementById("nextRuns");
+const runsPageLabel = document.getElementById("runsPageLabel");
+const runDetail = document.getElementById("runDetail");
+const runDetailStatus = document.getElementById("runDetailStatus");
+const runDetailMetadata = document.getElementById("runDetailMetadata");
+const runDetailSummary = document.getElementById("runDetailSummary");
+const runArtifactDetails = document.getElementById("runArtifactDetails");
+const runArtifactContent = document.getElementById("runArtifactContent");
+let runsOffset = 0;
+
+function appendTextElement(parent, tagName, text, className = "") {
+  const element = document.createElement(tagName);
+  element.textContent = text;
+  if (className) element.className = className;
+  parent.appendChild(element);
+  return element;
+}
+
+function formatTimestamp(value) {
+  const timestamp = new Date(value);
+  return Number.isNaN(timestamp.getTime()) ? value : timestamp.toLocaleString();
+}
+
+function setDashboardCounts(data) {
+  const counts = data.terminal_state_counts || {};
+  document.getElementById("runCountTotal").textContent = String(data.total);
+  document.getElementById("runCountTranslated").textContent = String(counts.translated || 0);
+  document.getElementById("runCountReview").textContent = String(
+    (counts["scope-declined"] || 0) +
+    (counts["insufficient-context"] || 0) +
+    (counts["cannot-express"] || 0),
+  );
+  document.getElementById("runCountMalfunction").textContent = String(counts.malfunction || 0);
+}
+
+function renderRuns(data) {
+  runsTableBody.replaceChildren();
+  setDashboardCounts(data);
+
+  if (data.items.length === 0) {
+    runsStatus.textContent = data.total === 0
+      ? "No stored runs yet. Submit a translation to create the first durable run."
+      : "No runs are available on this page.";
+  } else {
+    runsStatus.textContent = `Showing ${data.offset + 1}–${data.offset + data.items.length} of ${data.total} stored runs.`;
+  }
+
+  data.items.forEach((run) => {
+    const row = document.createElement("tr");
+    appendTextElement(row, "td", formatTimestamp(run.completed_at));
+    const vulnerabilityCell = appendTextElement(row, "td", "");
+    appendTextElement(vulnerabilityCell, "code", run.vulnerability_id);
+    appendTextElement(row, "td", run.target_technology);
+    const stateCell = appendTextElement(row, "td", "");
+    appendTextElement(stateCell, "span", run.terminal_state, `badge ${badgeClass(run.terminal_state)}`);
+    appendTextElement(row, "td", run.artifact_type || "None");
+    const actionCell = appendTextElement(row, "td", "");
+    const button = appendTextElement(actionCell, "button", "View", "row-action secondary-btn");
+    button.type = "button";
+    button.setAttribute("aria-label", `View run ${run.run_id}`);
+    button.addEventListener("click", () => loadRunDetail(run.run_id));
+    runsTableBody.appendChild(row);
+  });
+
+  const currentPage = Math.floor(data.offset / data.limit) + 1;
+  const totalPages = Math.max(1, Math.ceil(data.total / data.limit));
+  runsPageLabel.textContent = `Page ${currentPage} of ${totalPages}`;
+  previousRunsBtn.disabled = data.offset === 0;
+  nextRunsBtn.disabled = !data.has_more;
+}
+
+async function loadRuns(offset = runsOffset) {
+  runsOffset = Math.max(0, offset);
+  refreshRunsBtn.disabled = true;
+  runsStatus.textContent = "Loading stored runs…";
+  try {
+    const response = await fetch(`/v1/runs?limit=${RUNS_PAGE_SIZE}&offset=${runsOffset}`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    renderRuns(await response.json());
+  } catch (error) {
+    runsTableBody.replaceChildren();
+    runsStatus.textContent = `Unable to load stored runs: ${String(error)}`;
+  } finally {
+    refreshRunsBtn.disabled = false;
+  }
+}
+
+function addMetadata(label, value) {
+  appendTextElement(runDetailMetadata, "dt", label);
+  appendTextElement(runDetailMetadata, "dd", value);
+}
+
+async function loadRunDetail(runId) {
+  runDetail.hidden = false;
+  runDetailStatus.textContent = "Loading translation details…";
+  runDetailMetadata.replaceChildren();
+  runDetailSummary.replaceChildren();
+  runArtifactDetails.hidden = true;
+  runArtifactContent.textContent = "";
+  runDetail.scrollIntoView({ behavior: "smooth", block: "nearest" });
+
+  try {
+    const response = await fetch(`/runs/${encodeURIComponent(runId)}`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const envelope = await response.json();
+    const result = envelope.structured_result;
+    const candidate = result.primary_candidate;
+    runDetailStatus.textContent = "";
+    addMetadata("Run ID", envelope.run_id);
+    addMetadata("Result ID", envelope.result_id);
+    addMetadata("Correlation ID", envelope.correlation_id);
+    addMetadata("Terminal state", result.terminal_state);
+    addMetadata("Vulnerability", result.subject.vulnerability_id);
+    addMetadata("Target", result.input_bindings.target_technology);
+    addMetadata("Outcome", result.outcome_reason.code);
+    appendTextElement(runDetailSummary, "h4", "Translation summary");
+    appendTextElement(runDetailSummary, "p", result.prose_summary);
+    appendTextElement(runDetailSummary, "h4", "Outcome detail");
+    appendTextElement(runDetailSummary, "p", result.outcome_reason.detail);
+    if (candidate) {
+      appendTextElement(runDetailSummary, "h4", "Candidate translation");
+      appendTextElement(runDetailSummary, "p", candidate.implements_discriminator.translation);
+      runArtifactContent.textContent = candidate.candidate_artifact.content_ref;
+      runArtifactDetails.hidden = false;
+    }
+  } catch (error) {
+    runDetailStatus.textContent = `Unable to load translation details: ${String(error)}`;
+  }
+}
+
+refreshRunsBtn.addEventListener("click", () => loadRuns(runsOffset));
+previousRunsBtn.addEventListener("click", () => loadRuns(runsOffset - RUNS_PAGE_SIZE));
+nextRunsBtn.addEventListener("click", () => loadRuns(runsOffset + RUNS_PAGE_SIZE));
+document.getElementById("closeRunDetail").addEventListener("click", () => {
+  runDetail.hidden = true;
+});
+
+loadRuns(0);

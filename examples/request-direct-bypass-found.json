@@ -1,0 +1,143 @@
+{
+  "contract_id": "bypass-validation@1.0",
+  "result_id": "bypass-validation-result:bvrun_c2624b83262547f1a19d62fb",
+  "run_id": "bvrun_c2624b83262547f1a19d62fb",
+  "result_ref": {
+    "system": "databricks",
+    "catalog": "36889_janus_dev",
+    "schema": "bypass_validation",
+    "table": "bypass_validation_results",
+    "key": "bypass-validation-result:bvrun_c2624b83262547f1a19d62fb"
+  },
+  "produced_at": "2026-08-31T12:39:12.767565+00:00",
+  "subject": {
+    "candidate_fingerprint_id": "sha256:611a00ed9f1b73bd8c655f5dee2fb0e1d7fd23d81f15389a67630ade55f212c9",
+    "candidate_id": "candidate:candidate:CVE-2026-77392:waf:53d0ad133914d5c8:waf:152405",
+    "vulnerability_id": "candidate:CVE-2026-77392:waf:53d0ad133914d5c8"
+  },
+  "input_bindings": {
+    "bypass_profile_id": "bypass-profile:http-waf:mvp1",
+    "candidate_artifact_id": "mitigation-check-result://mitigation-check-result:21f3f336083e2c509ac6f55c/candidate",
+    "prior_block_context": "mitigator-grade-http-probe",
+    "prior_mitigation_check": {
+      "_storage_result_id": "mitigation-check-result:21f3f336083e2c509ac6f55c",
+      "actual": {
+        "blocked": true,
+        "detail": "WAF rule 152405 matched; request denied with 403",
+        "matched_rule_id": "152405",
+        "reached_app": false,
+        "status_code": 403
+      },
+      "candidate": {
+        "action": "deny",
+        "engine": "modsecurity",
+        "kind": "waf-rule",
+        "rule": "SecRule ARGS:Researcher \"@rx (?i)(?:'\\s+OR\\s+'1'='1|%27\\s*(?:OR|%4f%52|%4F%52)\\s*%271%27%3[dD]%271)\" \"id:152405,phase:2,deny,status:403,log,msg:'JANUS candidate: block evidenced Researcher SQLi discriminator variants',tag:'janus-candidate'\"",
+        "rule_id": "152405"
+      },
+      "capability": "mitigation-check",
+      "contract_id": "mitigation-check@1.0",
+      "correlation_id": "uat-CVE-2026-77392-dev29-0004",
+      "evidence_refs": [],
+      "expected": {
+        "blocked": true,
+        "classification": "true-positive",
+        "status_code": 403
+      },
+      "limitations": [
+        "indirect proof: only discriminator behavior was proven blocked (LLD §7.3)"
+      ],
+      "match": true,
+      "prose_summary": "Candidate BLOCKED the supplied sample; actual matches expected (blocked).",
+      "result_id": "mitigation-check-result:21f3f336083e2c509ac6f55c",
+      "result_ref": {
+        "catalog": "36889_janus_dev",
+        "key": "mitigation-check-result:21f3f336083e2c509ac6f55c",
+        "schema": "mitigation-check",
+        "system": "databricks",
+        "table": "mitigation_check"
+      },
+      "run_id": "mc-run-3c02971aa69dcbe450d49e2e",
+      "status": "completed",
+      "steps": [
+        "read waf-rule from Databricks defense-generation-result:58d33b15d533257dfed59819",
+        "execution mode: inmemory",
+        "parsed candidate SecRule id=152405 (deny to 403)",
+        "WAF matched rule 152405 on supplied discriminator"
+      ],
+      "substrate": {
+        "container_id": "in-process",
+        "host_port": 39405,
+        "image": "(no substrate provided)",
+        "ready": true,
+        "runner": "inmemory"
+      },
+      "terminal_state": "blocked",
+      "test_basis": {
+        "expected": {
+          "blocked": true,
+          "classification": "true-positive",
+          "status_code": 403
+        },
+        "kind": "http-request-attack",
+        "proof_basis": "mitigation-discriminator",
+        "request": {
+          "body": "Researcher=' OR '1'='1",
+          "headers": {
+            "Content-Type": "application/x-www-form-urlencoded"
+          },
+          "method": "POST",
+          "path": "/public/submit.php"
+        }
+      }
+    },
+    "seed_basis_id": "mitigation-check-result://mitigation-check-result:21f3f336083e2c509ac6f55c/test-basis",
+    "validation_run_id": "local-run-094312cf",
+    "validation_substrate_id": "substrate://local/waf-harness-1"
+  },
+  "terminal_state": "bypass-found",
+  "outcome_reason": {
+    "code": "bypass-found",
+    "detail": "A encoding-family variant reached the protected target."
+  },
+  "search_bounds": {
+    "attempt_budget": 10,
+    "attempts_executed": 2,
+    "stop_reason": "first-attributable-bypass",
+    "timeout_seconds": 60,
+    "variant_families_attempted": ["encoding", "case"],
+    "variant_families_out_of_scope": [],
+    "variant_families_requested": ["encoding", "case"]
+  },
+  "bypass_counterexample": {
+    "counterexample_id": "bypass:bvrun_c2624b83262547f1a19d62fb:variant:encoding:54e7a97715b6",
+    "sample_ref": "evidence://bypass/bvrun_c2624b83262547f1a19d62fb/bvrun_c2624b83262547f1a19d62fb:attempt-2/sample",
+    "variant_family": "encoding",
+    "observed_behavior": "reached-protected-target",
+    "evidence_refs": [
+      "evidence://control/bvrun_c2624b83262547f1a19d62fb:attempt-2",
+      "evidence://target/bvrun_c2624b83262547f1a19d62fb:attempt-2"
+    ]
+  },
+  "feedback": {
+    "feedback_id": "mitigation-feedback:candidate:candidate:CVE-2026-77392:waf:53d0ad133914d5c8:waf:152405:bypass",
+    "source": "bypass-validation",
+    "rejected_candidate_id": "candidate:candidate:CVE-2026-77392:waf:53d0ad133914d5c8:waf:152405",
+    "failed_gate": "bypass",
+    "observed_failure": "Candidate did not block an encoding variant.",
+    "why_it_sucks": "The candidate matched the raw discriminator but the encoding transform reached the protected target unmatched.",
+    "do_not_repeat": "Do not emit a rule that relies only on raw-token matching without equivalent normalization or encoding-form coverage for the same discriminator.",
+    "counterexample": {
+      "kind": "bypass-variant",
+      "reference": "evidence://bypass/bvrun_c2624b83262547f1a19d62fb/bvrun_c2624b83262547f1a19d62fb:attempt-2/sample"
+    },
+    "evidence_refs": [
+      "evidence://control/bvrun_c2624b83262547f1a19d62fb:attempt-2",
+      "evidence://target/bvrun_c2624b83262547f1a19d62fb:attempt-2"
+    ],
+    "reusable": true,
+    "reusable_reason": "The bypass exposes a real weakness in the candidate's normalization handling."
+  },
+  "limitations": [],
+  "prose_summary": ""
+}

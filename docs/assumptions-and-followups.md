@@ -8,16 +8,23 @@
   Akamai custom-rule JSON, PAN-OS security-rule CLI/XML, SentinelOne STAR
   JSON), but the generated artifacts are still **not validated against a
   real tenant**.
-- Real proven-mitigation-pattern inputs from `defense-generation` /
-  `mitigation-check` / `bypass-validation` do not exist yet — fixtures
-  synthesize plausible proven patterns (e.g. the OGNL/Content-Type example
-  from the CFS, plus a firewall and EDR variant).
+- Reference-based upstream integration is implemented. Control Translation
+  reads exact result IDs from the live Defense Generation, Mitigation Check,
+  and Bypass Validation Unity Catalog tables and validates cross-record
+  correlation, subject revision, vulnerability, candidate, and route state.
+  Legacy fixture patterns remain for deterministic tests and demonstrations.
+- Databricks CLI access, warehouse availability, source-table schemas, and
+  representative records were verified with a developer identity. The managed
+  deployment's OAuth M2M identity and grants must still be validated in each
+  environment.
 - Conflict detection is simplistic (keyword/pattern overlap against a small
   fixture policy set), not a full policy-diff engine.
 - No authentication/authorization on the API — acceptable for demo/POC,
   must be added before any real deployment carries sensitive policy data.
-- Persistence is in-memory (`_RUNS` dict in `api.py`); results are lost on
-  restart — acceptable for demo, flagged for follow-up.
+- Persistence is backend-selectable. SQLite provides atomic local durability
+  for development/tests. The Databricks SQL implementation writes the existing
+  Unity Catalog results table and is intended as the shared Azure backend, but
+  still requires live grant/connectivity and operational validation.
 - The Pydantic AI agent is a **doer** proposing candidate artifacts; a
   deterministic **judge** (`syntax_validator` + `conflict_checker`) gates
   the result before `translated` is ever emitted — no raw LLM text becomes
@@ -37,9 +44,10 @@
   `artifacts/spikes.md` "live-policy" spike).
 - Real Palo Alto / firewall policy-read + rule-syntax integration.
 - Real SentinelOne/EDR policy model, once/if EDR is confirmed in scope.
-- Replace fixture proven-mitigation-pattern samples with real outputs once
-  `defense-generation` / `mitigation-check` / `bypass-validation` exist.
-- Durable persistence (a real database) once this moves past demo stage.
+- Validate Databricks OAuth M2M warehouse/catalog/schema/table grants,
+  retention, query performance, and recovery in the target Azure environment.
+- Add strong concurrent idempotency enforcement before increasing the service
+  beyond one writer replica.
 - AuthN/AuthZ + secrets management (e.g. Azure Key Vault) before handling
   real policy data.
 - Richer multi-policy conflict analysis (CFS §8 deferred item).

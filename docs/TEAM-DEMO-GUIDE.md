@@ -14,6 +14,8 @@
    - Policy context: **akamai-policy:example:rev-17**
 4. Click **Translate**.
 5. In the result, show the terminal state, candidate artifact, limitations, and **Inference evidence**.
+6. Scroll to **Stored runs and translations**. Show that the completed run is
+    visible after refresh, then select **View** to retrieve its durable result.
 
 ## Simple end-to-end flow
 
@@ -33,7 +35,9 @@ flowchart LR
 
 ### In plain language
 
-- **Upstream security workflow:** supplies an already-proven mitigation pattern. This service does not invent a vulnerability finding.
+- **Upstream security workflow:** supplies exact result references after either
+    a validated proof loop or the approved ten-cycle PoC exhaustion route. This
+    service does not invent a vulnerability finding.
 - **Control Translation:** converts that pattern into the syntax of a chosen target tool.
 - **LLM or fixture:** creates the initial rule candidate.
 - **Deterministic validators:** check the structure and look for policy conflicts.
@@ -45,12 +49,20 @@ flowchart LR
 flowchart TD
     A[Defense generation\ncreates a mitigation idea] --> B[Mitigation check\nshows the mitigation blocks expected behavior]
     B --> C[Bypass validation\nchecks for bypass attempts]
-    C --> D[Proven mitigation pattern]
-    D --> E[Control Translation request]
+    C --> D{Orchestration route}
+    D -- no-bypass-found --> E[Validated request references]
+    D -- bypass-found after 10 cycles --> G[PoC exhaustion request references]
+    E --> H[Control Translation fetches and validates exact rows]
+    G --> H
     F[Security engineer chooses\ntarget tool and policy context] --> E
+    F --> G
 ```
 
-For the current demo, the upstream records and policy data are **fixtures** (sample data bundled with this repository). In a production workflow, those records would come from the connected upstream security systems.
+The repository supports exact upstream records from the three authoritative
+Unity Catalog result tables. Fixture records remain available for offline
+tests and demos. Target policy snapshots are still fixture-backed. An exhausted
+candidate is explicitly reported as `bypass_cleared=false`; it is not presented
+as equivalent to `no-bypass-found`.
 
 ## What does “valid policy context” mean?
 
@@ -133,6 +145,19 @@ The UI result says **`LLM invoked for this request: yes`** only when the request
 | Assumptions and limitations | Conditions, known gaps, and reasons for human review. |
 | Inference evidence | Mode, provider, model, and whether the LLM was invoked. |
 
+## Durable run dashboard
+
+The dashboard at the bottom of `/` reads persisted run summaries from
+`GET /v1/runs`. It displays completion time, vulnerability, target, terminal
+state, and artifact type without downloading every stored request or candidate.
+Selecting **View** retrieves that run through `GET /runs/{run_id}` and displays
+its translation summary, outcome, and an initially collapsed candidate artifact.
+
+Use the dashboard to demonstrate that results survive a browser refresh and a
+service restart when the same SQLite volume is retained. Candidate artifacts
+may contain security-control logic, so do not expose the dashboard outside the
+approved authenticated environment.
+
 ## Other possible outcomes
 
 | State | Simple meaning |
@@ -150,7 +175,9 @@ The UI result says **`LLM invoked for this request: yes`** only when the request
 | `GET` | `/` | Demo UI |
 | `GET` | `/inference` | Current mode, provider, model, and credential status without secrets |
 | `POST` | `/invoke` | Submit a translation request |
-| `GET` | `/runs/{run_id}` | Retrieve an in-memory prior result |
+| `GET` | `/v1/runs?limit=25&offset=0` | Retrieve a bounded page of safe run summaries |
+| `GET` | `/runs/{run_id}` | Retrieve a durable prior completion envelope |
+| `GET` | `/v1/results/{result_id}` | Retrieve a durable structured result |
 | `GET` | `/docs` | Swagger UI |
 | `GET` | `/health` | Health check |
 

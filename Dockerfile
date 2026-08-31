@@ -1,4 +1,5 @@
-FROM artifact.it.att.com/astra-secure-container-catalog/python:3.12 AS base
+ARG BASE_IMAGE=artifact.it.att.com/astra-secure-container-catalog/python:3.12
+FROM ${BASE_IMAGE} AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -6,21 +7,28 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Install uv and resolve dependencies from the project metadata. Dependency
-# failures intentionally fail the image build rather than being ignored.
-RUN pip install --no-cache-dir uv
+# Run the service and its durable store without root privileges.
+RUN addgroup --system app && adduser --system --ingroup app app
 
 # Install dependencies first for better layer caching
 COPY pyproject.toml ./
 COPY src ./src
-RUN uv pip install --system --no-cache .
+# The corporate pip configuration is supplied as a build secret and exists
+# only for this layer. It is never copied into the image or build context.
+RUN --mount=type=secret,id=pip_conf,target=/etc/pip.conf,required=true \
+    pip install --no-cache-dir .
 
 # Static assets are served by FastAPI and contain no runtime secrets.
 COPY ui ./ui
 
+RUN mkdir -p /app/data && chown -R app:app /app
+
 ENV PYTHONPATH=/app/src \
     HOST=0.0.0.0 \
-    PORT=8000
+    PORT=8000 \
+    DATABASE_PATH=/app/data/control_translation.db
+
+USER app
 
 EXPOSE 8000
 
