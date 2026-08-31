@@ -38,6 +38,15 @@ _VALID_CONDITION_TYPES = frozenset(
 
 # Keys that indicate an action was (incorrectly) embedded in the rule body.
 _FORBIDDEN_ACTION_KEYS = frozenset({"action", "deny", "alert"})
+_SYNTHETIC_REQUEST_HEADERS = frozenset(
+    {
+        "request-uri",
+        "request_uri",
+        "request-body",
+        "request_body",
+    }
+)
+_HEADER_VALUE_CONDITION = "requestHeaderValueMatch"
 
 
 class AkamaiWafAdapter:
@@ -117,8 +126,31 @@ class AkamaiWafAdapter:
         if not isinstance(condition.get("positiveMatch"), bool):
             errors.append(f"{prefix}.positiveMatch must be a boolean.")
         value = condition.get("value")
-        if not (isinstance(value, list) and value) and not isinstance(value, str):
+        if isinstance(value, list):
+            valid_value = bool(value) and all(
+                isinstance(item, str) and bool(item) for item in value
+            )
+        else:
+            valid_value = isinstance(value, str) and bool(value)
+        if not valid_value:
             errors.append(f"{prefix}.value must be a non-empty array or a string.")
+        condition_type = condition.get("type")
+        header = condition.get("header")
+        if condition_type == _HEADER_VALUE_CONDITION:
+            if not isinstance(header, str) or not header.strip():
+                errors.append(
+                    f"{prefix}.header must name a real request header for "
+                    "requestHeaderValueMatch."
+                )
+            elif header.strip().lower() in _SYNTHETIC_REQUEST_HEADERS:
+                errors.append(
+                    f"{prefix}.header {header!r} is synthetic; use pathMatch for "
+                    "URI paths or an argsPost condition for request bodies."
+                )
+        elif "header" in condition:
+            errors.append(
+                f"{prefix}.header is valid only for requestHeaderValueMatch."
+            )
         return errors
 
     def detect_conflicts(

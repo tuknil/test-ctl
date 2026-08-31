@@ -27,6 +27,7 @@ from control_translation.contracts import (
     InvokeRequestEnvelope,
     OutcomeReason,
     ProofLoopQualification,
+    ProofLoopTranslationRequirements,
     ResultEnvelope,
     ResultReference,
     Subject,
@@ -134,6 +135,7 @@ def invoke(
     doer: TranslationDoer | None = None,
     correlation_id: str | None = None,
     proof_loop_qualification: ProofLoopQualification | None = None,
+    translation_requirements: ProofLoopTranslationRequirements | None = None,
 ) -> ResultEnvelope:
     """Direct Python invocation entry point. Providers are injectable for
     testing; defaults resolve from configured settings (fixture-backed)."""
@@ -255,6 +257,7 @@ def invoke(
         adapter=adapter,
         doer=doer,
         snapshot=snapshot,
+        translation_requirements=translation_requirements,
         allow_narrower_translation=request.translation_policy.allow_narrower_translation,
         allow_equivalent_translation=request.translation_policy.allow_equivalent_translation,
     )
@@ -467,6 +470,9 @@ def invoke_envelope(
         correlation_id=envelope.correlation_id,
         proof_loop_qualification=(
             resolved.qualification if references is not None else None
+        ),
+        translation_requirements=(
+            resolved.translation_requirements if references is not None else None
         ),
     )
     if references is not None and resolved.qualification.route == "poc-exhaustion":

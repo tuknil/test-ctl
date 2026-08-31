@@ -1,13 +1,17 @@
+import json
+
 import pytest
 
 from control_translation import capability
 from control_translation.contracts import (
     ControlTranslationRequest,
+    ProofLoopTranslationRequirements,
     TargetContext,
     TranslationPolicy,
 )
 from control_translation.providers.fixtures import get_fixture_pattern
 from control_translation.terminal import TerminalState
+from control_translation.agents.translation_agent import TranslationProposal
 
 
 def _request(target_technology: str, context_id: str) -> ControlTranslationRequest:
@@ -84,6 +88,97 @@ def test_translation_policy_can_disallow_equivalent_result():
     envelope = capability.invoke(request)
     assert envelope.terminal_state == TerminalState.CANNOT_EXPRESS
     assert "does not allow equivalent" in envelope.structured_result.outcome_reason.detail
+
+
+class StaticAkamaiDoer:
+    def __init__(self, content: dict) -> None:
+        self.content = content
+
+    def propose(self, **kwargs):
+        return TranslationProposal(
+            candidate_content=json.dumps(self.content),
+            translation_label="equivalent",
+            justification="Test translation.",
+        )
+
+
+def _bypass_requirements() -> ProofLoopTranslationRequirements:
+    return ProofLoopTranslationRequirements(
+        original_payload="Researcher='",
+        bypass_payload="526573656172636865723d27",
+        bypass_variant_or_encoding="hexadecimal",
+        constraint_for_next_candidate="Cover the hexadecimal bypass form.",
+        post_waf_canonical_forms=["Researcher%253D%2527", "Researcher='"],
+        effective_request={
+            "method": "POST",
+            "path": "/public/submit.php",
+            "body": "526573656172636865723d27",
+        },
+        mutation_location={"component": "body", "parameter": "Researcher"},
+    )
+
+
+def test_exact_akamai_translation_rejects_missing_bypass_coverage():
+    doer = StaticAkamaiDoer(
+        {
+            "name": "incomplete",
+            "operation": "AND",
+            "conditions": [
+                {
+                    "type": "pathMatch",
+                    "positiveMatch": True,
+                    "value": ["/public/submit.php"],
+                },
+                {
+                    "type": "argsPostMatch",
+                    "positiveMatch": True,
+                    "value": ["Researcher='"],
+                },
+            ],
+        }
+    )
+
+    envelope = capability.invoke(
+        _request("akamai-waf", "akamai-policy:example:rev-17"),
+        doer=doer,
+        translation_requirements=_bypass_requirements(),
+    )
+
+    assert envelope.terminal_state == TerminalState.CANNOT_EXPRESS
+    assert "526573656172636865723d27" in envelope.structured_result.outcome_reason.detail
+
+
+def test_exact_akamai_translation_accepts_path_and_body_payload_forms():
+    doer = StaticAkamaiDoer(
+        {
+            "name": "bypass-aware",
+            "operation": "AND",
+            "conditions": [
+                {
+                    "type": "pathMatch",
+                    "positiveMatch": True,
+                    "value": ["/public/submit.php"],
+                },
+                {
+                    "type": "argsPostMatch",
+                    "positiveMatch": True,
+                    "value": [
+                        "Researcher='",
+                        "Researcher%253D%2527",
+                        "526573656172636865723d27",
+                    ],
+                },
+            ],
+        }
+    )
+
+    envelope = capability.invoke(
+        _request("akamai-waf", "akamai-policy:example:rev-17"),
+        doer=doer,
+        translation_requirements=_bypass_requirements(),
+    )
+
+    assert envelope.terminal_state == TerminalState.TRANSLATED
 
 
 @pytest.mark.parametrize(

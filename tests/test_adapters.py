@@ -69,6 +69,52 @@ def test_akamai_adapter_rejects_embedded_action():
     assert any("action" in e.lower() for e in result.errors)
 
 
+def test_akamai_adapter_rejects_synthetic_request_headers():
+    adapter = AkamaiWafAdapter()
+    synthetic_header = json.dumps(
+        {
+            "name": "bad-request-uri-header",
+            "operation": "AND",
+            "conditions": [
+                {
+                    "type": "requestHeaderValueMatch",
+                    "positiveMatch": True,
+                    "header": "Request-URI",
+                    "value": ["/public/submit.php"],
+                }
+            ],
+        }
+    )
+
+    result = adapter.validate_syntax(synthetic_header)
+
+    assert result.valid is False
+    assert any("synthetic" in error for error in result.errors)
+
+
+def test_akamai_adapter_enforces_condition_specific_header_key():
+    adapter = AkamaiWafAdapter()
+    body_condition_with_header = json.dumps(
+        {
+            "name": "bad-body-header",
+            "operation": "AND",
+            "conditions": [
+                {
+                    "type": "argsPostMatch",
+                    "positiveMatch": True,
+                    "header": "Researcher",
+                    "value": ["'"],
+                }
+            ],
+        }
+    )
+
+    result = adapter.validate_syntax(body_condition_with_header)
+
+    assert result.valid is False
+    assert any("valid only" in error for error in result.errors)
+
+
 def test_firewall_adapter_validates_expected_shape():
     adapter = FirewallGenericAdapter()
     valid = (

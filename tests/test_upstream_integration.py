@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
@@ -441,6 +443,51 @@ def _temporal_records() -> dict[str, UpstreamRecord]:
 def test_temporal_envelope_is_normalized_and_translated_after_exhaustion():
     envelope = InvokeRequestEnvelope.model_validate(_temporal_body())
 
+    records = _temporal_records()
+    bypass = records["bypass-validation-result:bypass-1"]
+    records[bypass.result_id] = UpstreamRecord(
+        result_id=bypass.result_id,
+        terminal_state=bypass.terminal_state,
+        correlation_id=bypass.correlation_id,
+        subject_record_revision_id=bypass.subject_record_revision_id,
+        request=bypass.request,
+        result={
+            **bypass.result,
+            "bypass_counterexample": {
+                **bypass.result["bypass_counterexample"],
+                "bypass_variant_or_encoding": "hexadecimal",
+                "counterexample_body": "526573656172636865723d27",
+                "effective_request": {
+                    "method": "POST",
+                    "path": "/public/submit.php",
+                    "body": "526573656172636865723d27",
+                },
+                "generator_type": "deterministic",
+                "generator_version": "1",
+                "mutation_location": {
+                    "component": "body",
+                    "parameter": "Researcher",
+                },
+                "original_payload": "Researcher='",
+                "payload": "526573656172636865723d27",
+                "payload_sha256": "sha256:example",
+                "target_observation": {"reached": True},
+                "variant_id": "variant:hex:1",
+                "waf_observation": {
+                    "decision": "allowed",
+                    "canonical_forms": ["526573656172636865723d27"],
+                },
+            },
+            "feedback": {
+                "bypass_payload": "526573656172636865723d27",
+                "bypass_variant_or_encoding": "hexadecimal",
+                "constraint_for_next_candidate": "Cover the hexadecimal bypass form.",
+                "evidence_refs": ["evidence://feedback/hex"],
+                "original_payload": "Researcher='",
+            },
+        },
+    )
+
     assert envelope.input.proven_pattern is None
     assert envelope.upstream_result_refs is not None
     assert envelope.upstream_result_refs.defense_generation.key.endswith("defense-1")
@@ -453,7 +500,7 @@ def test_temporal_envelope_is_normalized_and_translated_after_exhaustion():
 
     result = capability.invoke_envelope(
         envelope,
-        resolver=FakeResolver(_temporal_records()),
+        resolver=FakeResolver(records),
         settings=_settings(),
     )
 
@@ -465,7 +512,17 @@ def test_temporal_envelope_is_normalized_and_translated_after_exhaustion():
     candidate = result.structured_result.primary_candidate
     assert candidate is not None
     assert candidate.candidate_artifact.artifact_type == "akamai-waf-rule"
-    assert candidate.candidate_artifact.content_ref
+    artifact = json.loads(candidate.candidate_artifact.content_ref)
+    condition_types = {condition["type"] for condition in artifact["conditions"]}
+    assert condition_types == {"pathMatch", "argsPostMatch"}
+    artifact_values = {
+        value
+        for condition in artifact["conditions"]
+        for value in condition["value"]
+    }
+    assert "Researcher='" in artifact_values
+    assert "526573656172636865723d27" in artifact_values
+    assert not any("header" in condition for condition in artifact["conditions"])
     assert any("not bypass-cleared" in item for item in candidate.limitations)
     assert result.structured_result.bypass_counterexample is not None
     assert result.request_id == envelope.request_id
