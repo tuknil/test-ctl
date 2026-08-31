@@ -297,3 +297,148 @@ def test_routing_bypass_reference_must_match_authoritative_reference():
 
     with pytest.raises(ValidationError):
         InvokeRequestEnvelope.model_validate(body)
+
+
+def _temporal_body() -> dict:
+    references = _body()["upstream_result_refs"]
+    return {
+        "contract_id": "control-translation@1.0",
+        "request_id": "janus-control-translation-request-v1-1",
+        "correlation_id": CORRELATION_ID,
+        "subject": {
+            "vulnerability_id": VULNERABILITY_ID,
+            "candidate_id": CANDIDATE_ID,
+        },
+        "upstream_inputs": [
+            {
+                "capability": capability_name,
+                "result_id": reference["key"],
+                "terminal_state": terminal_state,
+                "correlation_id": CORRELATION_ID,
+                "result_ref": reference,
+            }
+            for capability_name, reference, terminal_state in (
+                (
+                    "defense-generation",
+                    references["defense_generation"],
+                    "candidate-produced",
+                ),
+                ("mitigation-check", references["mitigation_check"], "blocked"),
+                (
+                    "bypass-validation",
+                    references["bypass_validation"],
+                    "bypass-found",
+                ),
+            )
+        ],
+        "routing_context": {
+            "route": "loop-exhausted",
+            "mitigation_check_terminal_state": "blocked",
+            "mitigation_check_match": True,
+            "bypass_validation_terminal_state": "bypass-found",
+            "loop_exhausted": True,
+            "completed_iterations": 10,
+            "max_iterations": 10,
+        },
+        "provenance": {
+            "caller": "janus-orchestration",
+            "source": "temporal",
+        },
+    }
+
+
+def _temporal_records() -> dict[str, UpstreamRecord]:
+    records = _records()
+    defense = records["defense-generation-result:defense-1"]
+    records[defense.result_id] = UpstreamRecord(
+        result_id=defense.result_id,
+        terminal_state=defense.terminal_state,
+        correlation_id=None,
+        subject_record_revision_id=None,
+        request={
+            "vulnerability_id": VULNERABILITY_ID,
+            "selected_control_class": "waf",
+            "discriminator": "Block an SQL injection token in the HTTP request body.",
+        },
+        result={
+            "attempt_history": [{"candidate_id": "candidate:historical"}],
+            "primary_candidate": defense.result["primary_candidate"],
+        },
+    )
+    mitigation = records["mitigation-check-result:mitigation-1"]
+    records[mitigation.result_id] = UpstreamRecord(
+        result_id=mitigation.result_id,
+        terminal_state=mitigation.terminal_state,
+        correlation_id=CORRELATION_ID,
+        subject_record_revision_id=None,
+        request={},
+        result={
+            "correlation_id": CORRELATION_ID,
+            "terminal_state": "blocked",
+            "candidate": {"kind": "waf-rule", "rule_id": "109555"},
+        },
+    )
+    bypass = records["bypass-validation-result:bypass-1"]
+    records[bypass.result_id] = UpstreamRecord(
+        result_id=bypass.result_id,
+        terminal_state="bypass-found",
+        correlation_id=CORRELATION_ID,
+        subject_record_revision_id=None,
+        request={},
+        result={
+            "correlation_id": CORRELATION_ID,
+            "terminal_state": "bypass-found",
+            "subject": {
+                "vulnerability_id": CANDIDATE_ID,
+                "candidate_id": f"candidate:{CANDIDATE_ID}:waf:109555",
+            },
+        },
+    )
+    return records
+
+
+def test_temporal_envelope_is_normalized_and_translated_after_exhaustion():
+    envelope = InvokeRequestEnvelope.model_validate(_temporal_body())
+
+    assert envelope.input.proven_pattern is None
+    assert envelope.upstream_result_refs is not None
+    assert envelope.upstream_result_refs.defense_generation.key.endswith("defense-1")
+    assert envelope.routing_metadata is not None
+    assert envelope.routing_metadata.loop_exhausted is True
+    assert envelope.routing_metadata.completed_iterations == 10
+    assert envelope.subject is not None
+    assert envelope.subject.candidate_id == CANDIDATE_ID
+
+    result = capability.invoke_envelope(
+        envelope,
+        resolver=FakeResolver(_temporal_records()),
+        settings=_settings(),
+    )
+
+    assert result.terminal_state == TerminalState.TRANSLATED
+    qualification = result.structured_result.proof_loop_qualification
+    assert qualification is not None
+    assert qualification.route == "poc-exhaustion"
+    assert qualification.bypass_cleared is False
+
+
+def test_temporal_subject_conflict_returns_insufficient_context():
+    body = _temporal_body()
+    body["subject"]["candidate_id"] = "candidate:different"
+
+    result = capability.invoke_envelope(
+        InvokeRequestEnvelope.model_validate(body),
+        resolver=FakeResolver(_temporal_records()),
+        settings=_settings(),
+    )
+
+    assert result.terminal_state == TerminalState.INSUFFICIENT_CONTEXT
+    assert "candidate lineage" in result.structured_result.outcome_reason.detail
+
+
+def test_temporal_upstream_result_id_must_match_reference():
+    body = _temporal_body()
+    body["upstream_inputs"][0]["result_id"] = "defense-generation-result:other"
+
+    with pytest.raises(ValidationError):
+        InvokeRequestEnvelope.model_validate(body)
