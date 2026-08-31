@@ -1,6 +1,4 @@
-# syntax=docker/dockerfile:1
-
-ARG BASE_IMAGE=artifact.it.att.com/apm0014313-dkr-attcc-stage/python3.12-slim-instantclient:21_7.sshtest0.1
+ARG BASE_IMAGE=artifact.it.att.com/astra-secure-container-catalog/python:3.12
 FROM ${BASE_IMAGE} AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
