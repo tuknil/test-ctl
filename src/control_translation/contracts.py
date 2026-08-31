@@ -271,8 +271,16 @@ class UpstreamResultReferences(BaseModel):
     bypass_validation: DatabricksResultReference
 
 
+class InvocationSubject(BaseModel):
+    """Orchestration-owned subject binding for the selected candidate."""
+
+    vulnerability_id: str = Field(min_length=1)
+    candidate_id: str = Field(min_length=1)
+
+
 class InvokeRequestEnvelope(BaseModel):
     input: ControlTranslationRequest
+    subject: Optional[InvocationSubject] = None
     upstream_result_refs: Optional[UpstreamResultReferences] = None
     routing_metadata: Optional[ProofLoopRoutingMetadata] = None
     scope_config: dict[str, Any] = Field(default_factory=dict)
@@ -286,6 +294,78 @@ class InvokeRequestEnvelope(BaseModel):
         description="Authoritative orchestration subject-record revision, when available.",
     )
     provenance: Optional[Provenance] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_temporal_envelope(cls, value: Any) -> Any:
+        """Map the deployed Temporal envelope onto the public request contract."""
+        if not isinstance(value, dict) or not (
+            "upstream_inputs" in value or "routing_context" in value
+        ):
+            return value
+
+        normalized = dict(value)
+        normalized.setdefault("input", {})
+
+        if "upstream_result_refs" not in normalized:
+            upstream_inputs = normalized.get("upstream_inputs")
+            if not isinstance(upstream_inputs, list):
+                raise ValueError("upstream_inputs must be an array")
+            role_names = {
+                "defense-generation": "defense_generation",
+                "mitigation-check": "mitigation_check",
+                "bypass-validation": "bypass_validation",
+            }
+            references: dict[str, Any] = {}
+            envelope_correlation = normalized.get("correlation_id")
+            for item in upstream_inputs:
+                if not isinstance(item, dict):
+                    raise ValueError("upstream_inputs entries must be objects")
+                role = role_names.get(item.get("capability"))
+                if role is None:
+                    continue
+                if role in references:
+                    raise ValueError(f"duplicate {item.get('capability')} upstream input")
+                reference = item.get("result_ref")
+                if not isinstance(reference, dict):
+                    raise ValueError(f"{item.get('capability')} result_ref is required")
+                if item.get("result_id") != reference.get("key"):
+                    raise ValueError(
+                        f"{item.get('capability')} result_id must match result_ref.key"
+                    )
+                item_correlation = item.get("correlation_id")
+                if (
+                    envelope_correlation
+                    and item_correlation
+                    and item_correlation != envelope_correlation
+                ):
+                    raise ValueError(
+                        f"{item.get('capability')} correlation_id does not match envelope"
+                    )
+                references[role] = reference
+            missing = sorted(set(role_names.values()) - set(references))
+            if missing:
+                raise ValueError(
+                    "upstream_inputs must include Defense Generation, Mitigation Check, "
+                    "and Bypass Validation"
+                )
+            normalized["upstream_result_refs"] = references
+
+        if "routing_metadata" not in normalized:
+            routing = normalized.get("routing_context")
+            if not isinstance(routing, dict):
+                raise ValueError("routing_context must be an object")
+            bypass_reference = normalized["upstream_result_refs"]["bypass_validation"]
+            normalized["routing_metadata"] = {
+                "loop_exhausted": routing.get("loop_exhausted"),
+                "completed_iterations": routing.get("completed_iterations"),
+                "max_iterations": routing.get("max_iterations"),
+                "bypass_validation_terminal_state": routing.get(
+                    "bypass_validation_terminal_state"
+                ),
+                "bypass_validation_result_ref": bypass_reference,
+            }
+        return normalized
 
     @model_validator(mode="after")
     def validate_reference_routing(self) -> "InvokeRequestEnvelope":

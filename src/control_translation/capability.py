@@ -417,6 +417,12 @@ def invoke_envelope(
                 correlation_id=envelope.correlation_id,
                 subject_record_revision_id=envelope.subject_record_revision_id,
                 routing_metadata=envelope.routing_metadata,
+                expected_vulnerability_id=(
+                    envelope.subject.vulnerability_id if envelope.subject else None
+                ),
+                expected_candidate_id=(
+                    envelope.subject.candidate_id if envelope.subject else None
+                ),
             )
         except UpstreamResolutionError as exc:
             logger.error(

@@ -58,13 +58,19 @@ def resolve_proof_loop(
     correlation_id: str | None,
     subject_record_revision_id: str | None,
     routing_metadata: ProofLoopRoutingMetadata,
+    expected_vulnerability_id: str | None = None,
+    expected_candidate_id: str | None = None,
 ) -> ResolvedProofLoop:
     """Fetch all three records and enforce proof state and cross-record lineage."""
     if not correlation_id:
         raise UpstreamResolutionError("correlation_id is required for lineage validation")
-    if not subject_record_revision_id:
+    has_orchestration_subject = bool(
+        expected_vulnerability_id and expected_candidate_id
+    )
+    if not subject_record_revision_id and not has_orchestration_subject:
         raise UpstreamResolutionError(
-            "subject_record_revision_id is required for lineage validation"
+            "subject_record_revision_id or an orchestration subject binding is required "
+            "for lineage validation"
         )
 
     required_bypass_state = routing_metadata.bypass_validation_terminal_state
@@ -92,23 +98,54 @@ def resolve_proof_loop(
     for role, record in records.items():
         record_correlation = _one_value(record.document, "correlation_id")
         record_subject = _one_value(record.document, "subject_record_revision_id")
-        if record_correlation != correlation_id:
+        if record_correlation is not None and record_correlation != correlation_id:
             raise UpstreamResolutionError(f"{role} correlation lineage could not be validated")
-        if record_subject != subject_record_revision_id:
+        if record_correlation is None and not has_orchestration_subject:
+            raise UpstreamResolutionError(f"{role} correlation lineage could not be validated")
+        if (
+            subject_record_revision_id
+            and record_subject is not None
+            and record_subject != subject_record_revision_id
+        ):
+            raise UpstreamResolutionError(f"{role} subject lineage could not be validated")
+        if record_subject is None and not has_orchestration_subject:
             raise UpstreamResolutionError(f"{role} subject lineage could not be validated")
 
-    vulnerabilities = {
-        role: _required_one_value(record.document, "vulnerability_id", role)
-        for role, record in records.items()
-    }
-    candidates = {
-        role: _required_one_value(record.document, "candidate_id", role)
-        for role, record in records.items()
-    }
-    if len(set(vulnerabilities.values())) != 1:
-        raise UpstreamResolutionError("upstream vulnerability lineage does not match")
-    if len(set(candidates.values())) != 1:
-        raise UpstreamResolutionError("upstream candidate lineage does not match")
+    if has_orchestration_subject:
+        vulnerability_id = expected_vulnerability_id or ""
+        candidate_id = expected_candidate_id or ""
+        for role, record in records.items():
+            record_vulnerability = _role_vulnerability_id(role, record)
+            record_candidate = _role_candidate_id(role, record)
+            if record_vulnerability and record_vulnerability != vulnerability_id:
+                raise UpstreamResolutionError(
+                    f"{role} vulnerability lineage does not match orchestration subject"
+                )
+            if record_candidate and record_candidate != candidate_id:
+                raise UpstreamResolutionError(
+                    f"{role} candidate lineage does not match orchestration subject"
+                )
+        if _role_vulnerability_id("Defense Generation", records["Defense Generation"]) is None:
+            raise UpstreamResolutionError(
+                "Defense Generation vulnerability_id is missing"
+            )
+        if _role_candidate_id("Defense Generation", records["Defense Generation"]) is None:
+            raise UpstreamResolutionError("Defense Generation candidate_id is missing")
+    else:
+        vulnerabilities = {
+            role: _required_one_value(record.document, "vulnerability_id", role)
+            for role, record in records.items()
+        }
+        candidates = {
+            role: _required_one_value(record.document, "candidate_id", role)
+            for role, record in records.items()
+        }
+        if len(set(vulnerabilities.values())) != 1:
+            raise UpstreamResolutionError("upstream vulnerability lineage does not match")
+        if len(set(candidates.values())) != 1:
+            raise UpstreamResolutionError("upstream candidate lineage does not match")
+        vulnerability_id = vulnerabilities["Defense Generation"]
+        candidate_id = candidates["Defense Generation"]
 
     defense = records["Defense Generation"]
     primary_candidate = _required_mapping(
@@ -129,8 +166,6 @@ def resolve_proof_loop(
         primary_candidate.get("artifact_content"),
         "Defense Generation candidate artifact content is missing",
     )
-    candidate_id = candidates["Defense Generation"]
-    vulnerability_id = vulnerabilities["Defense Generation"]
     mitigation_id = records["Mitigation Check"].result_id
     bypass_id = records["Bypass Validation"].result_id
 
@@ -211,3 +246,49 @@ def _one_value(document: Any, key: str) -> str | None:
 
     visit(document)
     return next(iter(values)) if len(values) == 1 else None
+
+
+def _role_vulnerability_id(role: str, record: UpstreamRecord) -> str | None:
+    """Extract canonical vulnerability lineage without mistaking candidate IDs."""
+    if role == "Defense Generation":
+        primary = record.result.get("primary_candidate")
+        if isinstance(primary, dict):
+            value = primary.get("vulnerability_id")
+            if isinstance(value, str) and value:
+                return value
+        value = record.request.get("vulnerability_id")
+        if isinstance(value, str) and value:
+            return value
+    if role == "Bypass Validation":
+        subject = record.result.get("subject")
+        if isinstance(subject, dict):
+            value = subject.get("vulnerability_id")
+            if isinstance(value, str) and value.startswith("CVE-"):
+                return value
+        return None
+    return _one_value(record.document, "vulnerability_id")
+
+
+def _role_candidate_id(role: str, record: UpstreamRecord) -> str | None:
+    """Extract the selected source candidate rather than history or test variants."""
+    if role == "Defense Generation":
+        primary = record.result.get("primary_candidate")
+        if isinstance(primary, dict):
+            value = primary.get("candidate_id")
+            if isinstance(value, str) and value:
+                return value
+        return None
+    if role == "Bypass Validation":
+        subject = record.result.get("subject")
+        if isinstance(subject, dict):
+            source = subject.get("source_candidate_id")
+            if isinstance(source, str) and source:
+                return source
+            # bypass-validation@1.0 currently places the source Defense
+            # candidate in vulnerability_id and the generated test variant in
+            # candidate_id. Treat only the former as source lineage.
+            legacy_source = subject.get("vulnerability_id")
+            if isinstance(legacy_source, str) and legacy_source.startswith("candidate:"):
+                return legacy_source
+        return None
+    return _one_value(record.document, "candidate_id")
