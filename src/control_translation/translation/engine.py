@@ -8,6 +8,7 @@ uses to route to `cannot-express` / `insufficient-context` / `malfunction`.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from hashlib import sha256
 
@@ -24,6 +25,8 @@ from control_translation.contracts import (
 from control_translation.policy_reader.base import PolicySnapshot
 from control_translation.translation import conflict_checker, syntax_validator
 
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class EngineFailure:
@@ -69,6 +72,11 @@ def translate(
             snapshot=snapshot,
         )
     except Exception as exc:  # provider/model failure
+        logger.exception(
+            "Translation provider failed vulnerability_id=%s target_technology=%s",
+            pattern.vulnerability_id,
+            target_technology,
+        )
         return EngineFailure(reason="provider-failure", detail=str(exc))
 
     if proposal.translation_label not in ("exact", "equivalent", "narrower"):

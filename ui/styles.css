@@ -267,6 +267,32 @@ ul.compact {
   overflow: auto;
 }
 
+.error-message {
+  color: #ffb4b4;
+  font-weight: 600;
+}
+
+.diagnostic-log {
+  background: #171b24;
+  border: 1px solid #a64747;
+  border-radius: 8px;
+  margin-top: 16px;
+  padding: 16px;
+}
+
+.diagnostic-log h3 { margin-top: 0; }
+.diagnostic-log pre {
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.diagnostic-note {
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 0;
+}
+
 .copy-btn {
   width: auto;
   margin-top: 10px;

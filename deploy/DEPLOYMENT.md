@@ -18,6 +18,9 @@ The service:
 - validates model output with target-specific syntax and conflict checks;
 - returns a reviewable candidate and never deploys a control automatically.
 
+The release-specific root cause, validation evidence, rollout checks, and
+rollback guidance are in `deploy/RELEASE-HANDOFF.md`.
+
 ## 2. Build artifact
 
 Build from the repository root:
@@ -59,6 +62,9 @@ Recommended probes:
 
 `/ready` returns HTTP `503` when runtime/live-model configuration is invalid or
 the selected durable store cannot be connected to and queried.
+Readiness is not a write probe. A deployment is not accepted until an
+`/invoke` request is durably written and retrieved using the smoke test in
+section 9.
 
 ## 4. Environment variables to give DevOps
 
@@ -219,10 +225,13 @@ tables; it is a read-only consumer of upstream capability results.
 7. Switch the non-production deployment to live mode and inject the rotated model secret.
 8. Confirm `/ready` returns `200`.
 9. Invoke the approved CVE-2017-5638/Akamai example.
-10. Confirm the response reports `inference.llm_invoked=true` and contains no secret or endpoint.
-11. Run one approved reference-based request with a real, lineage-complete
+10. First invoke through the normal browser form or an equivalent payload that
+   omits `request_id`. Confirm the API generates the identifier, returns HTTP
+   200, and the row is readable from `/v1/runs` and `/v1/results/{result_id}`.
+11. Confirm the response reports `inference.llm_invoked=true` and contains no secret or endpoint.
+12. Run one approved reference-based request with a real, lineage-complete
   result trio. Confirm `proof_loop_qualification.route=validated`.
-12. Test PoC exhaustion only when the referenced Bypass Validation row is
+13. Test PoC exhaustion only when the referenced Bypass Validation row is
   actually `bypass-found`. Confirm `route=poc-exhaustion`,
   `bypass_cleared=false`, and an explicit not-bypass-cleared limitation.
 
@@ -230,7 +239,7 @@ The dashboard and full run/result retrieval endpoints expose operational and
 candidate data. Place them behind the same approved authentication,
 authorization, TLS, and audit controls as `/invoke`; do not publish the static
 UI directly to the Internet.
-13. Review logs and model usage, then obtain application/security owner approval before promotion.
+14. Review logs and model usage, then obtain application/security owner approval before promotion.
 
 Mode changes require a new revision/restart because configuration is loaded when the process starts.
 
@@ -266,6 +275,10 @@ Expected checks:
   `reference_bundle`;
 - exhaustion retains `bypass-found` and reports `bypass_cleared=false`;
 - a successful live request reports `llm_invoked: true`;
+- a request that omits `request_id` is assigned a non-null server-generated ID
+  before the Databricks write;
+- container logs report `Invocation durably persisted` for the smoke request;
+- no `DELTA_NOT_NULL_CONSTRAINT_VIOLATED` appears for `request_id`;
 - no response or log contains an API key or authorization header.
 
 The local `examples/` directory is not included in the runtime image. Run the final command from a checked-out repository or an approved API test runner.
@@ -283,6 +296,11 @@ Capture at minimum:
 - container restarts and memory/CPU saturation.
 
 Do not log full API keys, authorization headers, complete policy snapshots, or candidate content without approved data classification and redaction.
+
+Application diagnostics log complete tracebacks server-side with safe
+operation and request context. SQL parameter values are never logged. Storage
+HTTP 503 responses and the demo UI expose only a sanitized root cause and safe
+identifiers for correlation with container logs.
 
 Recommended alerts:
 

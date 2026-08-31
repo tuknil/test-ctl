@@ -5,6 +5,10 @@
 **Deployment target:** Azure Container Apps behind approved internal ingress
 **Status:** Deployable for a controlled internal POC; not approved for direct Internet exposure or autonomous control deployment.
 
+**Current release:** fixes the deployed Databricks
+`request_id` NOT NULL write failure and adds safe end-to-end diagnostics. See
+`deploy/RELEASE-HANDOFF.md` before rollout.
+
 This service generates and validates control-specific **candidates**. It does
 not deploy Akamai, firewall, or EDR controls.
 
@@ -72,6 +76,11 @@ The application writes the validated request, structured result, full response
 envelope, hashes/sizes, evidence references, and upstream proof references.
 It returns a successful invocation only after persistence succeeds.
 
+`POST /invoke` now generates a UUID `request_id` and `correlation_id` when a
+caller omits either value. Caller-provided values are preserved. This fixes the
+previous case where connectivity and `/ready` succeeded but Databricks rejected
+the completion because its `request_id` column is non-nullable.
+
 ## Azure Container Apps settings
 
 - **Target port:** `8000`
@@ -101,6 +110,7 @@ concurrency strategy is approved.
 7. Check `/health`, `/ready`, `/schema`, and `GET /v1/runs?limit=1` through the
    approved gateway.
 8. Submit one fixture `/invoke` request with a unique `idempotency_key`.
+   Deliberately omit `request_id` for this first smoke test.
 9. Verify the result appears through `/v1/runs`, `/runs/{run_id}`, and
    `/v1/results/{result_id}`, plus exactly one Databricks row.
 10. Repeat the same request/key and verify it returns the original IDs; change
@@ -108,6 +118,11 @@ concurrency strategy is approved.
 11. Enable live AT&T Inference only after the storage smoke test succeeds.
 12. Review redacted application logs, Databricks audit logs, and owner approval
     before promotion.
+
+Do not treat `/ready` or a successful `SELECT` as proof that writes work. The
+release gate is a successful `/invoke` followed by durable read-back. Logs must
+contain `Invocation durably persisted` and must not contain the former
+`DELTA_NOT_NULL_CONSTRAINT_VIOLATED` error.
 
 ## Rollback
 
@@ -119,6 +134,7 @@ concurrency strategy is approved.
 
 ## Handoff references
 
+- Current release/root-cause handoff: `deploy/RELEASE-HANDOFF.md`
 - Detailed deployment runbook: `deploy/DEPLOYMENT.md`
 - Databricks data/authentication runbook: `docs/databricks-persistence.md`
 - Architecture and persistence design: `docs/LLD.md`

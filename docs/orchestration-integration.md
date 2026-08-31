@@ -13,7 +13,16 @@ POST /invoke
 Content-Type: application/json
 ```
 
-Use `schemas/request.schema.json` as the machine-readable request contract and `schemas/result.schema.json` as the response contract. Generate a unique `request_id` and stable `idempotency_key` for each semantic invocation. Retries must reuse the same idempotency key and unchanged request body.
+Use `schemas/request.schema.json` as the machine-readable request contract and `schemas/result.schema.json` as the response contract. Generate a unique `request_id` and stable `idempotency_key` for each semantic invocation. Retries must reuse the same idempotency key and unchanged request body. The API generates missing request and correlation IDs as a defensive fallback, but orchestration should provide stable values for traceability.
+
+### Temporal callers
+
+Call this HTTP endpoint from a Temporal Activity, not from deterministic
+Workflow code. Put the Activity invocation behind bounded timeout and retry
+policies. Reuse the same request body, `request_id`, `correlation_id`, and
+`idempotency_key` on every retry so an uncertain network response cannot create
+a new semantic invocation. Retry HTTP 503 and transient transport errors with
+backoff; do not retry HTTP 409 or 422 unchanged.
 
 ## Authoritative source tables
 
@@ -153,7 +162,7 @@ One invocation emits at most one `primary_candidate`.
 | HTTP `200`, `malfunction` | Retry according to orchestration policy, then escalate |
 | HTTP `409` | Idempotency key was reused with different semantic input; issue a new key or restore the original body |
 | HTTP `422` | Contract/routing metadata is malformed; fix before retrying |
-| HTTP `503` | Durable storage is unavailable or deployment is not ready; retry with backoff |
+| HTTP `503` | Durable storage is unavailable or deployment is not ready; retain the sanitized diagnostic identifiers, retry with backoff, and correlate with server logs |
 
 A `200` response is a completed capability result, not necessarily a successful translation. Route on `terminal_state`, not HTTP status alone.
 
@@ -167,6 +176,12 @@ Completed requests are persisted before success is returned:
 - shared deployment: `36889_janus_dev.control_translation.control_translation_results` when `PERSISTENCE_BACKEND=databricks`.
 
 The Databricks result row stores request, structured result, complete response envelope, evidence/upstream references, hashes, sizes, and timestamps. `GET /runs/{run_id}` and `GET /v1/results/{result_id}` read the durable completion.
+
+Missing `request_id` and `correlation_id` values are generated before the
+semantic hash and persistence operation. This guarantees a non-null Databricks
+`request_id`, while preserving caller-provided identifiers. Stable
+orchestrator-provided identifiers remain recommended because server-generated
+values cannot be known before an uncertain retry.
 
 ## Security and permissions
 

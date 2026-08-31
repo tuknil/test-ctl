@@ -145,6 +145,12 @@ Implemented in `capability.py::invoke`; precedence constants declared in
   pagination and returns metadata only, ordered newest first.
 - Persistence failures return a redacted HTTP 503 and never claim durable
   completion.
+- The API generates missing `request_id` and `correlation_id` values before
+  request hashing and persistence, while preserving caller-provided values.
+- Storage HTTP 503 responses include sanitized operation/backend identifiers
+  and root-cause text for UI correlation. Complete tracebacks are emitted only
+  to server logs; credentials, SQL parameter values, raw idempotency keys, and
+  candidate artifact content are redacted.
 
 ## 9. Persistence design
 
@@ -161,6 +167,12 @@ request, and recomputes the canonical semantic hash in Python. This avoids a
 table migration but does not strongly serialize simultaneous first requests
 with the same key. The initial deployment therefore remains one replica until
 a unique-key or other concurrency design is approved.
+
+The Databricks result table requires non-null `request_id`. API-boundary
+normalization guarantees this constraint for UI and integration callers that
+omit the optional transport field. Readiness verifies connection/read health;
+deployment acceptance additionally requires a successful write and durable
+read-back smoke test.
 
 Each repository's `list_runs` selects a safe projection for the UI: run and
 result identifiers, correlation identifier, state/reason, vulnerability,
