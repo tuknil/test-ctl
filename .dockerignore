@@ -12,4 +12,8 @@ tests/
 docs/
 .windsurf/
 runs_store.json
+data/
+*.db
+*.db-shm
+*.db-wal
 README.md

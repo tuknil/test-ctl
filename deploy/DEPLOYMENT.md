@@ -10,6 +10,10 @@ The service:
 
 - exposes a FastAPI API and static demo UI;
 - supports deterministic fixture mode and live model mode;
+- fetches exact Defense Generation, Mitigation Check, and Bypass Validation
+  records from Unity Catalog for orchestration requests;
+- accepts validated and ten-cycle PoC-exhaustion routes while preserving the
+  actual Bypass Validation qualification;
 - can call AT&T Inference through an OpenAI-compatible endpoint;
 - validates model output with target-specific syntax and conflict checks;
 - returns a reviewable candidate and never deploys a control automatically.
@@ -53,7 +57,8 @@ Recommended probes:
 - timeout: 5 seconds;
 - unhealthy threshold: 3 failures.
 
-`/ready` returns HTTP `503` when runtime or live-model configuration is invalid.
+`/ready` returns HTTP `503` when runtime/live-model configuration is invalid or
+the selected durable store cannot be connected to and queried.
 
 ## 4. Environment variables to give DevOps
 
@@ -68,6 +73,8 @@ RUN_MODE=fixture
 MODEL_PROVIDER=none
 MODEL_NAME=not-configured
 MODEL_REQUEST_TIMEOUT_SECONDS=60
+PERSISTENCE_BACKEND=sqlite
+DATABASE_PATH=/app/data/control_translation.db
 HOST=0.0.0.0
 PORT=8000
 ENABLE_DOCS=true
@@ -85,6 +92,16 @@ MODEL_PROVIDER=att-inference
 MODEL_NAME=<APPROVED_ATT_MODEL_ID>
 ATT_INFERENCE_BASE_URL=<APPROVED_OPENAI_COMPATIBLE_BASE_URL>
 MODEL_REQUEST_TIMEOUT_SECONDS=60
+PERSISTENCE_BACKEND=databricks
+DATABRICKS_SERVER_HOSTNAME=adb-7405605071306757.17.azuredatabricks.net
+DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/866109ed7dfce51a
+DATABRICKS_AUTH_TYPE=oauth-m2m
+DATABRICKS_CLIENT_ID=<APPROVED_SERVICE_PRINCIPAL_APPLICATION_ID>
+DATABRICKS_CATALOG=36889_janus_dev
+DATABRICKS_SCHEMA=control_translation
+DATABRICKS_RESULTS_TABLE=control_translation_results
+DEFAULT_TARGET_TECHNOLOGY=akamai-waf
+DEFAULT_TARGET_POLICY_CONTEXT_ID=akamai-policy:example:rev-17
 HOST=0.0.0.0
 PORT=8000
 ENABLE_DOCS=false
@@ -94,9 +111,19 @@ Create this secret in the platform secret store:
 
 ```text
 ATT_INFERENCE_API_KEY=<ROTATED_APPROVED_SECRET>
+DATABRICKS_CLIENT_SECRET=<DATABRICKS_OAUTH_SECRET>
 ```
 
-Map the secret to the container environment variable `ATT_INFERENCE_API_KEY` at runtime.
+Map each secret to its same-named container environment variable at runtime.
+Do not send either secret through chat or store it in deployment source.
+PAT authentication (`DATABRICKS_AUTH_TYPE=pat` and secret `DATABRICKS_TOKEN`)
+is supported for temporary developer validation only; use OAuth M2M for the
+managed Azure deployment.
+
+The same Databricks connection authenticates both authoritative upstream reads
+and Control Translation result persistence. Referenced orchestration requests
+cannot resolve unless these settings and source-table grants are present, even
+when SQLite is selected as the result backend.
 
 Do not send DevOps a developer `.env` file containing a key. Any key previously displayed in a screen share, transcript, ticket, or log must be revoked and rotated before deployment.
 
@@ -150,28 +177,60 @@ Use the team's approved templates and naming standards. The logical settings are
 | Target port | `8000` |
 | Transport | HTTP/auto |
 | Min replicas | `1` for a live demo |
-| Max replicas | `1` until durable run storage is added |
+| Max replicas | Initially `1` for SQLite and Databricks; scale Databricks only after concurrency approval |
 | Liveness path | `/health` |
 | Readiness path | `/ready` |
 | CPU/memory starting point | `0.5` CPU / `1 GiB`, then tune from metrics |
-| Secret | `att-inference-api-key` or approved naming equivalent |
-| Env secret reference | `ATT_INFERENCE_API_KEY` → secret reference |
+| Secret | Model and Databricks OAuth secrets under approved names |
+| Env secret reference | `ATT_INFERENCE_API_KEY` and `DATABRICKS_CLIENT_SECRET` → secret references |
+| Persistent volume mount | Required at `/app/data` only for SQLite |
 
-The service stores `/runs/{run_id}` results in process memory. Multiple replicas can still process `/invoke`, but a later run lookup may reach a different replica and return `404`. Keep one replica or disable reliance on run lookup until durable storage is implemented.
+The service can store runs, full result envelopes, generated artifacts, and
+evidence references in SQLite or the existing Databricks Unity Catalog table
+`36889_janus_dev.control_translation.control_translation_results`. Databricks
+uses OAuth M2M and parameterized SQL; the service principal needs SQL warehouse
+`CAN USE`, catalog/schema usage, and table `SELECT` and `MODIFY`. Start with one
+replica even on Databricks because the current table has no dedicated unique
+idempotency-key constraint. Validate a concurrency strategy before scaling out.
+
+### 7.1 Required Unity Catalog access
+
+| Purpose | Table | Privilege |
+|---|---|---|
+| Defense candidate | `36889_janus_dev.defense_generation.defense_generation_results` | `SELECT` |
+| Mitigation proof | ``36889_janus_dev.`mitigation-check`.mitigation_check`` | `SELECT` |
+| Latest bypass result | `36889_janus_dev.bypass_validation.bypass_validation_results` | `SELECT` |
+| Control Translation completion | `36889_janus_dev.control_translation.control_translation_results` | `SELECT`, `MODIFY` |
+
+Also grant SQL warehouse `CAN USE`, catalog `USE CATALOG`, and `USE SCHEMA` on
+each listed schema. Do not grant Control Translation `MODIFY` on upstream
+tables; it is a read-only consumer of upstream capability results.
 
 ## 8. Deployment sequence
 
 1. Run CI tests and container build.
 2. Scan dependencies and the image with approved security tooling.
 3. Push the image with an immutable version tag.
-4. Create/update runtime secrets in the platform secret store.
+4. Create/update runtime secrets in the platform secret store and grant the
+  Databricks service principal the access listed in section 7.1.
 5. Deploy first in fixture mode.
 6. Confirm `/health`, `/ready`, `/schema`, `/`, and a fixture `/invoke` request.
+  Verify the run appears in the UI dashboard and `GET /v1/runs?limit=10&offset=0`.
 7. Switch the non-production deployment to live mode and inject the rotated model secret.
 8. Confirm `/ready` returns `200`.
 9. Invoke the approved CVE-2017-5638/Akamai example.
 10. Confirm the response reports `inference.llm_invoked=true` and contains no secret or endpoint.
-11. Review logs and model usage, then obtain application/security owner approval before promotion.
+11. Run one approved reference-based request with a real, lineage-complete
+  result trio. Confirm `proof_loop_qualification.route=validated`.
+12. Test PoC exhaustion only when the referenced Bypass Validation row is
+  actually `bypass-found`. Confirm `route=poc-exhaustion`,
+  `bypass_cleared=false`, and an explicit not-bypass-cleared limitation.
+
+The dashboard and full run/result retrieval endpoints expose operational and
+candidate data. Place them behind the same approved authentication,
+authorization, TLS, and audit controls as `/invoke`; do not publish the static
+UI directly to the Internet.
+13. Review logs and model usage, then obtain application/security owner approval before promotion.
 
 Mode changes require a new revision/restart because configuration is loaded when the process starts.
 
@@ -188,12 +247,24 @@ curl -fsS -X POST <service-base-url>/invoke \
   --data-binary @examples/request-translated.json
 ```
 
+For orchestration integration, replace the example IDs in
+`examples/request-referenced-validated.json` with a real matching trio, then:
+
+```bash
+curl -fsS -X POST <service-base-url>/invoke \
+  -H 'content-type: application/json' \
+  --data-binary @examples/request-referenced-validated.json
+```
+
 Expected checks:
 
 - `/health` returns `{"status":"ok"}`;
 - `/ready` returns `{"status":"ready"}`;
 - `/inference` returns mode/provider/model and only a credential boolean;
 - `/invoke` returns one documented terminal state;
+- referenced invocation returns the exact three references in
+  `reference_bundle`;
+- exhaustion retains `bypass-found` and reports `bypass_cleared=false`;
 - a successful live request reports `llm_invoked: true`;
 - no response or log contains an API key or authorization header.
 
@@ -235,8 +306,8 @@ The service never pushes rules to target products, so application rollback does 
 The following are application/product dependencies, not tasks DevOps can solve only through deployment configuration:
 
 - live, authenticated, read-only policy readers for Akamai/firewall/EDR;
-- trusted upstream proof-record retrieval and verification;
-- durable run/result storage for restarts and horizontal scaling;
+- operational validation of OAuth M2M grants, retention, query performance,
+  warehouse availability, and result-store concurrency in each environment;
 - target-owner acceptance tests against non-production target tenants;
 - provider retry/backoff, circuit breaking, and formal model quotas;
 - prompt/model version governance and adversarial evaluation;
@@ -255,7 +326,9 @@ A `translated` response means the candidate passed the validators currently impl
 - [ ] API key stored and injected as a secret reference
 - [ ] Previously exposed key rotated
 - [ ] Liveness and readiness probes configured
-- [ ] Single replica configured until durable storage exists
+- [ ] Initial single replica configured; concurrency strategy approved before scale-out
+- [ ] Databricks OAuth secret injected and SQL/Unity Catalog grants verified
+- [ ] Encrypted persistent volume mounted at `/app/data` when SQLite is selected
 - [ ] Central logging and redaction verified
 - [ ] Alerts configured
 - [ ] Fixture smoke test passed

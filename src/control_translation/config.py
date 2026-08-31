@@ -34,6 +34,19 @@ class Settings(BaseModel):
     enable_docs: bool = True
     host: str = "0.0.0.0"
     port: int = 8000
+    persistence_backend: str = "sqlite"
+    database_path: str = "./data/control_translation.db"
+    databricks_server_hostname: str | None = None
+    databricks_http_path: str | None = None
+    databricks_auth_type: str = "oauth-m2m"
+    databricks_token: str | None = None
+    databricks_client_id: str | None = None
+    databricks_client_secret: str | None = None
+    databricks_catalog: str = "36889_janus_dev"
+    databricks_schema: str = "control_translation"
+    databricks_results_table: str = "control_translation_results"
+    default_target_technology: str = "akamai-waf"
+    default_target_policy_context_id: str = "akamai-policy:example:rev-17"
 
     @property
     def is_live(self) -> bool:
@@ -46,6 +59,14 @@ class Settings(BaseModel):
     @property
     def is_att_inference(self) -> bool:
         return self.normalized_model_provider in {"att", "att-inference"}
+
+    @property
+    def normalized_persistence_backend(self) -> str:
+        return self.persistence_backend.strip().lower()
+
+    @property
+    def normalized_databricks_auth_type(self) -> str:
+        return self.databricks_auth_type.strip().lower()
 
     @property
     def credentials_configured(self) -> bool:
@@ -71,6 +92,41 @@ class Settings(BaseModel):
             errors.append("PORT must be between 1 and 65535.")
         if not 1 <= self.model_request_timeout_seconds <= 300:
             errors.append("MODEL_REQUEST_TIMEOUT_SECONDS must be between 1 and 300.")
+        if self.normalized_persistence_backend not in {"sqlite", "databricks"}:
+            errors.append("PERSISTENCE_BACKEND must be either 'sqlite' or 'databricks'.")
+        if self.normalized_persistence_backend == "databricks":
+            required_databricks_settings = {
+                "DATABRICKS_SERVER_HOSTNAME": self.databricks_server_hostname,
+                "DATABRICKS_HTTP_PATH": self.databricks_http_path,
+                "DATABRICKS_CATALOG": self.databricks_catalog,
+                "DATABRICKS_SCHEMA": self.databricks_schema,
+                "DATABRICKS_RESULTS_TABLE": self.databricks_results_table,
+            }
+            if self.normalized_databricks_auth_type == "pat":
+                required_databricks_settings["DATABRICKS_TOKEN"] = (
+                    self.databricks_token
+                )
+            elif self.normalized_databricks_auth_type == "oauth-m2m":
+                required_databricks_settings.update(
+                    {
+                        "DATABRICKS_CLIENT_ID": self.databricks_client_id,
+                        "DATABRICKS_CLIENT_SECRET": self.databricks_client_secret,
+                    }
+                )
+            else:
+                errors.append(
+                    "DATABRICKS_AUTH_TYPE must be either 'oauth-m2m' or 'pat'."
+                )
+            missing = [
+                name for name, value in required_databricks_settings.items()
+                if not value or not value.strip()
+            ]
+            if missing:
+                errors.append(
+                    "Databricks persistence is missing required settings: "
+                    + ", ".join(missing)
+                    + "."
+                )
         if normalized_mode == "live":
             if self.normalized_model_provider in {"", "none"}:
                 errors.append("MODEL_PROVIDER is required when RUN_MODE=live.")
@@ -106,4 +162,25 @@ def get_settings() -> Settings:
         in {"1", "true", "yes", "on"},
         host=os.getenv("HOST", "0.0.0.0"),
         port=int(os.getenv("PORT", "8000")),
+        persistence_backend=os.getenv("PERSISTENCE_BACKEND", "sqlite"),
+        database_path=os.getenv(
+            "DATABASE_PATH", "./data/control_translation.db"
+        ),
+        databricks_server_hostname=os.getenv("DATABRICKS_SERVER_HOSTNAME") or None,
+        databricks_http_path=os.getenv("DATABRICKS_HTTP_PATH") or None,
+        databricks_auth_type=os.getenv("DATABRICKS_AUTH_TYPE", "oauth-m2m"),
+        databricks_token=os.getenv("DATABRICKS_TOKEN") or None,
+        databricks_client_id=os.getenv("DATABRICKS_CLIENT_ID") or None,
+        databricks_client_secret=os.getenv("DATABRICKS_CLIENT_SECRET") or None,
+        databricks_catalog=os.getenv("DATABRICKS_CATALOG", "36889_janus_dev"),
+        databricks_schema=os.getenv("DATABRICKS_SCHEMA", "control_translation"),
+        databricks_results_table=os.getenv(
+            "DATABRICKS_RESULTS_TABLE", "control_translation_results"
+        ),
+        default_target_technology=os.getenv(
+            "DEFAULT_TARGET_TECHNOLOGY", "akamai-waf"
+        ),
+        default_target_policy_context_id=os.getenv(
+            "DEFAULT_TARGET_POLICY_CONTEXT_ID", "akamai-policy:example:rev-17"
+        ),
     )

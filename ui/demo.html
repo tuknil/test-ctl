@@ -107,11 +107,18 @@
       <li>Select <strong>Translate</strong>.</li>
       <li>Show the <strong>translated</strong> state, candidate artifact, assumptions, and limitations.</li>
       <li>Show <strong>Inference evidence</strong>: it identifies the mode, provider, model, and whether the LLM was actually invoked.</li>
+      <li>Scroll to <strong>Stored runs and translations</strong>, refresh the list, and open the new run to demonstrate durable retrieval.</li>
     </ol>
   </section>
 
   <section class="demo-section">
-    <h2>6. Simple team message</h2>
+    <h2>6. Durable history dashboard</h2>
+    <p>The translator page lists recent persisted run metadata without loading every full request or candidate. Selecting <strong>View</strong> retrieves one durable result and keeps the candidate artifact collapsed until requested.</p>
+    <p class="callout">Treat candidate artifacts as sensitive security-control data. The dashboard belongs behind the same authentication and authorization controls as the API.</p>
+  </section>
+
+  <section class="demo-section">
+    <h2>7. Simple team message</h2>
     <blockquote>
       “The LLM helps create the first candidate rule. The service then performs deterministic syntax and policy checks. The result is a reviewable candidate, not an automatic production deployment.”
     </blockquote>

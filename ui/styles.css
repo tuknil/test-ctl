@@ -274,9 +274,75 @@ ul.compact {
   font-size: 12px;
 }
 
+.dashboard {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  margin-top: 24px;
+  padding: 20px;
+}
+
+.dashboard-header,
+.run-detail-header,
+.dashboard-pagination {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.dashboard-header h2 { font-size: 18px; margin: 0 0 5px; }
+.dashboard-header p { color: var(--muted); font-size: 13px; margin: 0; }
+.dashboard-header .eyebrow { color: var(--accent); font-size: 11px; margin-bottom: 5px; }
+.dashboard-action { margin: 0; width: auto; white-space: nowrap; }
+
+.dashboard-stats {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(4, 1fr);
+  margin: 18px 0;
+}
+
+.dashboard-stats article {
+  background: #10131a;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+
+.dashboard-stats span { color: var(--muted); display: block; font-size: 11px; }
+.dashboard-stats strong { display: block; font-size: 22px; margin-top: 4px; }
+.dashboard-table-wrap { overflow-x: auto; }
+.dashboard-table { border-collapse: collapse; min-width: 780px; width: 100%; }
+.dashboard-table th,
+.dashboard-table td { border-bottom: 1px solid var(--border); padding: 11px 10px; text-align: left; }
+.dashboard-table th { color: var(--muted); font-size: 11px; text-transform: uppercase; }
+.dashboard-table td { font-size: 12px; }
+.dashboard-table td code { word-break: break-word; }
+.dashboard-table .row-action { margin: 0; padding: 6px 10px; width: auto; }
+.dashboard-pagination { font-size: 12px; margin-top: 14px; }
+.dashboard-pagination button { margin: 0; width: auto; }
+
+.run-detail {
+  background: #10131a;
+  border: 1px solid rgba(79, 140, 255, 0.55);
+  border-radius: 8px;
+  margin-top: 18px;
+  padding: 16px;
+}
+
+.run-detail-header h3 { font-size: 15px; margin: 0; }
+.compact-btn { margin: 0; padding: 6px 12px; width: auto; }
+.run-detail details { margin-top: 14px; }
+.run-detail summary { color: var(--accent); cursor: pointer; font-size: 12px; }
+.sr-only { clip: rect(0, 0, 0, 0); clip-path: inset(50%); height: 1px; overflow: hidden; position: absolute; white-space: nowrap; width: 1px; }
+
 @media (max-width: 760px) {
   body { padding: 16px; }
   .layout, .inference-card { grid-template-columns: 1fr; }
+  .dashboard-header { align-items: stretch; flex-direction: column; }
+  .dashboard-action { width: 100%; }
+  .dashboard-stats { grid-template-columns: repeat(2, 1fr); }
 }
 
 /* Help section */

@@ -10,3 +10,11 @@ uv.lock
 .idea/
 .vscode/
 runs_store.json
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# Local Databricks inspection exports (may contain sensitive workflow data)
+control_translation.json
+mitigation_check.json

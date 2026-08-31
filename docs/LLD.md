@@ -15,21 +15,30 @@ real Pydantic AI agent as the translation doer.
                  ┌────────────────────┐
    HTTP client   │   FastAPI api.py    │   static UI (ui/) served at "/"
   ───────────►   │  /health /schema    │
-                 │  /invoke /runs/{id} │
+                 │ /invoke /v1/runs    │
+                 │ /runs/{id} /results │
                  └─────────┬───────────┘
                            │
                  ┌─────────▼───────────┐
-                 │   capability.py     │  orchestration + terminal routing
+                           │   capability.py     │  capability + terminal routing
                  └───┬─────────────┬───┘
                      │             │
-        ┌────────────▼──┐   ┌──────▼─────────────┐
-        │ policy_reader  │   │ translation/engine  │
-        │ (fixture only) │   │  ├─ adapters/*      │
-        └────────────────┘   │  ├─ agents/         │
-                              │  │  translation_agent│  (doer)
-                              │  ├─ syntax_validator │  (judge)
-                              │  └─ conflict_checker │  (judge)
-                              └─────────────────────┘
+                       ├───────────────┼──────────────────────────┐
+                       │               │                          │
+                     ┌──────▼──────────┐ ┌──▼──────────────┐   ┌──────▼─────────────┐
+                     │ upstream.py     │ │ policy_reader   │   │ translation/engine │
+                     │ lineage/route   │ │ (fixture only)  │   │  ├─ adapters/*     │
+                     │ validation      │ └─────────────────┘   │  ├─ agents/        │
+                     └──────┬──────────┘                       │  ├─ syntax judge   │
+                       │                                  │  └─ conflict judge │
+                     ┌──────▼────────────────┐                 └────────────────────┘
+                     │ upstream_databricks.py│
+                     │ exact result-id reads │
+                     └──────┬────────────────┘
+                       │
+                     ┌──────▼───────────────────────────────────────────────────────┐
+                     │ Defense Generation | Mitigation Check | Bypass Validation   │
+                     └──────────────────────────────────────────────────────────────┘
 ```
 
 ## 3. Data models
@@ -40,16 +49,29 @@ See `src/control_translation/contracts.py` for the full Pydantic model set:
 substructures (`Subject`, `InputBindings`, `OutcomeReason`,
 `PrimaryCandidate`, `CandidateArtifact`, `ImplementsDiscriminator`,
 `Placement`, `CollateralImpactPrior`, `EvidenceBinding`), plus the API
-envelope models `InvokeRequestEnvelope` / `ResultEnvelope`. Terminal states
-and reason codes live in `terminal.py`.
+envelope models `InvokeRequestEnvelope` / `ResultEnvelope`, and dashboard
+models `RunSummary` / `RunListResponse`. Terminal states and reason codes live
+in `terminal.py`.
+
+Referenced invocation additionally uses `UpstreamResultReferences`,
+`ProofLoopRoutingMetadata`, and `ProofLoopQualification`. The qualification is
+persisted in `ControlTranslationResult` so PoC exhaustion can never be rendered
+as full bypass clearance.
 
 ## 4. Sequence (happy path)
 
-1. `POST /invoke` → `capability.invoke_envelope` → `capability.invoke`.
-2. Resolve `TargetAdapter` from registry; unknown target → `scope-declined`.
-3. If no `current_policy_snapshot_id` supplied, call `PolicyReader.read_snapshot`;
+1. `POST /invoke` validates the envelope and idempotency hash.
+2. For a referenced request, `upstream_databricks.py` parameter-selects the
+  exact three result IDs; `upstream.py` validates IDs, route states,
+  correlation, subject revision, vulnerability, and candidate lineage.
+3. The accepted route is either validated (`no-bypass-found`) or PoC
+  exhaustion (`bypass-found` after exactly 10/10 cycles). The latter is
+  explicitly marked `bypass_cleared=false`.
+4. `capability.invoke_envelope` → `capability.invoke` and resolve the
+  `TargetAdapter`; unknown target → `scope-declined`.
+5. Call `PolicyReader.read_snapshot`;
    miss → `insufficient-context`.
-4. `translation/engine.translate`:
+6. `translation/engine.translate`:
    a. `adapter.supports_feature(discriminator_description)` mechanical pre-check;
       fails → `cannot-express`.
    b. Call the doer (`FixtureTranslationDoer` or `LiveTranslationDoer`) →
@@ -57,11 +79,12 @@ and reason codes live in `terminal.py`.
    c. `syntax_validator.validate` (judge gate 1); fails → `cannot-express`.
    d. `conflict_checker.detect_conflicts` (judge gate 2); non-empty → surfaced
       as `conflict_notes`.
-5. Back in `capability.invoke`: if conflicts present → `scope-declined`
+7. Back in `capability.invoke`: if conflicts present → `scope-declined`
    (`policy-conflict`); else assemble `translated` result.
-6. `capability._envelope` wraps the result in `ResultEnvelope`
-   (status/run_id/prose/trace) and `api.py` stores it in the in-memory
-   `_RUNS` map keyed by `run_id`.
+8. `capability._envelope` wraps the result in `ResultEnvelope` with durable
+  result/correlation references; `api.py` atomically stores the validated
+  request, final envelope, artifact, and evidence references through the
+  configured `RunRepository`.
 
 ## 5. Adapter interface contract
 
@@ -103,7 +126,8 @@ Implemented in `capability.py::invoke`; precedence constants declared in
 | Component | Fixture mode (default) | Live mode (RUN_MODE=live) |
 |---|---|---|
 | PolicyReader | `FixturePolicyReader`, 2 canned snapshots | Not implemented — no real adapter exists |
-| Proven pattern source | `providers/fixtures.py`, 3 canned patterns | Caller supplies real pattern via request body (upstream capabilities not yet built) |
+| Proven pattern source | Legacy `providers/fixtures.py` direct input or referenced Databricks records | Exact referenced Databricks records, validated by the same resolver/gates |
+| Upstream route | Validated and 10-cycle exhaustion tests use injected records | SQL Connector reads the three authoritative Unity Catalog tables |
 | Translation doer | `FixtureTranslationDoer`, deterministic templates | `LiveTranslationDoer`, real Pydantic AI agent call, needs `.env` model config |
 | Adapters (syntax/conflict) | Deterministic real-format validation (JSON / PAN-OS CLI+XML / STAR JSON) + fixture snapshot comparison | Same code path; not vendor-API-backed either way |
 
@@ -117,12 +141,32 @@ Implemented in `capability.py::invoke`; precedence constants declared in
 - FastAPI/Pydantic validation errors on `POST /invoke` are surfaced as HTTP
   422 automatically (request never reaches `capability.invoke`).
 - `GET /runs/{run_id}` returns HTTP 404 for unknown run ids.
+- `GET /v1/runs` applies validated `limit` (1–100) and non-negative `offset`
+  pagination and returns metadata only, ordered newest first.
+- Persistence failures return a redacted HTTP 503 and never claim durable
+  completion.
 
 ## 9. Persistence design
 
-In-memory dict (`api._RUNS`) keyed by `run_id`. Lost on process restart.
-Swap point: replace with a real store (Redis/Postgres/etc.) behind the same
-`get_run(run_id) -> ResultEnvelope | None` shape used in `api.py`.
+The `RunRepository` boundary has two implementations. `SQLiteRunRepository`
+stores normalized run, payload, artifact, and evidence rows in atomic local
+transactions and remains the local/test default. `DatabricksRunRepository`
+maps each completion to the existing Unity Catalog results table using one
+parameterized `MERGE`, JSON `VARIANT` columns, and OAuth M2M. It stores the
+structured result separately from the full completion envelope and validates
+the envelope again when reading it. `/ready` verifies the selected backend.
+
+Databricks idempotency uses the key inside `request_json`, reloads the stored
+request, and recomputes the canonical semantic hash in Python. This avoids a
+table migration but does not strongly serialize simultaneous first requests
+with the same key. The initial deployment therefore remains one replica until
+a unique-key or other concurrency design is approved.
+
+Each repository's `list_runs` selects a safe projection for the UI: run and
+result identifiers, correlation identifier, state/reason, vulnerability,
+target, artifact type, and timestamps. It does not load or return stored
+request JSON or artifact content. The UI retrieves a full result on demand via
+`GET /runs/{run_id}` and renders dashboard values as text rather than HTML.
 
 ## 10. Agent architecture
 
