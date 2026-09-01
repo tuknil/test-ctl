@@ -5,6 +5,7 @@ import pytest
 from control_translation import capability
 from control_translation.contracts import (
     ControlTranslationRequest,
+    ProofLoopRequestContext,
     ProofLoopTranslationRequirements,
     ProvenMitigationPattern,
     TargetContext,
@@ -252,6 +253,77 @@ def test_anchored_literal_args_rule_is_hardened_deterministically_for_akamai(
         ],
         "tag": ["JANUS", "CVE-2026-77392", "SQLi", "virtual-patch"],
     }
+
+
+def test_request_body_form_rule_is_hardened_from_authoritative_request_context():
+    class UnexpectedDoer:
+        def propose(self, **kwargs):
+            raise AssertionError("proven form-body translation must be deterministic")
+
+    pattern = ProvenMitigationPattern(
+        proven_pattern_id="proven-pattern:candidate:CVE-2026-77392:waf:body",
+        vulnerability_id="CVE-2026-77392",
+        selected_control_class="waf",
+        discriminator_id="discriminator:body",
+        discriminator_description="Block a malicious form request body.",
+        pattern_summary=(
+            'SecRule REQUEST_BODY "@rx person(?:\\\\[|%5B)0.*malicious" '
+            '"id:144801,phase:2,deny,status:403,log"'
+        ),
+        proof_record_ids=[
+            "mitigation-check-result:body",
+            "bypass-validation-result:body",
+        ],
+    )
+    request = ControlTranslationRequest(
+        proven_pattern=pattern,
+        target_context=TargetContext(
+            target_technology="akamai-waf",
+            target_policy_context_id="akamai-policy:example:rev-17",
+        ),
+    )
+    request_context = ProofLoopRequestContext(
+        method="POST",
+        path="/public/submit.php",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        body="person[0][]=malicious",
+    )
+
+    envelope = capability.invoke(
+        request,
+        doer=UnexpectedDoer(),
+        request_context=request_context,
+    )
+
+    assert envelope.terminal_state == TerminalState.TRANSLATED
+    candidate = envelope.structured_result.primary_candidate
+    assert candidate is not None
+    assert candidate.implements_discriminator.translation == "narrower"
+    artifact = json.loads(candidate.candidate_artifact.content_ref)
+    assert artifact["name"] == "JANUS-CVE-2026-77392-Form-Body-Mitigation"
+    assert artifact["conditions"] == [
+        {
+            "type": "requestMethodMatch",
+            "positiveMatch": True,
+            "value": ["POST"],
+        },
+        {
+            "type": "pathMatch",
+            "positiveMatch": True,
+            "value": ["/public/submit.php"],
+        },
+        {
+            "type": "argsPostMatch",
+            "positiveMatch": True,
+            "valueCase": False,
+            "valueWildcard": False,
+            "value": [
+                "person[0][]=malicious",
+                "person%5B0%5D%5B%5D=malicious",
+                "person%255B0%255D%255B%255D=malicious",
+            ],
+        },
+    ]
 
 
 @pytest.mark.parametrize(

@@ -13,7 +13,7 @@ import logging
 import re
 from dataclasses import dataclass
 from hashlib import sha256
-from urllib.parse import quote, quote_plus
+from urllib.parse import parse_qsl, quote, quote_plus
 
 from control_translation.adapters.base import TargetAdapter
 from control_translation.agents.translation_agent import TranslationDoer, TranslationProposal
@@ -23,6 +23,7 @@ from control_translation.contracts import (
     ImplementsDiscriminator,
     Placement,
     PrimaryCandidate,
+    ProofLoopRequestContext,
     ProofLoopTranslationRequirements,
     ProvenMitigationPattern,
 )
@@ -51,6 +52,7 @@ _ANCHORED_LITERAL_ARGS_RULE = re.compile(
     re.MULTILINE,
 )
 _REGEX_META = re.compile(r"[.\\^$*+?{}\[\]()|]")
+_REQUEST_BODY_RULE = re.compile(r'^\s*SecRule\s+REQUEST_BODY\s+"@rx ', re.MULTILINE)
 
 
 def translate(
@@ -61,6 +63,7 @@ def translate(
     doer: TranslationDoer,
     snapshot: PolicySnapshot | None,
     translation_requirements: ProofLoopTranslationRequirements | None = None,
+    request_context: ProofLoopRequestContext | None = None,
     allow_narrower_translation: bool = True,
     allow_equivalent_translation: bool = True,
 ) -> EngineResult:
@@ -75,11 +78,11 @@ def translate(
             ),
         )
 
-    proposal = (
-        _hardened_akamai_literal_proposal(pattern)
-        if target_technology == "akamai-waf" and translation_requirements is None
-        else None
-    )
+    proposal = None
+    if target_technology == "akamai-waf" and translation_requirements is None:
+        proposal = _hardened_akamai_literal_proposal(pattern)
+        if proposal is None:
+            proposal = _hardened_akamai_form_body_proposal(pattern, request_context)
     if proposal is None:
         # Doer: propose a candidate artifact (agent output, not yet trusted).
         try:
@@ -241,6 +244,92 @@ def _hardened_akamai_literal_proposal(
             "The candidate has not been executed in an Akamai tenant.",
             "Coverage is limited to the evidenced literal and generated transport encodings.",
             "No authoritative endpoint path was available, so the rule is not path-scoped.",
+        ],
+    )
+
+
+def _hardened_akamai_form_body_proposal(
+    pattern: ProvenMitigationPattern,
+    request_context: ProofLoopRequestContext | None,
+) -> TranslationProposal | None:
+    if request_context is None or not _REQUEST_BODY_RULE.search(pattern.pattern_summary):
+        return None
+    if request_context.method.upper() != "POST":
+        return None
+    if "application/x-www-form-urlencoded" not in request_context.content_type:
+        return None
+    pairs = parse_qsl(request_context.body, keep_blank_values=True)
+    if not pairs:
+        return None
+
+    def serialize(encoder) -> str:
+        return "&".join(
+            f"{encoder(name, safe='')}={encoder(value, safe='')}"
+            for name, value in pairs
+        )
+
+    encoded_once = serialize(quote)
+    values = list(
+        dict.fromkeys(
+            (
+                request_context.body,
+                encoded_once,
+                serialize(quote_plus),
+                "&".join(
+                    f"{quote(quote(name, safe=''), safe='')}="
+                    f"{quote(quote(value, safe=''), safe='')}"
+                    for name, value in pairs
+                ),
+            )
+        )
+    )
+    conditions: list[dict] = [
+        {
+            "type": "requestMethodMatch",
+            "positiveMatch": True,
+            "value": ["POST"],
+        }
+    ]
+    if request_context.path.startswith("/"):
+        conditions.append(
+            {
+                "type": "pathMatch",
+                "positiveMatch": True,
+                "value": [request_context.path],
+            }
+        )
+    conditions.append(
+        {
+            "type": "argsPostMatch",
+            "positiveMatch": True,
+            "valueCase": False,
+            "valueWildcard": False,
+            "value": values,
+        }
+    )
+    rule = {
+        "name": f"JANUS-{pattern.vulnerability_id}-Form-Body-Mitigation",
+        "description": (
+            "Blocks the evidenced form body and common transport encodings."
+        ),
+        "operation": "AND",
+        "conditions": conditions,
+        "tag": ["JANUS", pattern.vulnerability_id, "form-body", "virtual-patch"],
+    }
+    return TranslationProposal(
+        candidate_content=json.dumps(rule, separators=(",", ":")),
+        translation_label="narrower",
+        justification=(
+            "Converted the authoritative proven form body into explicit Akamai "
+            "raw, URL-encoded, plus-space, and double-encoded values."
+        ),
+        translation_assumptions=[
+            "The target Akamai policy evaluates argsPostMatch values for form-urlencoded POST bodies.",
+            "The custom-rule action is assigned separately; recommended action: deny.",
+        ],
+        limitations=[
+            "The candidate has not been executed in an Akamai tenant.",
+            "The explicit values are narrower than arbitrary source regex semantics.",
         ],
     )
 

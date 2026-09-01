@@ -9,6 +9,7 @@ from typing import Any, Protocol
 from control_translation.contracts import (
     BypassCounterexample,
     DatabricksResultReference,
+    ProofLoopRequestContext,
     ProofLoopTranslationRequirements,
     ProofLoopQualification,
     ProofLoopRoutingMetadata,
@@ -56,6 +57,7 @@ class ResolvedProofLoop:
     bypass_counterexample: BypassCounterexample | None
     bypass_evidence_refs: tuple[str, ...]
     translation_requirements: ProofLoopTranslationRequirements | None
+    request_context: ProofLoopRequestContext | None
 
 
 def resolve_proof_loop(
@@ -229,6 +231,9 @@ def resolve_proof_loop(
         raw_counterexample,
         feedback,
     )
+    request_context = _mitigation_request_context(
+        records["Mitigation Check"].result
+    )
 
     target_technology = _preferred_string(
         defense.result,
@@ -249,6 +254,35 @@ def resolve_proof_loop(
         bypass_counterexample=bypass_counterexample,
         bypass_evidence_refs=tuple(sorted(bypass_evidence_refs)),
         translation_requirements=translation_requirements,
+        request_context=request_context,
+    )
+
+
+def _mitigation_request_context(
+    mitigation_result: dict[str, Any],
+) -> ProofLoopRequestContext | None:
+    test_basis = mitigation_result.get("test_basis")
+    if not isinstance(test_basis, dict):
+        return None
+    request = test_basis.get("request")
+    if not isinstance(request, dict):
+        return None
+    method = request.get("method")
+    path = request.get("path")
+    body = request.get("body")
+    headers = request.get("headers") or {}
+    if not all(isinstance(value, str) and value for value in (method, path, body)):
+        return None
+    if not isinstance(headers, dict) or not all(
+        isinstance(name, str) and isinstance(value, str)
+        for name, value in headers.items()
+    ):
+        return None
+    return ProofLoopRequestContext(
+        method=method,
+        path=path,
+        headers=headers,
+        body=body,
     )
 
 

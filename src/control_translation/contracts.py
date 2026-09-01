@@ -195,6 +195,26 @@ class ProofLoopTranslationRequirements(BaseModel):
         return path if isinstance(path, str) and path else None
 
 
+class ProofLoopRequestContext(BaseModel):
+    """Authoritative HTTP request proven by Mitigation Check."""
+
+    method: str
+    path: str
+    headers: dict[str, str] = Field(default_factory=dict)
+    body: str
+
+    @property
+    def content_type(self) -> str:
+        return next(
+            (
+                value.lower()
+                for name, value in self.headers.items()
+                if name.lower() == "content-type"
+            ),
+            "",
+        )
+
+
 class DirectBypassSubject(StrictRequestModel):
     candidate_fingerprint_id: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
     candidate_id: str = Field(min_length=1)
