@@ -36,4 +36,8 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD python -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.getenv('PORT', '8000') + '/ready')" || exit 1
 
+# The secure base image may define a Python entrypoint. Clear it so the
+# service command below is not interpreted as a Python script path.
+ENTRYPOINT []
+
 CMD ["python", "-m", "control_translation"]

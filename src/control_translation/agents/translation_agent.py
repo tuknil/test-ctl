@@ -29,7 +29,10 @@ from urllib.request import Request, urlopen
 from pydantic import BaseModel, Field
 
 from control_translation.config import Settings
-from control_translation.contracts import ProvenMitigationPattern
+from control_translation.contracts import (
+    ProofLoopTranslationRequirements,
+    ProvenMitigationPattern,
+)
 from control_translation.policy_reader.base import PolicySnapshot
 
 
@@ -55,6 +58,7 @@ class TranslationDoer(Protocol):
         target_technology: str,
         artifact_type: str,
         snapshot: PolicySnapshot | None,
+        translation_requirements: ProofLoopTranslationRequirements | None = None,
     ) -> TranslationProposal:
         ...
 
@@ -70,9 +74,42 @@ class FixtureTranslationDoer:
         target_technology: str,
         artifact_type: str,
         snapshot: PolicySnapshot | None,
+        translation_requirements: ProofLoopTranslationRequirements | None = None,
     ) -> TranslationProposal:
         if target_technology == "akamai-waf":
-            if pattern.vulnerability_id == "CVE-2021-44228":
+            if translation_requirements and translation_requirements.required_payloads:
+                conditions = []
+                if translation_requirements.request_path:
+                    conditions.append(
+                        {
+                            "type": "pathMatch",
+                            "positiveMatch": True,
+                            "valueCase": False,
+                            "valueWildcard": False,
+                            "value": [translation_requirements.request_path],
+                        }
+                    )
+                conditions.append(
+                    {
+                        "type": "argsPostMatch",
+                        "positiveMatch": True,
+                        "valueCase": False,
+                        "valueWildcard": True,
+                        "value": list(translation_requirements.required_payloads),
+                    }
+                )
+                content = json.dumps(
+                    {
+                        "name": f"block-{pattern.vulnerability_id.lower()}",
+                        "description": pattern.pattern_summary,
+                        "operation": "AND",
+                        "conditions": conditions,
+                        "tag": ["proof-loop", pattern.vulnerability_id],
+                    },
+                    indent=2,
+                )
+                label = "equivalent"
+            elif pattern.vulnerability_id == "CVE-2021-44228":
                 header = "user-agent"
                 values = ["*${jndi:*"]
                 tags = ["JNDI", "Log4Shell", pattern.vulnerability_id]
@@ -82,28 +119,36 @@ class FixtureTranslationDoer:
                 values = ["*%{*", "*${*"]
                 tags = ["OGNL", "EL", pattern.vulnerability_id]
                 label = "equivalent"
-            content = json.dumps(
-                {
-                    "name": f"block-{pattern.vulnerability_id.lower()}",
-                    "description": pattern.pattern_summary,
-                    "operation": "AND",
-                    "conditions": [
-                        {
-                            "type": "requestHeaderValueMatch",
-                            "positiveMatch": True,
-                            "header": header,
-                            "valueCase": True,
-                            "valueWildcard": True,
-                            "value": values,
-                        },
-                    ],
-                    "tag": tags,
-                },
-                indent=2,
-            )
+            if not (translation_requirements and translation_requirements.required_payloads):
+                content = json.dumps(
+                    {
+                        "name": f"block-{pattern.vulnerability_id.lower()}",
+                        "description": pattern.pattern_summary,
+                        "operation": "AND",
+                        "conditions": [
+                            {
+                                "type": "requestHeaderValueMatch",
+                                "positiveMatch": True,
+                                "header": header,
+                                "valueCase": True,
+                                "valueWildcard": True,
+                                "value": values,
+                            },
+                        ],
+                        "tag": tags,
+                    },
+                    indent=2,
+                )
             limitations = [
                 "Candidate is a template, not verified against a real Akamai tenant.",
-                "Header-only matching can miss encoded or obfuscated variants and other input locations.",
+                (
+                    "The candidate preserves only the authoritative proof-loop "
+                    "payload forms and request context supplied to translation."
+                    if translation_requirements
+                    and translation_requirements.required_payloads
+                    else "Header-only matching can miss encoded or obfuscated "
+                    "variants and other input locations."
+                ),
                 "This virtual patch does not replace upgrading the vulnerable product.",
                 "Action (deny/alert) is assigned separately when the rule is "
                 "attached to a security policy; recommended action: deny.",
@@ -233,7 +278,10 @@ class LiveTranslationDoer:
                 "artifact in that target's real syntax:\n"
                 "- akamai-waf: an Akamai Application Security custom-rule JSON "
                 "object with 'operation' (AND/OR) and a 'conditions' array; do "
-                "NOT embed an action (alert/deny) in the rule body.\n"
+                "NOT embed an action (alert/deny) in the rule body. Use pathMatch "
+                "for URI paths and argsPostMatch/argsPostJSONMatch/argsPostXMLMatch "
+                "for POST body parameters. Never represent URI, body, or form "
+                "parameters as synthetic request headers.\n"
                 "- firewall-generic: a PAN-OS security rule as a CLI "
                 "'set rulebase security rules ...' command or an XML <entry>, "
                 "with from/to zones, source, destination, application, service, "
@@ -257,6 +305,7 @@ class LiveTranslationDoer:
         target_technology: str,
         artifact_type: str,
         snapshot: PolicySnapshot | None,
+        translation_requirements: ProofLoopTranslationRequirements | None = None,
     ) -> TranslationProposal:
         if self._agent is None:
             self._agent = self._build_agent()
@@ -272,6 +321,8 @@ class LiveTranslationDoer:
             f"Discriminator: {pattern.discriminator_description}\n"
             f"Pattern summary: {pattern.pattern_summary}\n"
             f"Current policy context: {snapshot_desc}\n"
+            f"Authoritative proof-loop translation requirements: "
+            f"{_requirements_json(translation_requirements)}\n"
         )
         result = self._agent.run_sync(prompt)
         return result.output
@@ -295,6 +346,7 @@ class AttInferenceTranslationDoer:
         target_technology: str,
         artifact_type: str,
         snapshot: PolicySnapshot | None,
+        translation_requirements: ProofLoopTranslationRequirements | None = None,
     ) -> TranslationProposal:
         if not self._settings.credentials_configured:
             raise ValueError(
@@ -317,8 +369,11 @@ class AttInferenceTranslationDoer:
             "candidate is tested or production-safe. "
             "For akamai-waf, candidate_content must be an Akamai custom-rule "
             "JSON string with operation (AND or OR) and conditions (no action). "
-            "Each condition needs type=requestHeaderValueMatch, positiveMatch "
-            "(boolean), header, and a non-empty value string or array. For "
+            "Use pathMatch for URI paths, argsPostMatch/argsPostJSONMatch/"
+            "argsPostXMLMatch for POST body parameters, and "
+            "requestHeaderValueMatch only for real request headers. Never invent "
+            "Request-URI or Request-Body headers. Each condition needs "
+            "positiveMatch (boolean) and a non-empty value string or array. For "
             "firewall-generic, provide a PAN-OS security-rule CLI set command "
             "or XML entry including from/to/source/destination/application/"
             "service/action. For edr-s1, provide SentinelOne STAR rule JSON "
@@ -331,6 +386,8 @@ class AttInferenceTranslationDoer:
             f"Discriminator: {pattern.discriminator_description}\n"
             f"Pattern summary: {pattern.pattern_summary}\n"
             f"Current policy context: {snapshot_desc}\n"
+            f"Authoritative proof-loop translation requirements: "
+            f"{_requirements_json(translation_requirements)}\n"
         )
         payload = {
             "model": self._settings.model_name,
@@ -399,3 +456,11 @@ def build_translation_doer(settings: Settings) -> TranslationDoer:
     if settings.is_live:
         return LiveTranslationDoer(settings)
     return FixtureTranslationDoer()
+
+
+def _requirements_json(
+    requirements: ProofLoopTranslationRequirements | None,
+) -> str:
+    if requirements is None:
+        return "none"
+    return requirements.model_dump_json(exclude_none=True)

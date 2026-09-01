@@ -167,6 +167,54 @@ class BypassCounterexample(BaseModel):
     evidence_refs: list[str] = Field(default_factory=list)
 
 
+class ProofLoopTranslationRequirements(BaseModel):
+    """Authoritative payload forms a target translation must preserve."""
+
+    original_payload: Optional[str] = None
+    bypass_payload: Optional[str] = None
+    bypass_variant_or_encoding: Optional[str] = None
+    constraint_for_next_candidate: Optional[str] = None
+    post_waf_canonical_forms: list[str] = Field(default_factory=list)
+    effective_request: Optional[dict[str, Any]] = None
+    mutation_location: Optional[dict[str, Any]] = None
+
+    @property
+    def required_payloads(self) -> tuple[str, ...]:
+        values = (
+            self.original_payload,
+            self.bypass_payload,
+            *self.post_waf_canonical_forms,
+        )
+        return tuple(dict.fromkeys(value for value in values if value))
+
+    @property
+    def request_path(self) -> Optional[str]:
+        if not self.effective_request:
+            return None
+        path = self.effective_request.get("path")
+        return path if isinstance(path, str) and path else None
+
+
+class ProofLoopRequestContext(BaseModel):
+    """Authoritative HTTP request proven by Mitigation Check."""
+
+    method: str
+    path: str
+    headers: dict[str, str] = Field(default_factory=dict)
+    body: str
+
+    @property
+    def content_type(self) -> str:
+        return next(
+            (
+                value.lower()
+                for name, value in self.headers.items()
+                if name.lower() == "content-type"
+            ),
+            "",
+        )
+
+
 class DirectBypassSubject(StrictRequestModel):
     candidate_fingerprint_id: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
     candidate_id: str = Field(min_length=1)

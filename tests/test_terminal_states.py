@@ -1,13 +1,19 @@
+import json
+
 import pytest
 
 from control_translation import capability
 from control_translation.contracts import (
     ControlTranslationRequest,
+    ProofLoopRequestContext,
+    ProofLoopTranslationRequirements,
+    ProvenMitigationPattern,
     TargetContext,
     TranslationPolicy,
 )
 from control_translation.providers.fixtures import get_fixture_pattern
 from control_translation.terminal import TerminalState
+from control_translation.agents.translation_agent import TranslationProposal
 
 
 def _request(target_technology: str, context_id: str) -> ControlTranslationRequest:
@@ -84,6 +90,240 @@ def test_translation_policy_can_disallow_equivalent_result():
     envelope = capability.invoke(request)
     assert envelope.terminal_state == TerminalState.CANNOT_EXPRESS
     assert "does not allow equivalent" in envelope.structured_result.outcome_reason.detail
+
+
+class StaticAkamaiDoer:
+    def __init__(self, content: dict) -> None:
+        self.content = content
+
+    def propose(self, **kwargs):
+        return TranslationProposal(
+            candidate_content=json.dumps(self.content),
+            translation_label="equivalent",
+            justification="Test translation.",
+        )
+
+
+def _bypass_requirements() -> ProofLoopTranslationRequirements:
+    return ProofLoopTranslationRequirements(
+        original_payload="Researcher='",
+        bypass_payload="526573656172636865723d27",
+        bypass_variant_or_encoding="hexadecimal",
+        constraint_for_next_candidate="Cover the hexadecimal bypass form.",
+        post_waf_canonical_forms=["Researcher%253D%2527", "Researcher='"],
+        effective_request={
+            "method": "POST",
+            "path": "/public/submit.php",
+            "body": "526573656172636865723d27",
+        },
+        mutation_location={"component": "body", "parameter": "Researcher"},
+    )
+
+
+def test_exact_akamai_translation_rejects_missing_bypass_coverage():
+    doer = StaticAkamaiDoer(
+        {
+            "name": "incomplete",
+            "operation": "AND",
+            "conditions": [
+                {
+                    "type": "pathMatch",
+                    "positiveMatch": True,
+                    "value": ["/public/submit.php"],
+                },
+                {
+                    "type": "argsPostMatch",
+                    "positiveMatch": True,
+                    "value": ["Researcher='"],
+                },
+            ],
+        }
+    )
+
+    envelope = capability.invoke(
+        _request("akamai-waf", "akamai-policy:example:rev-17"),
+        doer=doer,
+        translation_requirements=_bypass_requirements(),
+    )
+
+    assert envelope.terminal_state == TerminalState.CANNOT_EXPRESS
+    assert "526573656172636865723d27" in envelope.structured_result.outcome_reason.detail
+
+
+def test_exact_akamai_translation_accepts_path_and_body_payload_forms():
+    doer = StaticAkamaiDoer(
+        {
+            "name": "bypass-aware",
+            "operation": "AND",
+            "conditions": [
+                {
+                    "type": "pathMatch",
+                    "positiveMatch": True,
+                    "value": ["/public/submit.php"],
+                },
+                {
+                    "type": "argsPostMatch",
+                    "positiveMatch": True,
+                    "value": [
+                        "Researcher='",
+                        "Researcher%253D%2527",
+                        "526573656172636865723d27",
+                    ],
+                },
+            ],
+        }
+    )
+
+    envelope = capability.invoke(
+        _request("akamai-waf", "akamai-policy:example:rev-17"),
+        doer=doer,
+        translation_requirements=_bypass_requirements(),
+    )
+
+    assert envelope.terminal_state == TerminalState.TRANSLATED
+
+
+@pytest.mark.parametrize(
+    "source_regex",
+    ["^test' OR '1'='1$", "^(?:test' OR '1'='1)$"],
+)
+def test_anchored_literal_args_rule_is_hardened_deterministically_for_akamai(
+    source_regex: str,
+):
+    class UnexpectedDoer:
+        def propose(self, **kwargs):
+            raise AssertionError("anchored literal translation must be deterministic")
+
+    pattern = ProvenMitigationPattern(
+        proven_pattern_id="proven-pattern:candidate:CVE-2026-77392:waf:test",
+        vulnerability_id="CVE-2026-77392",
+        selected_control_class="waf",
+        discriminator_id="discriminator:test",
+        discriminator_description="Block SQL injection in a request parameter.",
+        pattern_summary=(
+            f'SecRule ARGS:username "@rx {source_regex}" '
+            '"id:153101,phase:2,deny,status:403,log"'
+        ),
+        proof_record_ids=[
+            "mitigation-check-result:test",
+            "bypass-validation-result:test",
+        ],
+    )
+    request = ControlTranslationRequest(
+        proven_pattern=pattern,
+        target_context=TargetContext(
+            target_technology="akamai-waf",
+            target_policy_context_id="akamai-policy:example:rev-17",
+        ),
+    )
+
+    envelope = capability.invoke(request, doer=UnexpectedDoer())
+
+    assert envelope.terminal_state == TerminalState.TRANSLATED
+    candidate = envelope.structured_result.primary_candidate
+    assert candidate is not None
+    assert candidate.implements_discriminator.translation == "equivalent"
+    artifact = json.loads(candidate.candidate_artifact.content_ref)
+    assert artifact == {
+        "name": "JANUS-CVE-2026-77392-username-SQLi",
+        "description": (
+            "Blocks the evidenced username SQL injection value and common "
+            "form-encoding variants."
+        ),
+        "operation": "AND",
+        "conditions": [
+            {
+                "type": "requestMethodMatch",
+                "positiveMatch": True,
+                "value": ["POST"],
+            },
+            {
+                "type": "argsPostMatch",
+                "positiveMatch": True,
+                "parameter": "username",
+                "valueCase": False,
+                "valueWildcard": False,
+                "value": [
+                    "test' OR '1'='1",
+                    "test%27%20OR%20%271%27%3D%271",
+                    "test%27+OR+%271%27%3D%271",
+                    "test%2527%2520OR%2520%25271%2527%253D%25271",
+                ],
+            },
+        ],
+        "tag": ["JANUS", "CVE-2026-77392", "SQLi", "virtual-patch"],
+    }
+
+
+def test_request_body_form_rule_is_hardened_from_authoritative_request_context():
+    class UnexpectedDoer:
+        def propose(self, **kwargs):
+            raise AssertionError("proven form-body translation must be deterministic")
+
+    pattern = ProvenMitigationPattern(
+        proven_pattern_id="proven-pattern:candidate:CVE-2026-77392:waf:body",
+        vulnerability_id="CVE-2026-77392",
+        selected_control_class="waf",
+        discriminator_id="discriminator:body",
+        discriminator_description="Block a malicious form request body.",
+        pattern_summary=(
+            'SecRule REQUEST_BODY "@rx person(?:\\\\[|%5B)0.*malicious" '
+            '"id:144801,phase:2,deny,status:403,log"'
+        ),
+        proof_record_ids=[
+            "mitigation-check-result:body",
+            "bypass-validation-result:body",
+        ],
+    )
+    request = ControlTranslationRequest(
+        proven_pattern=pattern,
+        target_context=TargetContext(
+            target_technology="akamai-waf",
+            target_policy_context_id="akamai-policy:example:rev-17",
+        ),
+    )
+    request_context = ProofLoopRequestContext(
+        method="POST",
+        path="/public/submit.php",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        body="person[0][]=malicious",
+    )
+
+    envelope = capability.invoke(
+        request,
+        doer=UnexpectedDoer(),
+        request_context=request_context,
+    )
+
+    assert envelope.terminal_state == TerminalState.TRANSLATED
+    candidate = envelope.structured_result.primary_candidate
+    assert candidate is not None
+    assert candidate.implements_discriminator.translation == "narrower"
+    artifact = json.loads(candidate.candidate_artifact.content_ref)
+    assert artifact["name"] == "JANUS-CVE-2026-77392-Form-Body-Mitigation"
+    assert artifact["conditions"] == [
+        {
+            "type": "requestMethodMatch",
+            "positiveMatch": True,
+            "value": ["POST"],
+        },
+        {
+            "type": "pathMatch",
+            "positiveMatch": True,
+            "value": ["/public/submit.php"],
+        },
+        {
+            "type": "argsPostMatch",
+            "positiveMatch": True,
+            "valueCase": False,
+            "valueWildcard": False,
+            "value": [
+                "person[0][]=malicious",
+                "person%5B0%5D%5B%5D=malicious",
+                "person%255B0%255D%255B%255D=malicious",
+            ],
+        },
+    ]
 
 
 @pytest.mark.parametrize(

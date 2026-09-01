@@ -9,6 +9,8 @@ from typing import Any, Protocol
 from control_translation.contracts import (
     BypassCounterexample,
     DatabricksResultReference,
+    ProofLoopRequestContext,
+    ProofLoopTranslationRequirements,
     ProofLoopQualification,
     ProofLoopRoutingMetadata,
     ProvenMitigationPattern,
@@ -54,6 +56,8 @@ class ResolvedProofLoop:
     target_policy_context_id: str | None
     bypass_counterexample: BypassCounterexample | None
     bypass_evidence_refs: tuple[str, ...]
+    translation_requirements: ProofLoopTranslationRequirements | None
+    request_context: ProofLoopRequestContext | None
 
 
 def resolve_proof_loop(
@@ -223,6 +227,13 @@ def resolve_proof_loop(
             bypass_evidence_refs.update(
                 item for item in evidence_refs if isinstance(item, str) and item
             )
+    translation_requirements = _translation_requirements(
+        raw_counterexample,
+        feedback,
+    )
+    request_context = _mitigation_request_context(
+        records["Mitigation Check"].result
+    )
 
     target_technology = _preferred_string(
         defense.result,
@@ -242,6 +253,103 @@ def resolve_proof_loop(
         target_policy_context_id=target_policy_context_id,
         bypass_counterexample=bypass_counterexample,
         bypass_evidence_refs=tuple(sorted(bypass_evidence_refs)),
+        translation_requirements=translation_requirements,
+        request_context=request_context,
+    )
+
+
+def _mitigation_request_context(
+    mitigation_result: dict[str, Any],
+) -> ProofLoopRequestContext | None:
+    test_basis = mitigation_result.get("test_basis")
+    if not isinstance(test_basis, dict):
+        return None
+    request = test_basis.get("request")
+    if not isinstance(request, dict):
+        return None
+    method = request.get("method")
+    path = request.get("path")
+    body = request.get("body")
+    headers = request.get("headers") or {}
+    if not all(isinstance(value, str) and value for value in (method, path, body)):
+        return None
+    if not isinstance(headers, dict) or not all(
+        isinstance(name, str) and isinstance(value, str)
+        for name, value in headers.items()
+    ):
+        return None
+    return ProofLoopRequestContext(
+        method=method,
+        path=path,
+        headers=headers,
+        body=body,
+    )
+
+
+def _translation_requirements(
+    raw_counterexample: Any,
+    feedback: Any,
+) -> ProofLoopTranslationRequirements | None:
+    counterexample = raw_counterexample if isinstance(raw_counterexample, dict) else {}
+    feedback_record = feedback if isinstance(feedback, dict) else {}
+    waf_observation = counterexample.get("waf_observation")
+    canonical_forms: list[str] = []
+    if isinstance(waf_observation, dict):
+        raw_forms = waf_observation.get("canonical_forms")
+        if isinstance(raw_forms, list):
+            canonical_forms = [
+                item for item in raw_forms if isinstance(item, str) and item
+            ]
+
+    requirements = ProofLoopTranslationRequirements(
+        original_payload=_preferred_nonempty_string(
+            feedback_record.get("original_payload"),
+            counterexample.get("original_payload"),
+        ),
+        bypass_payload=_preferred_nonempty_string(
+            feedback_record.get("bypass_payload"),
+            counterexample.get("payload"),
+            feedback_record.get("counterexample_body"),
+            counterexample.get("counterexample_body"),
+        ),
+        bypass_variant_or_encoding=_preferred_nonempty_string(
+            feedback_record.get("bypass_variant_or_encoding"),
+            counterexample.get("bypass_variant_or_encoding"),
+            counterexample.get("variant_family"),
+        ),
+        constraint_for_next_candidate=_preferred_nonempty_string(
+            feedback_record.get("constraint_for_next_candidate"),
+            feedback_record.get("do_not_repeat"),
+        ),
+        post_waf_canonical_forms=canonical_forms,
+        effective_request=(
+            counterexample.get("effective_request")
+            if isinstance(counterexample.get("effective_request"), dict)
+            else None
+        ),
+        mutation_location=(
+            counterexample.get("mutation_location")
+            if isinstance(counterexample.get("mutation_location"), dict)
+            else None
+        ),
+    )
+    if not any(
+        (
+            requirements.required_payloads,
+            requirements.bypass_variant_or_encoding,
+            requirements.constraint_for_next_candidate,
+            requirements.effective_request,
+            requirements.mutation_location,
+        )
+    ):
+        return None
+    return requirements
+
+
+def _preferred_nonempty_string(*values: Any) -> str | None:
+    return next(
+        (value for value in values if isinstance(value, str) and value.strip()),
+        None,
     )
 
 
