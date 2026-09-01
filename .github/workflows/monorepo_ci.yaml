@@ -142,6 +142,7 @@ jobs:
                 ref: context.ref.replace('refs/heads/', ''),
                 sha: context.sha,
                 triggered_by: context.actor,
+                jfrog_group: 'apm0047460-dkr-group',
 
                 images: [
                   {
