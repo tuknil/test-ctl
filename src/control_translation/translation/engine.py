@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from hashlib import sha256
+from urllib.parse import quote, quote_plus
 
 from control_translation.adapters.base import TargetAdapter
-from control_translation.agents.translation_agent import TranslationDoer
+from control_translation.agents.translation_agent import TranslationDoer, TranslationProposal
 from control_translation.contracts import (
     CandidateArtifact,
     CollateralImpactPrior,
@@ -44,6 +46,12 @@ class EngineSuccess:
 
 EngineResult = EngineFailure | EngineSuccess
 
+_ANCHORED_LITERAL_ARGS_RULE = re.compile(
+    r'^\s*SecRule\s+ARGS:([A-Za-z0-9_.-]+)\s+"@rx \^([^"\\\r\n]+)\$"\s+"',
+    re.MULTILINE,
+)
+_REGEX_META = re.compile(r"[.\\^$*+?{}\[\]()|]")
+
 
 def translate(
     pattern: ProvenMitigationPattern,
@@ -67,22 +75,28 @@ def translate(
             ),
         )
 
-    # Doer: propose a candidate artifact (agent output, not yet trusted).
-    try:
-        proposal = doer.propose(
-            pattern=pattern,
-            target_technology=target_technology,
-            artifact_type=adapter.artifact_type,
-            snapshot=snapshot,
-            translation_requirements=translation_requirements,
-        )
-    except Exception as exc:  # provider/model failure
-        logger.exception(
-            "Translation provider failed vulnerability_id=%s target_technology=%s",
-            pattern.vulnerability_id,
-            target_technology,
-        )
-        return EngineFailure(reason="provider-failure", detail=str(exc))
+    proposal = (
+        _hardened_akamai_literal_proposal(pattern)
+        if target_technology == "akamai-waf" and translation_requirements is None
+        else None
+    )
+    if proposal is None:
+        # Doer: propose a candidate artifact (agent output, not yet trusted).
+        try:
+            proposal = doer.propose(
+                pattern=pattern,
+                target_technology=target_technology,
+                artifact_type=adapter.artifact_type,
+                snapshot=snapshot,
+                translation_requirements=translation_requirements,
+            )
+        except Exception as exc:  # provider/model failure
+            logger.exception(
+                "Translation provider failed vulnerability_id=%s target_technology=%s",
+                pattern.vulnerability_id,
+                target_technology,
+            )
+            return EngineFailure(reason="provider-failure", detail=str(exc))
 
     if proposal.translation_label not in ("exact", "equivalent", "narrower"):
         return EngineFailure(
@@ -161,6 +175,72 @@ def translate(
         provenance=list(pattern.proof_record_ids),
     )
     return EngineSuccess(candidate=candidate)
+
+
+def _hardened_akamai_literal_proposal(
+    pattern: ProvenMitigationPattern,
+) -> TranslationProposal | None:
+    match = _ANCHORED_LITERAL_ARGS_RULE.search(pattern.pattern_summary)
+    if match is None:
+        return None
+
+    parameter, literal = match.groups()
+    if _REGEX_META.search(literal):
+        return None
+
+    encoded_once = quote(literal, safe="")
+    values = list(
+        dict.fromkeys(
+            (
+                literal,
+                encoded_once,
+                quote_plus(literal, safe=""),
+                quote(encoded_once, safe=""),
+            )
+        )
+    )
+    rule = {
+        "name": f"JANUS-{pattern.vulnerability_id}-{parameter}-SQLi",
+        "description": (
+            f"Blocks the evidenced {parameter} SQL injection value and common "
+            "form-encoding variants."
+        ),
+        "operation": "AND",
+        "conditions": [
+            {
+                "type": "requestMethodMatch",
+                "positiveMatch": True,
+                "value": ["POST"],
+            },
+            {
+                "type": "argsPostMatch",
+                "positiveMatch": True,
+                "parameter": parameter,
+                "valueCase": False,
+                "valueWildcard": False,
+                "value": values,
+            },
+        ],
+        "tag": ["JANUS", pattern.vulnerability_id, "SQLi", "virtual-patch"],
+    }
+    return TranslationProposal(
+        candidate_content=json.dumps(rule, separators=(",", ":")),
+        translation_label="equivalent",
+        justification=(
+            "Converted the anchored literal ModSecurity named-argument match "
+            "into explicit Akamai POST-argument values, including common form "
+            "and double-encoding representations."
+        ),
+        translation_assumptions=[
+            "The target Akamai policy supports parameter selection on argsPostMatch.",
+            "The custom-rule action is assigned separately; recommended action: deny.",
+        ],
+        limitations=[
+            "The candidate has not been executed in an Akamai tenant.",
+            "Coverage is limited to the evidenced literal and generated transport encodings.",
+            "No authoritative endpoint path was available, so the rule is not path-scoped.",
+        ],
+    )
 
 
 def _akamai_semantic_errors(

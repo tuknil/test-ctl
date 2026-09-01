@@ -6,6 +6,7 @@ from control_translation import capability
 from control_translation.contracts import (
     ControlTranslationRequest,
     ProofLoopTranslationRequirements,
+    ProvenMitigationPattern,
     TargetContext,
     TranslationPolicy,
 )
@@ -179,6 +180,72 @@ def test_exact_akamai_translation_accepts_path_and_body_payload_forms():
     )
 
     assert envelope.terminal_state == TerminalState.TRANSLATED
+
+
+def test_anchored_literal_args_rule_is_hardened_deterministically_for_akamai():
+    class UnexpectedDoer:
+        def propose(self, **kwargs):
+            raise AssertionError("anchored literal translation must be deterministic")
+
+    pattern = ProvenMitigationPattern(
+        proven_pattern_id="proven-pattern:candidate:CVE-2026-77392:waf:test",
+        vulnerability_id="CVE-2026-77392",
+        selected_control_class="waf",
+        discriminator_id="discriminator:test",
+        discriminator_description="Block SQL injection in a request parameter.",
+        pattern_summary=(
+            'SecRule ARGS:username "@rx ^test\' OR \'1\'=\'1$" '
+            '"id:153101,phase:2,deny,status:403,log"'
+        ),
+        proof_record_ids=[
+            "mitigation-check-result:test",
+            "bypass-validation-result:test",
+        ],
+    )
+    request = ControlTranslationRequest(
+        proven_pattern=pattern,
+        target_context=TargetContext(
+            target_technology="akamai-waf",
+            target_policy_context_id="akamai-policy:example:rev-17",
+        ),
+    )
+
+    envelope = capability.invoke(request, doer=UnexpectedDoer())
+
+    assert envelope.terminal_state == TerminalState.TRANSLATED
+    candidate = envelope.structured_result.primary_candidate
+    assert candidate is not None
+    assert candidate.implements_discriminator.translation == "equivalent"
+    artifact = json.loads(candidate.candidate_artifact.content_ref)
+    assert artifact == {
+        "name": "JANUS-CVE-2026-77392-username-SQLi",
+        "description": (
+            "Blocks the evidenced username SQL injection value and common "
+            "form-encoding variants."
+        ),
+        "operation": "AND",
+        "conditions": [
+            {
+                "type": "requestMethodMatch",
+                "positiveMatch": True,
+                "value": ["POST"],
+            },
+            {
+                "type": "argsPostMatch",
+                "positiveMatch": True,
+                "parameter": "username",
+                "valueCase": False,
+                "valueWildcard": False,
+                "value": [
+                    "test' OR '1'='1",
+                    "test%27%20OR%20%271%27%3D%271",
+                    "test%27+OR+%271%27%3D%271",
+                    "test%2527%2520OR%2520%25271%2527%253D%25271",
+                ],
+            },
+        ],
+        "tag": ["JANUS", "CVE-2026-77392", "SQLi", "virtual-patch"],
+    }
 
 
 @pytest.mark.parametrize(
