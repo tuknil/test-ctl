@@ -182,7 +182,13 @@ def test_exact_akamai_translation_accepts_path_and_body_payload_forms():
     assert envelope.terminal_state == TerminalState.TRANSLATED
 
 
-def test_anchored_literal_args_rule_is_hardened_deterministically_for_akamai():
+@pytest.mark.parametrize(
+    "source_regex",
+    ["^test' OR '1'='1$", "^(?:test' OR '1'='1)$"],
+)
+def test_anchored_literal_args_rule_is_hardened_deterministically_for_akamai(
+    source_regex: str,
+):
     class UnexpectedDoer:
         def propose(self, **kwargs):
             raise AssertionError("anchored literal translation must be deterministic")
@@ -194,7 +200,7 @@ def test_anchored_literal_args_rule_is_hardened_deterministically_for_akamai():
         discriminator_id="discriminator:test",
         discriminator_description="Block SQL injection in a request parameter.",
         pattern_summary=(
-            'SecRule ARGS:username "@rx ^test\' OR \'1\'=\'1$" '
+            f'SecRule ARGS:username "@rx {source_regex}" '
             '"id:153101,phase:2,deny,status:403,log"'
         ),
         proof_record_ids=[

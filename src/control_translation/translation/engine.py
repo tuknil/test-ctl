@@ -185,6 +185,8 @@ def _hardened_akamai_literal_proposal(
         return None
 
     parameter, literal = match.groups()
+    if literal.startswith("(?:") and literal.endswith(")"):
+        literal = literal[3:-1]
     if _REGEX_META.search(literal):
         return None
 
