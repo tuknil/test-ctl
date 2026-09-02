@@ -430,7 +430,7 @@ class AttInferenceTranslationDoer:
             f"Authoritative proof-loop translation requirements: "
             f"{_requirements_json(translation_requirements)}\n"
         )
-        return self._request_translation(system_prompt, user_prompt)
+        return self._request_translation(system_prompt, user_prompt, target_technology)
 
     def repair(
         self,
@@ -461,12 +461,13 @@ class AttInferenceTranslationDoer:
             snapshot_desc,
             translation_requirements,
         ) + _repair_feedback(previous_proposal, validation_errors)
-        return self._request_translation(system_prompt, user_prompt)
+        return self._request_translation(system_prompt, user_prompt, target_technology)
 
     def _request_translation(
         self,
         system_prompt: str,
         user_prompt: str,
+        target_technology: str,
     ) -> TranslationProposal:
         if not self._settings.credentials_configured:
             raise ValueError(
@@ -510,7 +511,9 @@ class AttInferenceTranslationDoer:
                 content = "".join(
                     part.get("text", "") for part in content if isinstance(part, dict)
                 )
-            proposal_data = json.loads(content)
+            proposal_data = _normalize_att_proposal_data(
+                json.loads(content), target_technology
+            )
             for field in ("translation_assumptions", "limitations"):
                 if isinstance(proposal_data.get(field), str):
                     proposal_data[field] = [proposal_data[field]]
@@ -529,6 +532,56 @@ class AttInferenceTranslationDoer:
             raise RuntimeError(
                 "AT&T Inference returned an invalid structured translation response."
             ) from exc
+
+
+_PROPOSAL_METADATA_FIELDS = frozenset(
+    {
+        "translation_label",
+        "justification",
+        "translation_assumptions",
+        "limitations",
+        "answer_kind",
+    }
+)
+
+
+def _normalize_att_proposal_data(
+    proposal_data: object,
+    target_technology: str,
+) -> dict[str, Any]:
+    if not isinstance(proposal_data, dict):
+        raise TypeError("Translation proposal must be a JSON object.")
+    if "candidate_content" in proposal_data:
+        return proposal_data
+
+    is_flattened_akamai = (
+        target_technology == "akamai-waf"
+        and proposal_data.get("operation") in {"AND", "OR"}
+        and isinstance(proposal_data.get("conditions"), list)
+    )
+    is_flattened_edr = (
+        target_technology == "edr-s1"
+        and isinstance(proposal_data.get("data"), dict)
+    )
+    if not (is_flattened_akamai or is_flattened_edr):
+        return proposal_data
+
+    metadata = {
+        key: value
+        for key, value in proposal_data.items()
+        if key in _PROPOSAL_METADATA_FIELDS
+    }
+    candidate = {
+        key: value
+        for key, value in proposal_data.items()
+        if key not in _PROPOSAL_METADATA_FIELDS
+    }
+    metadata["candidate_content"] = candidate
+    metadata.setdefault(
+        "justification",
+        "Structured target candidate normalized from the provider response.",
+    )
+    return metadata
 
 
 def _proposal_prompt(

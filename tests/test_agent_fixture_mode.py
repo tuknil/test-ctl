@@ -184,3 +184,44 @@ def test_att_inference_preserves_structured_regex_candidate(monkeypatch) -> None
     assert proposal.candidate_content["conditions"][0]["value"] == [regex]
     system_prompt = captured["payload"]["messages"][0]["content"]
     assert "JSON object, not a JSON-encoded string" in system_prompt
+
+
+def test_att_inference_normalizes_unmistakable_flattened_akamai_response() -> None:
+    from control_translation.agents.translation_agent import (
+        _normalize_att_proposal_data,
+    )
+
+    regex = r"^test'(?:\s|\+)+OR(?:\s|\+)+'1'='1$"
+    flattened = {
+        "name": "cve-2026-77392",
+        "operation": "OR",
+        "conditions": [
+            {
+                "type": "argsPostMatch",
+                "positiveMatch": True,
+                "value": [regex],
+            }
+        ],
+        "translation_label": "equivalent",
+        "answer_kind": "construction",
+    }
+
+    normalized = _normalize_att_proposal_data(flattened, "akamai-waf")
+    proposal = TranslationProposal.model_validate(normalized)
+
+    assert isinstance(proposal.candidate_content, dict)
+    assert proposal.candidate_content["conditions"][0]["value"] == [regex]
+    assert "translation_label" not in proposal.candidate_content
+    assert proposal.justification == (
+        "Structured target candidate normalized from the provider response."
+    )
+
+
+def test_att_inference_does_not_normalize_ambiguous_flat_response() -> None:
+    from control_translation.agents.translation_agent import (
+        _normalize_att_proposal_data,
+    )
+
+    ambiguous = {"conditions": [], "translation_label": "equivalent"}
+
+    assert _normalize_att_proposal_data(ambiguous, "akamai-waf") == ambiguous
