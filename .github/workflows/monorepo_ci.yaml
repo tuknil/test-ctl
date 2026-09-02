@@ -67,14 +67,14 @@ on:
         type: string
 
       enable_stage_deployment:
-        description: 'Enable Deployment'
+        description: 'Push Stage Repo'
         default: false
         required: true
         type: boolean
 
 
       enable_Azure_deployment:
-        description: 'Enable Deployment'
+        description: 'Push Azure ACA'
         default: false
         required: true
         type: boolean
