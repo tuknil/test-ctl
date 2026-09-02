@@ -3,6 +3,7 @@ import json
 import pytest
 
 from control_translation import capability
+from control_translation.agents.translation_agent import TranslationProposal
 from control_translation.contracts import (
     ControlTranslationRequest,
     ProofLoopRequestContext,
@@ -13,7 +14,6 @@ from control_translation.contracts import (
 )
 from control_translation.providers.fixtures import get_fixture_pattern
 from control_translation.terminal import TerminalState
-from control_translation.agents.translation_agent import TranslationProposal
 
 
 def _request(target_technology: str, context_id: str) -> ControlTranslationRequest:
@@ -102,6 +102,81 @@ class StaticAkamaiDoer:
             translation_label="equivalent",
             justification="Test translation.",
         )
+
+
+class RepairingAkamaiDoer:
+    def __init__(self, repaired_content: object) -> None:
+        self.repaired_content = repaired_content
+        self.propose_calls = 0
+        self.repair_calls = 0
+
+    def propose(self, **kwargs):
+        self.propose_calls += 1
+        return TranslationProposal(
+            candidate_content=r'{"name":"broken","operation":"AND","conditions":[{"type":"argsPostMatch","positiveMatch":true,"value":["\s+"]}]}',
+            translation_label="narrower",
+            justification="Initial malformed provider candidate.",
+        )
+
+    def repair(self, **kwargs):
+        self.repair_calls += 1
+        return TranslationProposal(
+            candidate_content=self.repaired_content,
+            translation_label="narrower",
+            justification="Repaired provider candidate.",
+        )
+
+
+def _non_deterministic_akamai_request() -> ControlTranslationRequest:
+    request = _request("akamai-waf", "akamai-policy:example:rev-17")
+    pattern = request.proven_pattern.model_copy(
+        update={
+            "pattern_summary": (
+                "SecRule ARGS:username \"@rx ^test'(?:\\s|\\+)+OR"
+                "(?:\\s|\\+)+'1'='1$\""
+            )
+        }
+    )
+    return request.model_copy(update={"proven_pattern": pattern})
+
+
+def test_structured_akamai_candidate_serializes_regex_once() -> None:
+    regex = r"(?i)(?:'\s+OR\s+'1'='1|%27\s*(?:OR|%4f%52|%4F%52)\s*%271%27%3[dD]%271)"
+    content = {
+        "name": "cve-2026-77392",
+        "operation": "AND",
+        "conditions": [
+            {
+                "type": "argsPostMatch",
+                "positiveMatch": True,
+                "value": [regex],
+            }
+        ],
+    }
+    doer = RepairingAkamaiDoer(content)
+
+    envelope = capability.invoke(_non_deterministic_akamai_request(), doer=doer)
+
+    assert envelope.terminal_state == TerminalState.TRANSLATED
+    assert doer.propose_calls == 1
+    assert doer.repair_calls == 1
+    candidate = envelope.structured_result.primary_candidate
+    assert candidate is not None
+    decoded = json.loads(candidate.candidate_artifact.content_ref)
+    assert decoded["conditions"][0]["value"] == [regex]
+
+
+def test_exhausted_candidate_syntax_repair_is_provider_malfunction() -> None:
+    doer = RepairingAkamaiDoer(r'{"conditions":["\s+"]}')
+
+    envelope = capability.invoke(_non_deterministic_akamai_request(), doer=doer)
+
+    assert doer.propose_calls == 1
+    assert doer.repair_calls == 1
+    assert envelope.terminal_state == TerminalState.MALFUNCTION
+    assert envelope.status == "malfunction"
+    assert envelope.structured_result.outcome_reason.code == "provider-failure"
+    assert "after one repair attempt" in envelope.structured_result.outcome_reason.detail
 
 
 def _bypass_requirements() -> ProofLoopTranslationRequirements:

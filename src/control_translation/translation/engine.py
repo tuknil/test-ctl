@@ -16,7 +16,10 @@ from hashlib import sha256
 from urllib.parse import parse_qsl, quote, quote_plus
 
 from control_translation.adapters.base import TargetAdapter
-from control_translation.agents.translation_agent import TranslationDoer, TranslationProposal
+from control_translation.agents.translation_agent import (
+    TranslationDoer,
+    TranslationProposal,
+)
 from control_translation.contracts import (
     CandidateArtifact,
     CollateralImpactPrior,
@@ -29,7 +32,6 @@ from control_translation.contracts import (
 )
 from control_translation.policy_reader.base import PolicySnapshot
 from control_translation.translation import conflict_checker, syntax_validator
-
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +81,7 @@ def translate(
         )
 
     proposal = None
+    proposal_from_doer = False
     if target_technology == "akamai-waf" and translation_requirements is None:
         proposal = _hardened_akamai_literal_proposal(pattern)
         if proposal is None:
@@ -93,6 +96,7 @@ def translate(
                 snapshot=snapshot,
                 translation_requirements=translation_requirements,
             )
+            proposal_from_doer = True
         except Exception as exc:  # provider/model failure
             logger.exception(
                 "Translation provider failed vulnerability_id=%s target_technology=%s",
@@ -101,39 +105,71 @@ def translate(
             )
             return EngineFailure(reason="provider-failure", detail=str(exc))
 
-    if proposal.translation_label not in ("exact", "equivalent", "narrower"):
-        return EngineFailure(
-            reason="provider-failure",
-            detail=(
-                "Doer returned an invalid translation_label: "
-                f"{proposal.translation_label!r}"
-            ),
-        )
+    policy_failure = _proposal_policy_failure(
+        proposal,
+        allow_narrower_translation=allow_narrower_translation,
+        allow_equivalent_translation=allow_equivalent_translation,
+    )
+    if policy_failure is not None:
+        return policy_failure
 
-    if proposal.translation_label == "equivalent" and not allow_equivalent_translation:
-        return EngineFailure(
-            reason="unsupported-feature",
-            detail="Translation policy does not allow equivalent translations.",
-        )
-    if proposal.translation_label == "narrower" and not allow_narrower_translation:
-        return EngineFailure(
-            reason="unsupported-feature",
-            detail="Translation policy does not allow narrower translations.",
-        )
+    try:
+        candidate_content = _normalize_candidate_content(proposal.candidate_content)
+    except (TypeError, ValueError) as exc:
+        return EngineFailure(reason="provider-failure", detail=str(exc))
 
     # Judge gate 1: syntax validation (mechanical).
-    syntax_result = syntax_validator.validate(adapter, proposal.candidate_content)
+    syntax_result = syntax_validator.validate(adapter, candidate_content)
     if not syntax_result.valid:
-        return EngineFailure(
-            reason="unsupported-feature",
-            detail="; ".join(syntax_result.errors) or "Candidate failed syntax validation.",
-        )
+        repair = getattr(doer, "repair", None) if proposal_from_doer else None
+        if not callable(repair):
+            return EngineFailure(
+                reason="unsupported-feature",
+                detail="; ".join(syntax_result.errors) or "Candidate failed syntax validation.",
+            )
+        try:
+            proposal = TranslationProposal.model_validate(
+                repair(
+                    pattern=pattern,
+                    target_technology=target_technology,
+                    artifact_type=adapter.artifact_type,
+                    snapshot=snapshot,
+                    translation_requirements=translation_requirements,
+                    previous_proposal=proposal,
+                    validation_errors=list(syntax_result.errors),
+                )
+            )
+            policy_failure = _proposal_policy_failure(
+                proposal,
+                allow_narrower_translation=allow_narrower_translation,
+                allow_equivalent_translation=allow_equivalent_translation,
+            )
+            if policy_failure is not None:
+                return policy_failure
+            candidate_content = _normalize_candidate_content(proposal.candidate_content)
+        except Exception as exc:
+            logger.exception(
+                "Translation provider repair failed vulnerability_id=%s target_technology=%s",
+                pattern.vulnerability_id,
+                target_technology,
+            )
+            return EngineFailure(reason="provider-failure", detail=str(exc))
+        syntax_result = syntax_validator.validate(adapter, candidate_content)
+        if not syntax_result.valid:
+            detail = "; ".join(syntax_result.errors) or "Candidate failed syntax validation."
+            return EngineFailure(
+                reason="provider-failure",
+                detail=(
+                    "Translation provider produced invalid target candidate syntax "
+                    f"after one repair attempt: {detail}"
+                ),
+            )
 
     # Judge gate 2: an exact/equivalent Akamai translation must preserve the
     # authoritative original and bypass forms in the correct request component.
     if target_technology == "akamai-waf" and translation_requirements is not None:
         semantic_errors = _akamai_semantic_errors(
-            proposal.candidate_content,
+            candidate_content,
             proposal.translation_label,
             translation_requirements,
         )
@@ -145,10 +181,10 @@ def translate(
 
     # Judge gate 3: conflict/placement detection (mechanical).
     conflicts = conflict_checker.detect_conflicts(
-        adapter, proposal.candidate_content, snapshot
+        adapter, candidate_content, snapshot
     )
 
-    content_hash = "sha256:" + sha256(proposal.candidate_content.encode("utf-8")).hexdigest()
+    content_hash = "sha256:" + sha256(candidate_content.encode("utf-8")).hexdigest()
 
     candidate = PrimaryCandidate(
         candidate_id=f"control-candidate:{pattern.vulnerability_id}:{target_technology}:1",
@@ -157,7 +193,7 @@ def translate(
         target_policy_context_id=target_policy_context_id,
         candidate_artifact=CandidateArtifact(
             artifact_type=adapter.artifact_type,
-            content_ref=proposal.candidate_content,
+            content_ref=candidate_content,
             content_hash=content_hash,
         ),
         implements_discriminator=ImplementsDiscriminator(
@@ -178,6 +214,49 @@ def translate(
         provenance=list(pattern.proof_record_ids),
     )
     return EngineSuccess(candidate=candidate)
+
+
+def _normalize_candidate_content(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, (dict, list)):
+        try:
+            return json.dumps(
+                content,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Translation provider returned non-serializable candidate content.") from exc
+    raise TypeError("Translation provider returned unsupported candidate content type.")
+
+
+def _proposal_policy_failure(
+    proposal: TranslationProposal,
+    *,
+    allow_narrower_translation: bool,
+    allow_equivalent_translation: bool,
+) -> EngineFailure | None:
+    if proposal.translation_label not in ("exact", "equivalent", "narrower"):
+        return EngineFailure(
+            reason="provider-failure",
+            detail=(
+                "Doer returned an invalid translation_label: "
+                f"{proposal.translation_label!r}"
+            ),
+        )
+    if proposal.translation_label == "equivalent" and not allow_equivalent_translation:
+        return EngineFailure(
+            reason="unsupported-feature",
+            detail="Translation policy does not allow equivalent translations.",
+        )
+    if proposal.translation_label == "narrower" and not allow_narrower_translation:
+        return EngineFailure(
+            reason="unsupported-feature",
+            detail="Translation policy does not allow narrower translations.",
+        )
+    return None
 
 
 def _hardened_akamai_literal_proposal(
@@ -229,7 +308,7 @@ def _hardened_akamai_literal_proposal(
         "tag": ["JANUS", pattern.vulnerability_id, "SQLi", "virtual-patch"],
     }
     return TranslationProposal(
-        candidate_content=json.dumps(rule, separators=(",", ":")),
+        candidate_content=rule,
         translation_label="equivalent",
         justification=(
             "Converted the anchored literal ModSecurity named-argument match "
@@ -317,7 +396,7 @@ def _hardened_akamai_form_body_proposal(
         "tag": ["JANUS", pattern.vulnerability_id, "form-body", "virtual-patch"],
     }
     return TranslationProposal(
-        candidate_content=json.dumps(rule, separators=(",", ":")),
+        candidate_content=rule,
         translation_label="narrower",
         justification=(
             "Converted the authoritative proven form body into explicit Akamai "
