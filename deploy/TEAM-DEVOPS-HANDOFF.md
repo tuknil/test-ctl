@@ -91,12 +91,10 @@ the completion because its `request_id` column is non-nullable.
   5-second timeout, 3 failures
 - **Readiness probe:** `/ready`, same settings
 - **Initial resources:** `0.5 vCPU`, `1 GiB` memory; tune from telemetry
-- **Volume mount:** not required for Databricks. Only mount `/app/data` if
-  explicitly deploying with `PERSISTENCE_BACKEND=sqlite`.
+- **Volume mount:** durable `/app/data` mount required for lifecycle state,
+   including when `PERSISTENCE_BACKEND=databricks`.
 
-One replica is required initially because the existing Databricks table has no
-unique idempotency-key constraint. Do not scale writers horizontally until a
-concurrency strategy is approved.
+One replica is required while lifecycle coordination uses SQLite.
 
 ## Release sequence
 

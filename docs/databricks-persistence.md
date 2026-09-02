@@ -42,6 +42,8 @@ DATABRICKS_CLIENT_SECRET=<INJECTED_SECRET_REFERENCE>
 DATABRICKS_CATALOG=36889_janus_dev
 DATABRICKS_SCHEMA=control_translation
 DATABRICKS_RESULTS_TABLE=control_translation_results
+DATABASE_PATH=/app/data/control_translation.db
+SERVICE_REPLICA_COUNT=1
 ```
 
 `DATABRICKS_CLIENT_ID` is not a secret, but it must still come from approved
@@ -63,45 +65,80 @@ tracked file, chat, terminal output, ticket, or screen share.
 
 - `request_json`: complete validated invocation envelope, including optional
   `idempotency_key` and `subject_record_revision_id`.
-- `result_json`: exact structured `ControlTranslationResult` JSON.
+- `result_json`: canonical async `control-translation-result@1.0` content for
+   lifecycle submissions, or the structured legacy result for synchronous
+   `/invoke`. Async canonical content is UTF-8 JSON with sorted object keys,
+   compact separators, unescaped Unicode, and the self-describing
+   `content_sha256` and `size_bytes` fields omitted. For a translated async
+   result, `artifacts.primary.content` contains the exact translated artifact
+   bytes and its adjacent metadata contains the media type and content hash.
+- `status`, `terminal_state`, and `contract_id`: for async rows these scalar
+  columns come from the canonical result, not the compatibility
+  `completion_json` envelope. Async `status` is `completed`; terminal state is
+  `translated`, `not-translatable`, or `malfunction`.
 - `completion_json`: complete `ResultEnvelope` returned by `/invoke`.
 - `result_sha256` and `result_size_bytes`: SHA-256 and UTF-8 size of the exact
-  `result_json` bytes.
+   referenced `result_json` bytes. For async runs this is the same result whose
+   digest and size are returned in lifecycle completion.
 - `evidence_refs`: deduplicated evidence and result provenance references.
 - `upstream_result_refs`: upstream proof-record IDs.
 - `created_at`: UTC invocation start time.
 
 All SQL values use parameter markers. Catalog, schema, and table identifiers
 are restricted to letters, digits, and underscores before being quoted.
-Successful API completion is returned only after the Databricks write succeeds.
+Successful API completion is returned only after the Databricks write succeeds
+and readback matches run identity, canonical contract/status/terminal state,
+exact `result_json`, digest, size, and the compatibility completion envelope.
+
+An async translated candidate uses this stable reference form:
+
+```text
+databricks://<catalog>/<schema>/<table>/result_json?result_id=<percent-encoded-result-id>#/artifacts/primary/content
+```
+
+The URI identifies the immutable result row by `result_id`, the `result_json`
+column, and an RFC 6901-style JSON pointer to the stored artifact bytes. It is
+not an HTTP API link and must not be rewritten to `/v1/results/{result_id}`.
+Consumers resolve it with their approved Databricks identity and verify the
+adjacent `content_hash` before using the candidate. The current table schema
+has no dedicated artifact column, so keeping the artifact in canonical
+`result_json` avoids unapproved DDL while making the content location explicit.
 
 The target table requires a non-null `request_id`. The API normalizes every
 invocation before hashing or persistence: it preserves a caller-supplied value
 or generates a UUID when the field is omitted. The same rule applies to
 `correlation_id`.
 
-## Idempotency limitation
+## Lifecycle idempotency and leases
 
-No table migration is required for the initial integration. Idempotency lookup
-filters the key within `request_json`, reloads the request, and recomputes its
-canonical hash in Python. This preserves same-key/same-request replay and
-same-key/different-request HTTP `409` behavior.
+Lifecycle submission, idempotency, leases, heartbeats, cancellation, and
+polling state use SQLite at `/app/data/control_translation.db`. Mount that
+directory on durable storage, use `DELETE` journaling, and run exactly one
+service replica. Databricks is the immutable completed-result sink only.
 
-The existing table does not enforce a unique idempotency key. Run one Azure
-Container Apps replica initially. Do not enable horizontal writer scaling until
-a unique-key, lock, or orchestration-level serialization strategy is approved.
+Every worker-owned lifecycle write is fenced by both worker ID and attempt
+number. Result identity derives from `run_id`, and the Databricks `MERGE` is
+verified against the stored run ID, SHA-256, byte size, and completion envelope
+so a conflicting immutable result cannot be accepted silently. SQLite stages
+the exact result and completion metadata before publication. A crash after the
+external write leaves a `publication-pending` outbox record; recovery verifies
+or reuses the identical Databricks row without regenerating translation, then
+atomically finalizes lifecycle state. Cancellation wins before publication is
+marked pending. Once pending, canonical completion wins because the external
+write may already have succeeded.
 
 ## Deployment validation
 
 1. Set non-secret values and inject the selected authentication secret.
-2. Deploy one replica behind the approved internal gateway.
+2. Mount durable storage at `/app/data` and deploy one replica behind the
+   approved internal gateway.
 3. Confirm `GET /health` returns `200`.
 4. Confirm `GET /ready` returns `200`. This confirms connection/read health,
    not write compatibility.
-5. Submit one approved fixture invocation with a unique `idempotency_key` but
-   omit `request_id` to exercise server-side normalization.
-6. Confirm the response is present in `GET /v1/runs` and
-   `GET /v1/results/{result_id}`.
+5. Submit one approved fixture invocation to
+   `POST /v1/control-translation-runs` with matching body/header identities.
+6. Poll lifecycle status, then confirm the terminal result endpoint and
+   `GET /v1/results/{result_id}` return the persisted completion.
 7. Confirm exactly one target-table row exists and its hash/size match
    `result_json`.
 8. Repeat the request with the same idempotency key and verify the original

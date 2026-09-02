@@ -26,7 +26,9 @@ RUN mkdir -p /app/data && chown -R app:app /app
 ENV PYTHONPATH=/app/src \
     HOST=0.0.0.0 \
     PORT=8000 \
-    DATABASE_PATH=/app/data/control_translation.db
+    PERSISTENCE_BACKEND=sqlite \
+    DATABASE_PATH=/app/data/control_translation.db \
+    SERVICE_REPLICA_COUNT=1
 
 USER app
 

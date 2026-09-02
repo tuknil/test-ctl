@@ -6,23 +6,41 @@ Control Translation owns only the final translation step. Orchestration owns can
 
 Control Translation does not query for “the latest” row, mutate upstream tables, rerun an upstream capability, deploy a generated control, or reinterpret `loop_exhausted` as a Bypass Validation terminal state.
 
-## Endpoint
+## Endpoints
 
 ```text
-POST /invoke
+POST /v1/control-translation-runs
+GET  /v1/control-translation-runs/{run_id}
+GET  /v1/control-translation-runs/{run_id}/result
+POST /v1/control-translation-runs/{run_id}/cancel
 Content-Type: application/json
+Idempotency-Key: <request_id>
+X-Correlation-ID: <correlation_id>
 ```
 
-Use `schemas/request.schema.json` as the machine-readable request contract and `schemas/result.schema.json` as the response contract. Generate a unique `request_id` and stable `idempotency_key` for each semantic invocation. Retries must reuse the same idempotency key and unchanged request body. The API generates missing request and correlation IDs as a defensive fallback, but orchestration should provide stable values for traceability.
+Generate a unique stable `request_id` for each semantic invocation. It must
+equal `Idempotency-Key`; body `correlation_id` must equal `X-Correlation-ID`.
+Retries reuse all three identities and an unchanged request body. Submission
+returns `202` for queued/running work and may return `200` when an identical
+retry resolves to an already-terminal run. Poll status at low frequency, then
+fetch the immutable result after terminal status. `409 run_not_terminal` from
+the result endpoint is non-retryable until a later status poll observes a
+terminal state. For a terminal `failed` or `canceled` run that has no service
+result, the result endpoint returns HTTP `200` with the same
+`capability-run-status@1.0` terminal status envelope.
+
+`POST /invoke` remains temporarily available as the synchronous compatibility
+facade. New Temporal integration must use the lifecycle endpoints.
 
 ### Temporal callers
 
-Call this HTTP endpoint from a Temporal Activity, not from deterministic
-Workflow code. Put the Activity invocation behind bounded timeout and retry
-policies. Reuse the same request body, `request_id`, `correlation_id`, and
-`idempotency_key` on every retry so an uncertain network response cannot create
-a new semantic invocation. Retry HTTP 503 and transient transport errors with
-backoff; do not retry HTTP 409 or 422 unchanged.
+Call each HTTP endpoint from a Temporal Activity, not from deterministic
+Workflow code. Use separate Submit, GetStatus, and GetResult Activities with
+bounded timeouts. Do not repeatedly submit while waiting. Reuse the same body
+and headers only when retrying an uncertain Submit response. Retry `408`,
+`425`, `429`, `5xx`, and transient transport failures with backoff. Treat
+validation, authentication, not-found, and idempotency conflict responses as
+non-retryable unless their error envelope explicitly says otherwise.
 
 ## Authoritative source tables
 
@@ -155,7 +173,23 @@ Caller values take precedence. If either target field is absent, the service fil
 
 One invocation emits at most one `primary_candidate`.
 
-## Response handling
+## Lifecycle response handling
+
+Submission is intentionally compact. Status is side-effect free and reports
+`queued`, `running`, `completed`, `failed`, or `canceled`. A completed status
+contains `completion` with the canonical result identity/reference and content
+integrity. A failed status contains stable `failure.code`, operator-safe detail,
+and retryability. The full candidate is not embedded in status.
+
+Cancellation is idempotent. Queued work and running work that has not crossed
+the durable publication cutoff become canceled immediately and relinquish the
+lease. Provider calls that cannot be interrupted are detached in a daemon
+attempt thread; their eventual output is fenced and cannot publish. Once
+publication is pending, an external write may already have succeeded, so a
+late cancellation is recorded but cannot hide the canonical completion.
+Canceling a terminal run returns that unchanged terminal status.
+
+The compatibility `/invoke` handling remains:
 
 | HTTP/result condition | Orchestration action |
 |---|---|
@@ -172,12 +206,51 @@ A `200` response is a completed capability result, not necessarily a successful 
 
 ## Idempotency and persistence
 
-The semantic request hash includes input, all upstream references, routing metadata, scope configuration, subject revision, and provenance. It excludes transport retry identifiers. Reusing an idempotency key with the same request returns the original result; changing a reference or route under the same key returns `409`.
+The lifecycle normalized SHA-256 includes the complete validated semantic body,
+including request/correlation identity, input, exact upstream references,
+routing context, subject, and provenance. It excludes only the duplicated body
+`idempotency_key` transport field. Reusing a key with the same digest returns
+the original run; changing any semantic field returns
+`409 idempotency_conflict`.
 
 Completed requests are persisted before success is returned:
 
-- local/dev default: SQLite at `DATABASE_PATH`;
-- shared deployment: `36889_janus_dev.control_translation.control_translation_results` when `PERSISTENCE_BACKEND=databricks`.
+- lifecycle state: SQLite at `DATABASE_PATH` (deployment path
+  `/app/data/control_translation.db`) on a durable mounted volume;
+- immutable result sink: `control_translation_results` when
+  `PERSISTENCE_BACKEND=databricks`.
+
+SQLite uses `DELETE` journaling and the service must run exactly one replica.
+Workers persist owner ID, lease expiry, heartbeat, and attempt number. Every
+worker-owned write is fenced by owner and attempt. Expired leases are reclaimed
+using the same run identity, and bounded attempt exhaustion becomes
+`failed/worker_attempts_exhausted` rather than a permanently running row.
+
+Before Databricks publication, the worker stages the exact result envelope,
+canonical result, completion metadata, identity, digest inputs, and timestamps
+in SQLite under the active lease fence. It then atomically changes the outbox
+from `prepared` to `publication-pending`, performs the idempotent Databricks
+`MERGE`, verifies the existing or inserted row, and atomically finalizes the
+lifecycle row. Recovery of `publication-pending` work reuses the staged bytes
+without invoking translation again. Publication-pending recovery is not
+discarded by the normal generation-attempt bound because an external row may
+already exist and must remain visible through canonical completion.
+
+For async runs, the canonical integrity representation is UTF-8 JSON with
+lexicographically sorted object keys, compact separators, unescaped Unicode,
+and `content_sha256` and `size_bytes` omitted to avoid self-reference. Those
+exact bytes are stored in Databricks `result_json`; `result_sha256` and
+`result_size_bytes` cover those bytes. Lifecycle completion reports the same
+digest with a `sha256:` prefix and the same byte count.
+
+The Databricks row's `contract_id`, `status`, and `terminal_state` are sourced
+from this canonical async result and verified on readback. They are therefore
+`control-translation-result@1.0`, `completed`, and one of `translated`,
+`not-translatable`, or `malfunction`, rather than compatibility-envelope state
+values. A translated result stores exact artifact content at
+`result_json.artifacts.primary.content`; `primary_candidate.content_ref` is a
+stable `databricks://` URI identifying that row, column, and JSON location.
+It never points to the legacy full-result HTTP API.
 
 The Databricks result row stores request, structured result, complete response envelope, evidence/upstream references, hashes, sizes, and timestamps. `GET /runs/{run_id}` and `GET /v1/results/{result_id}` read the durable completion.
 

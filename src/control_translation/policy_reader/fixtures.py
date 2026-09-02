@@ -6,6 +6,7 @@ plausible current policy snapshot for each fixture target technology.
 
 from __future__ import annotations
 
+from control_translation.cancellation import CancellationSignal, check_cancelled
 from control_translation.policy_reader.base import PolicySnapshot
 
 
@@ -55,6 +56,13 @@ class FixturePolicyReader:
     """Deterministic offline PolicyReader implementation."""
 
     def read_snapshot(
-        self, target_technology: str, target_policy_context_id: str
+        self,
+        target_technology: str,
+        target_policy_context_id: str,
+        *,
+        cancellation_signal: CancellationSignal | None = None,
     ) -> PolicySnapshot | None:
-        return _FIXTURE_SNAPSHOTS.get((target_technology, target_policy_context_id))
+        check_cancelled(cancellation_signal)
+        snapshot = _FIXTURE_SNAPSHOTS.get((target_technology, target_policy_context_id))
+        check_cancelled(cancellation_signal)
+        return snapshot

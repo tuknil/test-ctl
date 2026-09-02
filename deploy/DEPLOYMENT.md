@@ -188,21 +188,21 @@ Use the team's approved templates and naming standards. The logical settings are
 | Target port | `8000` |
 | Transport | HTTP/auto |
 | Min replicas | `1` for a live demo |
-| Max replicas | Initially `1` for SQLite and Databricks; scale Databricks only after concurrency approval |
+| Max replicas | `1` while lifecycle coordination uses SQLite |
 | Liveness path | `/health` |
 | Readiness path | `/ready` |
 | CPU/memory starting point | `0.5` CPU / `1 GiB`, then tune from metrics |
 | Secret | Model and Databricks OAuth secrets under approved names |
 | Env secret reference | `ATT_INFERENCE_API_KEY` and `DATABRICKS_CLIENT_SECRET` → secret references |
-| Persistent volume mount | Required at `/app/data` only for SQLite |
+| Persistent volume mount | Required at `/app/data` for lifecycle state |
 
-The service can store runs, full result envelopes, generated artifacts, and
-evidence references in SQLite or the existing Databricks Unity Catalog table
+The service stores lifecycle coordination in SQLite on the `/app/data` volume.
+It can store completed results in SQLite for local development or in the
+existing Databricks Unity Catalog table
 `36889_janus_dev.control_translation.control_translation_results`. Databricks
 uses OAuth M2M and parameterized SQL; the service principal needs SQL warehouse
-`CAN USE`, catalog/schema usage, and table `SELECT` and `MODIFY`. Start with one
-replica even on Databricks because the current table has no dedicated unique
-idempotency-key constraint. Validate a concurrency strategy before scaling out.
+`CAN USE`, catalog/schema usage, and table `SELECT` and `MODIFY`. Run exactly
+one replica while lifecycle coordination uses SQLite.
 
 ### 7.1 Required Unity Catalog access
 

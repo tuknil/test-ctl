@@ -6,6 +6,11 @@ import json
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from control_translation.cancellation import (
+    CancellationSignal,
+    OperationCancelled,
+    check_cancelled,
+)
 from control_translation.contracts import (
     BypassCounterexample,
     DatabricksResultReference,
@@ -44,7 +49,12 @@ class UpstreamRecord:
 
 
 class UpstreamResultResolver(Protocol):
-    def fetch(self, reference: DatabricksResultReference) -> UpstreamRecord | None: ...
+    def fetch(
+        self,
+        reference: DatabricksResultReference,
+        *,
+        cancellation_signal: CancellationSignal | None = None,
+    ) -> UpstreamRecord | None: ...
 
 
 @dataclass(frozen=True)
@@ -69,8 +79,10 @@ def resolve_proof_loop(
     routing_metadata: ProofLoopRoutingMetadata,
     expected_vulnerability_id: str | None = None,
     expected_candidate_id: str | None = None,
+    cancellation_signal: CancellationSignal | None = None,
 ) -> ResolvedProofLoop:
     """Fetch all three records and enforce proof state and cross-record lineage."""
+    check_cancelled(cancellation_signal)
     if not correlation_id:
         raise UpstreamResolutionError("correlation_id is required for lineage validation")
     has_orchestration_subject = bool(
@@ -90,12 +102,17 @@ def resolve_proof_loop(
     )
     records: dict[str, UpstreamRecord] = {}
     for role, reference, required_state in role_refs:
+        check_cancelled(cancellation_signal)
         try:
-            record = resolver.fetch(reference)
-        except UpstreamResolutionError:
+            record = resolver.fetch(
+                reference,
+                cancellation_signal=cancellation_signal,
+            )
+        except (OperationCancelled, UpstreamResolutionError):
             raise
         except Exception as exc:
             raise UpstreamResolutionError(f"{role} result could not be fetched") from exc
+        check_cancelled(cancellation_signal)
         if record is None:
             raise UpstreamResolutionError(f"{role} result reference was not found")
         if record.result_id != reference.key:
@@ -108,6 +125,7 @@ def resolve_proof_loop(
         records[role] = record
 
     for role, record in records.items():
+        check_cancelled(cancellation_signal)
         record_correlation = _one_value(record.document, "correlation_id")
         record_subject = _one_value(record.document, "subject_record_revision_id")
         if record_correlation is not None and record_correlation != correlation_id:
@@ -234,6 +252,7 @@ def resolve_proof_loop(
     request_context = _mitigation_request_context(
         records["Mitigation Check"].result
     )
+    check_cancelled(cancellation_signal)
 
     target_technology = _preferred_string(
         defense.result,

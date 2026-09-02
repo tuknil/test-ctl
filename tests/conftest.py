@@ -11,6 +11,7 @@ import pytest
 # a developer's ignored .env cannot trigger live inference or shared storage.
 os.environ["RUN_MODE"] = "fixture"
 os.environ["PERSISTENCE_BACKEND"] = "sqlite"
+os.environ["DATABASE_PATH"] = f"/tmp/control_translation_pytest_{os.getpid()}.db"
 
 from control_translation import api
 from control_translation.persistence import SQLiteRunRepository

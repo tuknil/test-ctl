@@ -110,7 +110,7 @@ class FakeResolver:
         self.records = records
         self.fetched: list[str] = []
 
-    def fetch(self, reference):
+    def fetch(self, reference, *, cancellation_signal=None):
         self.fetched.append(reference.key)
         return self.records.get(reference.key)
 

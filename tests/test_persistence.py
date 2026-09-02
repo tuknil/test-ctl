@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from control_translation import capability
 from control_translation.config import Settings
@@ -50,7 +50,11 @@ def test_schema_initialization_is_idempotent(tmp_path):
         migrations = connection.execute(
             "SELECT version, name FROM schema_migrations"
         ).fetchall()
-    assert migrations == [(1, "initial_persistence_schema")]
+    assert migrations == [
+        (1, "initial_persistence_schema"),
+        (2, "async_capability_lifecycle"),
+        (3, "durable_result_publication_outbox"),
+    ]
 
 
 def test_complete_result_artifact_and_evidence_are_persisted(tmp_path):
@@ -63,7 +67,7 @@ def test_complete_result_artifact_and_evidence_are_persisted(tmp_path):
         request,
         result,
         request_hash=canonical_request_hash(request),
-        started_at=datetime.now(timezone.utc),
+        started_at=datetime.now(UTC),
     )
 
     assert repository.get_run(result.run_id) == result
@@ -102,7 +106,7 @@ def test_result_survives_repository_restart(tmp_path):
         request,
         result,
         request_hash=canonical_request_hash(request),
-        started_at=datetime.now(timezone.utc),
+        started_at=datetime.now(UTC),
     )
 
     restarted_repository = SQLiteRunRepository(database_path)
@@ -120,7 +124,7 @@ def test_idempotency_record_round_trips(tmp_path):
         request,
         result,
         request_hash=request_hash,
-        started_at=datetime.now(timezone.utc),
+        started_at=datetime.now(UTC),
     )
 
     record = repository.get_by_idempotency_key(request.idempotency_key)
@@ -148,7 +152,7 @@ def test_list_runs_returns_bounded_safe_summary_page(tmp_path):
         first_request,
         first_result,
         request_hash=canonical_request_hash(first_request),
-        started_at=datetime.now(timezone.utc),
+        started_at=datetime.now(UTC),
     )
 
     second_request = first_request.model_copy(
@@ -162,7 +166,7 @@ def test_list_runs_returns_bounded_safe_summary_page(tmp_path):
         second_request,
         second_result,
         request_hash=canonical_request_hash(second_request),
-        started_at=datetime.now(timezone.utc),
+        started_at=datetime.now(UTC),
     )
 
     first_page = repository.list_runs(limit=1, offset=0)

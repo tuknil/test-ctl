@@ -20,6 +20,11 @@ from control_translation.agents.translation_agent import (
     TranslationDoer,
     TranslationProposal,
 )
+from control_translation.cancellation import (
+    CancellationSignal,
+    OperationCancelled,
+    check_cancelled,
+)
 from control_translation.contracts import (
     CandidateArtifact,
     CollateralImpactPrior,
@@ -68,9 +73,11 @@ def translate(
     request_context: ProofLoopRequestContext | None = None,
     allow_narrower_translation: bool = True,
     allow_equivalent_translation: bool = True,
+    cancellation_signal: CancellationSignal | None = None,
 ) -> EngineResult:
     # Mechanical gate 1: can this target technology plausibly express the
     # discriminator at all? Cheap check before spending an agent call.
+    check_cancelled(cancellation_signal)
     if not adapter.supports_feature(pattern.discriminator_description):
         return EngineFailure(
             reason="unsupported-feature",
@@ -89,14 +96,19 @@ def translate(
     if proposal is None:
         # Doer: propose a candidate artifact (agent output, not yet trusted).
         try:
+            check_cancelled(cancellation_signal)
             proposal = doer.propose(
                 pattern=pattern,
                 target_technology=target_technology,
                 artifact_type=adapter.artifact_type,
                 snapshot=snapshot,
                 translation_requirements=translation_requirements,
+                cancellation_signal=cancellation_signal,
             )
+            check_cancelled(cancellation_signal)
             proposal_from_doer = True
+        except OperationCancelled:
+            raise
         except Exception as exc:  # provider/model failure
             logger.exception(
                 "Translation provider failed vulnerability_id=%s target_technology=%s",
@@ -119,7 +131,9 @@ def translate(
         return EngineFailure(reason="provider-failure", detail=str(exc))
 
     # Judge gate 1: syntax validation (mechanical).
+    check_cancelled(cancellation_signal)
     syntax_result = syntax_validator.validate(adapter, candidate_content)
+    check_cancelled(cancellation_signal)
     if not syntax_result.valid:
         repair = getattr(doer, "repair", None) if proposal_from_doer else None
         if not callable(repair):
@@ -128,6 +142,7 @@ def translate(
                 detail="; ".join(syntax_result.errors) or "Candidate failed syntax validation.",
             )
         try:
+            check_cancelled(cancellation_signal)
             proposal = TranslationProposal.model_validate(
                 repair(
                     pattern=pattern,
@@ -137,8 +152,10 @@ def translate(
                     translation_requirements=translation_requirements,
                     previous_proposal=proposal,
                     validation_errors=list(syntax_result.errors),
+                    cancellation_signal=cancellation_signal,
                 )
             )
+            check_cancelled(cancellation_signal)
             policy_failure = _proposal_policy_failure(
                 proposal,
                 allow_narrower_translation=allow_narrower_translation,
@@ -147,6 +164,8 @@ def translate(
             if policy_failure is not None:
                 return policy_failure
             candidate_content = _normalize_candidate_content(proposal.candidate_content)
+        except OperationCancelled:
+            raise
         except Exception as exc:
             logger.exception(
                 "Translation provider repair failed vulnerability_id=%s target_technology=%s",
@@ -154,7 +173,9 @@ def translate(
                 target_technology,
             )
             return EngineFailure(reason="provider-failure", detail=str(exc))
+        check_cancelled(cancellation_signal)
         syntax_result = syntax_validator.validate(adapter, candidate_content)
+        check_cancelled(cancellation_signal)
         if not syntax_result.valid:
             detail = "; ".join(syntax_result.errors) or "Candidate failed syntax validation."
             return EngineFailure(
@@ -180,9 +201,11 @@ def translate(
             )
 
     # Judge gate 3: conflict/placement detection (mechanical).
+    check_cancelled(cancellation_signal)
     conflicts = conflict_checker.detect_conflicts(
         adapter, candidate_content, snapshot
     )
+    check_cancelled(cancellation_signal)
 
     content_hash = "sha256:" + sha256(candidate_content.encode("utf-8")).hexdigest()
 

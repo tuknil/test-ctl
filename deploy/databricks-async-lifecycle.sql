@@ -1,0 +1,5 @@
+-- Intentionally no DDL.
+--
+-- Async lifecycle state is stored in the durable single-replica SQLite
+-- database mounted at /app/data. Databricks is the immutable completed-result
+-- sink only; do not create a Databricks lifecycle table for this deployment.

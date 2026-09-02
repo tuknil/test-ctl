@@ -28,6 +28,7 @@ from urllib.request import Request, urlopen
 
 from pydantic import BaseModel, Field
 
+from control_translation.cancellation import CancellationSignal, check_cancelled
 from control_translation.config import Settings
 from control_translation.contracts import (
     ProofLoopTranslationRequirements,
@@ -64,6 +65,7 @@ class TranslationDoer(Protocol):
         artifact_type: str,
         snapshot: PolicySnapshot | None,
         translation_requirements: ProofLoopTranslationRequirements | None = None,
+        cancellation_signal: CancellationSignal | None = None,
     ) -> TranslationProposal:
         ...
 
@@ -80,7 +82,9 @@ class FixtureTranslationDoer:
         artifact_type: str,
         snapshot: PolicySnapshot | None,
         translation_requirements: ProofLoopTranslationRequirements | None = None,
+        cancellation_signal: CancellationSignal | None = None,
     ) -> TranslationProposal:
+        check_cancelled(cancellation_signal)
         content: CandidateContent = ""
         label = "narrower"
         if target_technology == "akamai-waf":
@@ -227,7 +231,7 @@ class FixtureTranslationDoer:
                 "Candidate is a template, not verified against a real target tenant."
             ]
 
-        return TranslationProposal(
+        proposal = TranslationProposal(
             candidate_content=content,
             translation_label=label,
             justification=(
@@ -239,6 +243,8 @@ class FixtureTranslationDoer:
             ],
             limitations=limitations,
         )
+        check_cancelled(cancellation_signal)
+        return proposal
 
 
 class LiveTranslationDoer:
@@ -319,7 +325,9 @@ class LiveTranslationDoer:
         artifact_type: str,
         snapshot: PolicySnapshot | None,
         translation_requirements: ProofLoopTranslationRequirements | None = None,
+        cancellation_signal: CancellationSignal | None = None,
     ) -> TranslationProposal:
+        check_cancelled(cancellation_signal)
         if self._agent is None:
             self._agent = self._build_agent()
 
@@ -335,7 +343,12 @@ class LiveTranslationDoer:
             snapshot_desc,
             translation_requirements,
         )
-        result = self._agent.run_sync(prompt)
+        check_cancelled(cancellation_signal)
+        result = self._agent.run_sync(
+            prompt,
+            model_settings={"timeout": self._settings.model_request_timeout_seconds},
+        )
+        check_cancelled(cancellation_signal)
         return result.output
 
     def repair(
@@ -347,7 +360,9 @@ class LiveTranslationDoer:
         translation_requirements: ProofLoopTranslationRequirements | None,
         previous_proposal: TranslationProposal,
         validation_errors: list[str],
+        cancellation_signal: CancellationSignal | None = None,
     ) -> TranslationProposal:
+        check_cancelled(cancellation_signal)
         if self._agent is None:
             self._agent = self._build_agent()
         snapshot_desc = (
@@ -362,7 +377,12 @@ class LiveTranslationDoer:
             snapshot_desc,
             translation_requirements,
         ) + _repair_feedback(previous_proposal, validation_errors)
-        result = self._agent.run_sync(prompt)
+        check_cancelled(cancellation_signal)
+        result = self._agent.run_sync(
+            prompt,
+            model_settings={"timeout": self._settings.model_request_timeout_seconds},
+        )
+        check_cancelled(cancellation_signal)
         return result.output
 
 
@@ -385,7 +405,9 @@ class AttInferenceTranslationDoer:
         artifact_type: str,
         snapshot: PolicySnapshot | None,
         translation_requirements: ProofLoopTranslationRequirements | None = None,
+        cancellation_signal: CancellationSignal | None = None,
     ) -> TranslationProposal:
+        check_cancelled(cancellation_signal)
         if not self._settings.credentials_configured:
             raise ValueError(
                 "AT&T Inference live mode requires ATT_INFERENCE_BASE_URL "
@@ -430,7 +452,12 @@ class AttInferenceTranslationDoer:
             f"Authoritative proof-loop translation requirements: "
             f"{_requirements_json(translation_requirements)}\n"
         )
-        return self._request_translation(system_prompt, user_prompt, target_technology)
+        return self._request_translation(
+            system_prompt,
+            user_prompt,
+            target_technology,
+            cancellation_signal=cancellation_signal,
+        )
 
     def repair(
         self,
@@ -441,7 +468,9 @@ class AttInferenceTranslationDoer:
         translation_requirements: ProofLoopTranslationRequirements | None,
         previous_proposal: TranslationProposal,
         validation_errors: list[str],
+        cancellation_signal: CancellationSignal | None = None,
     ) -> TranslationProposal:
+        check_cancelled(cancellation_signal)
         snapshot_desc = (
             "no current policy snapshot available"
             if snapshot is None
@@ -461,14 +490,22 @@ class AttInferenceTranslationDoer:
             snapshot_desc,
             translation_requirements,
         ) + _repair_feedback(previous_proposal, validation_errors)
-        return self._request_translation(system_prompt, user_prompt, target_technology)
+        return self._request_translation(
+            system_prompt,
+            user_prompt,
+            target_technology,
+            cancellation_signal=cancellation_signal,
+        )
 
     def _request_translation(
         self,
         system_prompt: str,
         user_prompt: str,
         target_technology: str,
+        *,
+        cancellation_signal: CancellationSignal | None = None,
     ) -> TranslationProposal:
+        check_cancelled(cancellation_signal)
         if not self._settings.credentials_configured:
             raise ValueError(
                 "AT&T Inference live mode requires ATT_INFERENCE_BASE_URL "
@@ -496,10 +533,13 @@ class AttInferenceTranslationDoer:
             method="POST",
         )
         try:
+            check_cancelled(cancellation_signal)
             with urlopen(
                 request, timeout=self._settings.model_request_timeout_seconds
             ) as response:
+                check_cancelled(cancellation_signal)
                 response_body = json.loads(response.read().decode("utf-8"))
+                check_cancelled(cancellation_signal)
         except HTTPError as exc:
             raise RuntimeError(f"AT&T Inference returned HTTP {exc.code}.") from exc
         except URLError as exc:
@@ -527,7 +567,9 @@ class AttInferenceTranslationDoer:
                 "narrower",
             )
             proposal_data["answer_kind"] = "construction"
-            return TranslationProposal.model_validate(proposal_data)
+            proposal = TranslationProposal.model_validate(proposal_data)
+            check_cancelled(cancellation_signal)
+            return proposal
         except (KeyError, IndexError, TypeError, ValueError) as exc:
             raise RuntimeError(
                 "AT&T Inference returned an invalid structured translation response."

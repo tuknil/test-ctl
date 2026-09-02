@@ -8,6 +8,7 @@ from collections.abc import Callable
 from typing import Any, Protocol
 from time import perf_counter
 
+from control_translation.cancellation import CancellationSignal, check_cancelled
 from control_translation.contracts import DatabricksResultReference
 from control_translation.upstream import (
     UpstreamRecord,
@@ -58,7 +59,13 @@ class DatabricksUpstreamResultResolver:
             raise ValueError("Invalid Databricks authentication type.")
         self._connection_factory = connection_factory or self._default_connection
 
-    def fetch(self, reference: DatabricksResultReference) -> UpstreamRecord | None:
+    def fetch(
+        self,
+        reference: DatabricksResultReference,
+        *,
+        cancellation_signal: CancellationSignal | None = None,
+    ) -> UpstreamRecord | None:
+        check_cancelled(cancellation_signal)
         coordinates = (
             reference.catalog,
             reference.schema_name,
@@ -129,10 +136,15 @@ class DatabricksUpstreamResultResolver:
             reference.key,
         )
         try:
+            check_cancelled(cancellation_signal)
             connection = self._connection_factory()
+            check_cancelled(cancellation_signal)
             cursor = connection.cursor()
+            check_cancelled(cancellation_signal)
             cursor.execute(operation, (reference.key,))
+            check_cancelled(cancellation_signal)
             rows = cursor.fetchall()
+            check_cancelled(cancellation_signal)
             if len(rows) > 1:
                 raise UpstreamResolutionError(
                     f"{shape} result reference resolved to multiple rows"

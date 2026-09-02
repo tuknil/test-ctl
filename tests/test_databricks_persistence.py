@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from hashlib import sha256
+import json
 from types import ModuleType
 from typing import Any
 import sys
@@ -19,9 +20,12 @@ from control_translation.persistence import (
     DatabricksRunRepository,
     PersistenceError,
     SQLiteRunRepository,
+    SplitRunRepository,
+    canonical_result_bytes,
     canonical_request_hash,
     create_run_repository,
 )
+from control_translation.lifecycle import build_lifecycle_result
 from control_translation.providers.fixtures import get_fixture_pattern
 
 
@@ -109,10 +113,24 @@ def _repository(queue: ConnectionQueue) -> DatabricksRunRepository:
 
 
 def test_save_maps_contract_to_existing_databricks_table():
-    queue = ConnectionQueue(None, None)
-    repository = _repository(queue)
     request = _invocation()
     result = _result(request)
+    structured_bytes = result.structured_result.model_dump_json().encode("utf-8")
+    queue = ConnectionQueue(
+        None,
+        None,
+        (
+            result.run_id,
+            result.contract_id,
+            result.status,
+            result.terminal_state.value,
+            sha256(structured_bytes).hexdigest(),
+            len(structured_bytes),
+            result.structured_result.model_dump_json(),
+            result.model_dump_json(),
+        ),
+    )
+    repository = _repository(queue)
     started_at = datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc)
 
     repository.save_completed_run(
@@ -133,12 +151,160 @@ def test_save_maps_contract_to_existing_databricks_table():
     assert parameters[10] == request.model_dump_json()
     assert parameters[11] == result.structured_result.model_dump_json()
     assert parameters[12] == result.model_dump_json()
+    assert parameters[7] == result.terminal_state.value
+    assert parameters[8] == result.status
     result_bytes = parameters[11].encode("utf-8")
     assert parameters[13] == sha256(result_bytes).hexdigest()
     assert parameters[14] == len(result_bytes)
     assert parameters[17] == started_at
     assert all(connection.closed for connection in queue.connections)
     assert all(connection.cursor_instance.closed for connection in queue.connections)
+
+
+def test_save_rejects_an_immutable_result_collision():
+    request = _invocation()
+    result = _result(request)
+    queue = ConnectionQueue(
+        None,
+        None,
+        (
+            result.run_id,
+            result.contract_id,
+            result.status,
+            result.terminal_state.value,
+            "different-digest",
+            1,
+            result.structured_result.model_dump_json(),
+            result.model_dump_json(),
+        ),
+    )
+    repository = _repository(queue)
+
+    with pytest.raises(PersistenceError, match="Immutable Databricks result identity"):
+        repository.save_completed_run(
+            request,
+            result,
+            request_hash=canonical_request_hash(request),
+            started_at=datetime.now(timezone.utc),
+        )
+
+
+def test_async_save_hashes_the_exact_canonical_result():
+    request = _invocation()
+    result = _result(request)
+    settings = Settings(run_mode="fixture", model_provider="none")
+    canonical_result = build_lifecycle_result(result, request, settings)
+    canonical_bytes = canonical_result_bytes(canonical_result)
+    canonical_json = canonical_bytes.decode("utf-8")
+    queue = ConnectionQueue(
+        None,
+        None,
+        (
+            result.run_id,
+            canonical_result["contract_id"],
+            canonical_result["status"],
+            canonical_result["terminal_state"],
+            sha256(canonical_bytes).hexdigest(),
+            len(canonical_bytes),
+            canonical_json,
+            result.model_dump_json(),
+        ),
+    )
+    repository = _repository(queue)
+
+    repository.save_completed_run(
+        request,
+        result,
+        request_hash=canonical_request_hash(request),
+        started_at=datetime.now(timezone.utc),
+        canonical_result=canonical_result,
+    )
+
+    _, parameters = queue.executions[1]
+    assert parameters[6] == "control-translation-result@1.0"
+    assert parameters[7] == "translated"
+    assert parameters[8] == "completed"
+    assert parameters[11] == canonical_json
+    assert parameters[13] == sha256(canonical_bytes).hexdigest()
+    assert parameters[14] == len(canonical_bytes)
+    assert canonical_result["content_sha256"] == f"sha256:{parameters[13]}"
+    assert canonical_result["size_bytes"] == parameters[14]
+    assert "content_sha256" not in json.loads(parameters[11])
+    assert "size_bytes" not in json.loads(parameters[11])
+
+
+@pytest.mark.parametrize(
+    "terminal_state", ["translated", "not-translatable", "malfunction"]
+)
+def test_async_save_uses_canonical_status_and_terminal_state(terminal_state):
+    request = _invocation()
+    result = _result(request)
+    canonical_result = build_lifecycle_result(
+        result, request, Settings(run_mode="fixture", model_provider="none")
+    )
+    canonical_result["terminal_state"] = terminal_state
+    canonical_bytes = canonical_result_bytes(canonical_result)
+    canonical_result["content_sha256"] = f"sha256:{sha256(canonical_bytes).hexdigest()}"
+    canonical_result["size_bytes"] = len(canonical_bytes)
+    canonical_json = canonical_bytes.decode("utf-8")
+    queue = ConnectionQueue(
+        None,
+        None,
+        (
+            result.run_id,
+            "control-translation-result@1.0",
+            "completed",
+            terminal_state,
+            sha256(canonical_bytes).hexdigest(),
+            len(canonical_bytes),
+            canonical_json,
+            result.model_dump_json(),
+        ),
+    )
+
+    _repository(queue).save_completed_run(
+        request,
+        result,
+        request_hash=canonical_request_hash(request),
+        started_at=datetime.now(timezone.utc),
+        canonical_result=canonical_result,
+    )
+
+    _, parameters = queue.executions[1]
+    assert parameters[7] == terminal_state
+    assert parameters[8] == "completed"
+
+
+def test_async_save_rejects_noncanonical_scalar_readback():
+    request = _invocation()
+    result = _result(request)
+    canonical_result = build_lifecycle_result(
+        result, request, Settings(run_mode="fixture", model_provider="none")
+    )
+    canonical_bytes = canonical_result_bytes(canonical_result)
+    queue = ConnectionQueue(
+        None,
+        None,
+        (
+            result.run_id,
+            canonical_result["contract_id"],
+            "succeeded",
+            canonical_result["terminal_state"],
+            sha256(canonical_bytes).hexdigest(),
+            len(canonical_bytes),
+            canonical_bytes.decode("utf-8"),
+            result.model_dump_json(),
+        ),
+    )
+
+    with pytest.raises(PersistenceError, match="Immutable Databricks result identity"):
+        _repository(queue).save_completed_run(
+            request,
+            result,
+            request_hash=canonical_request_hash(request),
+            started_at=datetime.now(timezone.utc),
+            canonical_result=canonical_result,
+        )
 
 
 def test_result_and_idempotency_records_are_revalidated():
@@ -194,7 +360,7 @@ def test_list_runs_returns_metadata_projection_only():
     assert page.items[0].run_id == result.run_id
     assert page.items[0].artifact_type == "akamai-waf-rule"
     listing_sql = queue.executions[1][0]
-    assert "completion_json" not in listing_sql
+    assert "TO_JSON(completion_json)" not in listing_sql
     assert "candidate_artifact.artifact_type" in listing_sql
 
 
@@ -300,7 +466,9 @@ def test_repository_factory_accepts_pat_settings():
     repository = create_run_repository(settings)
 
     assert settings.ready is True
-    assert isinstance(repository, DatabricksRunRepository)
+    assert isinstance(repository, SplitRunRepository)
+    assert isinstance(repository.lifecycle, SQLiteRunRepository)
+    assert isinstance(repository.result_sink, DatabricksRunRepository)
 
 
 def test_pat_connection_uses_access_token_without_oauth_fields(monkeypatch):
@@ -344,6 +512,16 @@ def test_invalid_databricks_auth_type_is_not_ready():
 
     assert settings.ready is False
     assert any("DATABRICKS_AUTH_TYPE" in error for error in settings.configuration_errors)
+
+
+def test_sqlite_lifecycle_rejects_multiple_replicas():
+    settings = Settings(service_replica_count=2)
+
+    assert settings.ready is False
+    assert any(
+        "SERVICE_REPLICA_COUNT must be 1" in error
+        for error in settings.configuration_errors
+    )
 
 
 def test_subject_revision_participates_in_idempotency_hash():
