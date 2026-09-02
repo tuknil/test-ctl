@@ -472,7 +472,7 @@ def _validate_record_identity(role: str, record: UpstreamRecord) -> None:
     expected = {
         "Defense Generation": (
             "defense-generation",
-            {"defense-generation@1.0"},
+            {"defense-generation@1.0", "defense-generation-result@1.0"},
         ),
         "Mitigation Check": (
             "mitigation-check",

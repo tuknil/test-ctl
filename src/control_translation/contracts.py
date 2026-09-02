@@ -477,7 +477,10 @@ class OrchestrationUpstreamInput(StrictRequestModel):
     @model_validator(mode="after")
     def validate_completion(self) -> OrchestrationUpstreamInput:
         accepted_contracts = {
-            "defense-generation": {"defense-generation@1.0"},
+            "defense-generation": {
+                "defense-generation@1.0",
+                "defense-generation-result@1.0",
+            },
             "mitigation-check": {"mitigation-check@1.0"},
             # The deployed producer sends the common completion-envelope ID.
             # The canonical row itself is validated as bypass-validation@1.0.
