@@ -14,17 +14,17 @@ from fastapi.testclient import TestClient
 from control_translation import api as api_module
 from control_translation.api import app
 from control_translation.cancellation import check_cancelled
+from control_translation.config import Settings
 from control_translation.contracts import (
     CapabilityRunStatus,
     InvokeRequestEnvelope,
     RunFailure,
 )
-from control_translation.config import Settings
 from control_translation.lifecycle import LifecycleWorker
 from control_translation.persistence import (
     PersistenceError,
-    SQLiteRunRepository,
     SplitRunRepository,
+    SQLiteRunRepository,
     canonical_result_bytes,
     normalized_request_digest,
 )
@@ -126,6 +126,17 @@ def test_submit_is_async_and_result_is_immutable():
     assert sha256(artifact["content"].encode("utf-8")).hexdigest() == artifact[
         "content_hash"
     ].removeprefix("sha256:")
+    metadata = first.json()["primary_candidate"]["candidate_metadata"]
+    assert metadata == artifact["candidate_metadata"]
+    assert metadata["syntax_profile"] == {
+        "id": "janus-akamai-like-custom-rule-demo@1",
+        "family": "akamai-like-custom-rule",
+        "validation_level": "shape-only",
+        "deployment_ready": False,
+    }
+    assert metadata["recommended_policy_binding"]["action"] == "deny"
+    assert first.json()["inference"]["proposal_source"]
+    assert first.json()["inference"]["llm_invoked"] is False
     assert first.json()["result_ref"]["key"] == first.json()["result_id"]
     result = first.json()
     digest = result.pop("content_sha256")

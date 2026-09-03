@@ -15,7 +15,10 @@ from hashlib import sha256
 from uuid import uuid4
 
 from control_translation.adapters import get_adapter
-from control_translation.agents.translation_agent import TranslationDoer, build_translation_doer
+from control_translation.agents.translation_agent import (
+    TranslationDoer,
+    build_translation_doer,
+)
 from control_translation.cancellation import CancellationSignal, check_cancelled
 from control_translation.config import Settings, get_settings
 from control_translation.contracts import (
@@ -38,17 +41,20 @@ from control_translation.contracts import (
 from control_translation.policy_reader.base import PolicyReader
 from control_translation.policy_reader.fixtures import FixturePolicyReader
 from control_translation.terminal import (
-    OutcomeReasonCode,
     TERMINAL_STATE_TO_STATUS,
+    OutcomeReasonCode,
     TerminalState,
 )
-from control_translation.translation.engine import EngineFailure, EngineSuccess, translate
+from control_translation.translation.engine import (
+    EngineFailure,
+    EngineSuccess,
+    translate,
+)
 from control_translation.upstream import (
     UpstreamResolutionError,
     UpstreamResultResolver,
     resolve_proof_loop,
 )
-
 
 logger = logging.getLogger(__name__)
 
@@ -296,7 +302,8 @@ def invoke(
         return _envelope(
             result,
             settings=settings,
-            llm_invoked=True,
+            llm_invoked=engine_result.llm_invoked,
+            proposal_source=engine_result.proposal_source,
             correlation_id=correlation_id,
         )
 
@@ -334,7 +341,8 @@ def invoke(
         return _envelope(
             result,
             settings=settings,
-            llm_invoked=True,
+            llm_invoked=engine_result.llm_invoked,
+            proposal_source=engine_result.proposal_source,
             correlation_id=correlation_id,
         )
 
@@ -365,7 +373,8 @@ def invoke(
     return _envelope(
         result,
         settings=settings,
-        llm_invoked=True,
+        llm_invoked=engine_result.llm_invoked,
+        proposal_source=engine_result.proposal_source,
         correlation_id=correlation_id,
     )
 
@@ -375,6 +384,7 @@ def _envelope(
     *,
     settings: Settings,
     llm_invoked: bool,
+    proposal_source: str = "none",
     correlation_id: str | None = None,
 ) -> ResultEnvelope:
     status = TERMINAL_STATE_TO_STATUS[result.terminal_state]
@@ -401,6 +411,7 @@ def _envelope(
             "provider": settings.model_provider,
             "model": settings.model_name,
             "llm_invoked": llm_invoked and settings.is_live,
+            "proposal_source": proposal_source,
             "credentials_configured": settings.credentials_configured,
         },
     )

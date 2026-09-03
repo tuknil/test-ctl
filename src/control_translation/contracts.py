@@ -8,11 +8,19 @@ until it has passed through one of these models.
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AnyHttpUrl,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 from control_translation.terminal import OutcomeReasonCode, TerminalState
 
@@ -27,6 +35,37 @@ class StrictRequestModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
+class JsonBodyFieldFeature(StrictRequestModel):
+    """Authoritative JSON request field proven by the upstream proof loop."""
+
+    kind: Literal["json-body-field"] = "json-body-field"
+    method: Literal["POST"]
+    content_type: Literal["application/json"]
+    field_path: list[str] = Field(min_length=1, max_length=16)
+    value: str = Field(min_length=1, max_length=4096)
+    value_match: Literal["exact", "contains-token", "field-present"]
+    source: Literal["mitigation-check.test_basis.request"] = (
+        "mitigation-check.test_basis.request"
+    )
+
+    @field_validator("field_path")
+    @classmethod
+    def validate_field_path(cls, value: list[str]) -> list[str]:
+        safe_segment = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+        if not all(safe_segment.fullmatch(segment) for segment in value):
+            raise ValueError(
+                "field_path segments must contain only letters, digits, '_' or '-'"
+            )
+        return value
+
+    @field_validator("value")
+    @classmethod
+    def validate_nonblank_value(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("value must not be blank")
+        return value
+
+
 class ProvenMitigationPattern(StrictRequestModel):
     """A proven mitigation pattern produced upstream by the fast proof loop
     (defense-generation -> mitigation-check + bypass-validation)."""
@@ -38,6 +77,7 @@ class ProvenMitigationPattern(StrictRequestModel):
     discriminator_description: str
     pattern_summary: str
     proof_record_ids: list[str] = Field(min_length=2)
+    json_body_field_feature: JsonBodyFieldFeature | None = None
 
     @field_validator("proof_record_ids")
     @classmethod
@@ -135,6 +175,27 @@ class CandidateArtifact(BaseModel):
     emitted_as: str = "control-specific-mitigation-candidate"
 
 
+class CandidateSyntaxProfile(BaseModel):
+    id: str
+    family: str
+    validation_level: Literal["shape-only"] = "shape-only"
+    deployment_ready: Literal[False] = False
+
+
+class RecommendedPolicyBinding(BaseModel):
+    action: Literal["deny"] = "deny"
+    attachment: Literal["security-policy-custom-rule-binding"] = (
+        "security-policy-custom-rule-binding"
+    )
+    embedded_in_artifact: Literal[False] = False
+    requires_operator_review: Literal[True] = True
+
+
+class CandidateMetadata(BaseModel):
+    syntax_profile: CandidateSyntaxProfile
+    recommended_policy_binding: RecommendedPolicyBinding
+
+
 class PrimaryCandidate(BaseModel):
     candidate_id: str
     target_control_class: str
@@ -147,6 +208,7 @@ class PrimaryCandidate(BaseModel):
     translation_assumptions: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
     provenance: list[str] = Field(default_factory=list)
+    candidate_metadata: CandidateMetadata | None = None
 
 
 class EvidenceBinding(BaseModel):

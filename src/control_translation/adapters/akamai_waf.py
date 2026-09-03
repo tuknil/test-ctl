@@ -17,8 +17,8 @@ from __future__ import annotations
 import json
 
 from control_translation.adapters.base import SyntaxValidationResult
+from control_translation.contracts import JsonBodyFieldFeature
 from control_translation.policy_reader.base import PolicySnapshot
-
 
 # Documented Akamai custom-rule condition `type` values (subset used here).
 _VALID_CONDITION_TYPES = frozenset(
@@ -69,7 +69,13 @@ class AkamaiWafAdapter:
         "sql injection",
     )
 
-    def supports_feature(self, discriminator_description: str) -> bool:
+    def supports_feature(
+        self,
+        discriminator_description: str,
+        json_body_field_feature: JsonBodyFieldFeature | None = None,
+    ) -> bool:
+        if json_body_field_feature is not None:
+            return True
         text = discriminator_description.lower()
         return any(feature in text for feature in self.supported_features) or (
             "expression" in text or "syntax" in text
@@ -135,6 +141,13 @@ class AkamaiWafAdapter:
         if not valid_value:
             errors.append(f"{prefix}.value must be a non-empty array or a string.")
         condition_type = condition.get("type")
+        if condition_type == "argsPostJSONMatch":
+            parameter = condition.get("parameter")
+            if not isinstance(parameter, str) or not parameter.strip():
+                errors.append(
+                    f"{prefix}.parameter must identify the JSON field for "
+                    "argsPostJSONMatch."
+                )
         header = condition.get("header")
         if condition_type == _HEADER_VALUE_CONDITION:
             if not isinstance(header, str) or not header.strip():
@@ -170,8 +183,6 @@ class AkamaiWafAdapter:
         conflicts: list[str] = []
         for summary in snapshot.existing_rule_summaries:
             lowered = summary.lower()
-            if "content-type" in lowered and "requestHeaderValueMatch" in condition_types:
-                conflicts.append(f"Existing rule may overlap: {summary}")
-            elif "query string" in lowered and "uriQueryMatch" in condition_types:
+            if "content-type" in lowered and "requestHeaderValueMatch" in condition_types or "query string" in lowered and "uriQueryMatch" in condition_types:
                 conflicts.append(f"Existing rule may overlap: {summary}")
         return conflicts

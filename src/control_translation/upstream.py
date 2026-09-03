@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -14,10 +15,11 @@ from control_translation.cancellation import (
 from control_translation.contracts import (
     BypassCounterexample,
     DatabricksResultReference,
-    ProofLoopRequestContext,
-    ProofLoopTranslationRequirements,
+    JsonBodyFieldFeature,
     ProofLoopQualification,
+    ProofLoopRequestContext,
     ProofLoopRoutingMetadata,
+    ProofLoopTranslationRequirements,
     ProvenMitigationPattern,
     UpstreamResultReferences,
 )
@@ -198,6 +200,14 @@ def resolve_proof_loop(
     )
     mitigation_id = records["Mitigation Check"].result_id
     bypass_id = records["Bypass Validation"].result_id
+    request_context = _mitigation_request_context(
+        records["Mitigation Check"].result
+    )
+    json_body_field_feature = _json_body_field_feature(
+        request_context,
+        discriminator=discriminator,
+        artifact_content=artifact_content,
+    )
 
     bypass_cleared = required_bypass_state == "no-bypass-found"
     pattern = ProvenMitigationPattern(
@@ -212,6 +222,7 @@ def resolve_proof_loop(
         discriminator_description=discriminator,
         pattern_summary=artifact_content,
         proof_record_ids=[mitigation_id, bypass_id],
+        json_body_field_feature=json_body_field_feature,
     )
     qualification = ProofLoopQualification(
         route="validated" if bypass_cleared else "poc-exhaustion",
@@ -248,9 +259,6 @@ def resolve_proof_loop(
     translation_requirements = _translation_requirements(
         raw_counterexample,
         feedback,
-    )
-    request_context = _mitigation_request_context(
-        records["Mitigation Check"].result
     )
     check_cancelled(cancellation_signal)
 
@@ -303,6 +311,163 @@ def _mitigation_request_context(
         headers=headers,
         body=body,
     )
+
+
+_MAX_JSON_BODY_BYTES = 64 * 1024
+_MAX_JSON_DEPTH = 12
+_MAX_JSON_LEAVES = 256
+_MAX_JSON_NODES = 1024
+_CORROBORATION_TOKEN = re.compile(
+    r"--[A-Za-z0-9_-]{2,64}|[A-Za-z0-9][A-Za-z0-9_.:+/-]{2,127}"
+)
+
+
+def _json_body_field_feature(
+    request_context: ProofLoopRequestContext | None,
+    *,
+    discriminator: str,
+    artifact_content: str,
+) -> JsonBodyFieldFeature | None:
+    """Safely derive one DG-corroborated scalar JSON request field."""
+    if request_context is None or request_context.method.strip().upper() != "POST":
+        return None
+    base_media_type = request_context.content_type.split(";", 1)[0].strip().lower()
+    if base_media_type != "application/json":
+        return None
+    if len(request_context.body.encode("utf-8")) > _MAX_JSON_BODY_BYTES:
+        return None
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"non-standard JSON constant: {value}")
+
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON object key: {key}")
+            result[key] = value
+        return result
+
+    try:
+        document = json.loads(
+            request_context.body,
+            parse_constant=reject_constant,
+            object_pairs_hook=unique_object,
+        )
+    except (TypeError, ValueError, RecursionError):
+        return None
+    if not isinstance(document, dict):
+        return None
+
+    leaves: list[tuple[tuple[str, ...], str]] = []
+    nodes_visited = 0
+    traversal_exceeded = False
+
+    def visit(value: Any, path: tuple[str, ...], depth: int) -> None:
+        nonlocal nodes_visited, traversal_exceeded
+        nodes_visited += 1
+        if nodes_visited > _MAX_JSON_NODES:
+            traversal_exceeded = True
+            return
+        if depth > _MAX_JSON_DEPTH:
+            return
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if not isinstance(key, str) or not re.fullmatch(
+                    r"[A-Za-z0-9_-]{1,128}", key
+                ):
+                    continue
+                visit(child, (*path, key), depth + 1)
+                if traversal_exceeded:
+                    return
+            return
+        if isinstance(value, list):
+            return
+        if isinstance(value, str) and value.strip() and len(value) <= 4096:
+            leaves.append((path, value))
+            if len(leaves) > _MAX_JSON_LEAVES:
+                traversal_exceeded = True
+
+    visit(document, (), 0)
+    if traversal_exceeded or not leaves:
+        return None
+
+    folded_discriminator = discriminator.casefold()
+    evidence = (folded_discriminator, artifact_content.casefold())
+    corroborated: list[tuple[tuple[str, ...], str, str]] = []
+    for path, value in leaves:
+        dotted_path = ".".join(path).casefold()
+        terminal = path[-1].casefold()
+        if not all(
+            _evidence_mentions_path(source, dotted_path, terminal)
+            for source in evidence
+        ):
+            continue
+        folded_value = value.casefold()
+        if all(folded_value in source for source in evidence):
+            corroborated.append((path, value, "exact"))
+            continue
+        tokens = {
+            token.casefold(): token
+            for token in _CORROBORATION_TOKEN.findall(value)
+            if token.strip()
+        }
+        shared_tokens = sorted(
+            folded for folded in tokens if all(folded in source for source in evidence)
+        )
+        if len(shared_tokens) == 1:
+            corroborated.append(
+                (path, tokens[shared_tokens[0]], "contains-token")
+            )
+            continue
+        if _artifact_blocks_json_field_presence(artifact_content, path[-1]):
+            corroborated.append((path, "*", "field-present"))
+
+    if len(corroborated) != 1:
+        return None
+    path, value, value_match = corroborated[0]
+    return JsonBodyFieldFeature(
+        method="POST",
+        content_type="application/json",
+        field_path=list(path),
+        value=value,
+        value_match=value_match,
+    )
+
+
+def _artifact_blocks_json_field_presence(artifact_content: str, field: str) -> bool:
+    field_pattern = re.compile(
+        rf"(?<![A-Za-z0-9_-]){re.escape(field)}(?![A-Za-z0-9_-])",
+        re.IGNORECASE,
+    )
+    request_body_rx = re.compile(
+        r'^\s*SecRule\s+REQUEST_BODY\s+"@rx\s+((?:\\.|[^"])*)"\s+"',
+        re.IGNORECASE,
+    )
+    for line in artifact_content.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        match = request_body_rx.match(line)
+        if match is None:
+            continue
+        expression = match.group(1)
+        if field_pattern.search(expression) is None:
+            continue
+        remainder = expression.replace(r"\b", "")
+        remainder = field_pattern.sub("", remainder)
+        remainder = remainder.replace(r'\"', "").replace("'", "")
+        remainder = re.sub(r"[\s()?:|]+", "", remainder)
+        if remainder == "":
+            return True
+    return False
+
+
+def _evidence_mentions_path(source: str, dotted_path: str, terminal: str) -> bool:
+    if dotted_path in source:
+        return True
+    return re.search(
+        rf"(?<![A-Za-z0-9_-]){re.escape(terminal)}(?![A-Za-z0-9_-])",
+        source,
+    ) is not None
 
 
 def _translation_requirements(

@@ -409,9 +409,7 @@ class LifecycleWorker:
                 ),
             )
             return True
-        if abort_work.is_set():
-            return True
-        return False
+        return bool(abort_work.is_set())
 
 
 def build_lifecycle_result(
@@ -438,7 +436,7 @@ def build_lifecycle_result(
         | set(result.provenance)
     )
     primary_candidate = None
-    artifacts: dict[str, dict[str, str]] = {}
+    artifacts: dict[str, dict[str, object]] = {}
     if candidate is not None:
         artifact = candidate.candidate_artifact
         content_ref = _canonical_artifact_ref(
@@ -453,6 +451,11 @@ def build_lifecycle_result(
             "artifact_type": artifact.artifact_type,
             "content_ref": content_ref,
             "content_hash": artifact.content_hash,
+            "candidate_metadata": (
+                candidate.candidate_metadata.model_dump(mode="json")
+                if candidate.candidate_metadata is not None
+                else None
+            ),
         }
         artifacts["primary"] = {
             "artifact_type": artifact.artifact_type,
@@ -460,6 +463,11 @@ def build_lifecycle_result(
             "content": artifact.content_ref,
             "content_hash": artifact.content_hash,
             "emitted_as": artifact.emitted_as,
+            "candidate_metadata": (
+                candidate.candidate_metadata.model_dump(mode="json")
+                if candidate.candidate_metadata is not None
+                else None
+            ),
         }
     payload = {
         "capability": "control-translation",
@@ -481,6 +489,7 @@ def build_lifecycle_result(
         "prose": structured.prose_summary,
         "primary_candidate": primary_candidate,
         "artifacts": artifacts,
+        "inference": result.inference,
         "provenance": {
             "upstream_result_refs": (
                 request.upstream_result_refs.model_dump(mode="json", by_alias=True)

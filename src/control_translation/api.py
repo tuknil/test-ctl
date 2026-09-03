@@ -9,7 +9,6 @@ provided automatically by FastAPI).
 from __future__ import annotations
 
 import logging
-import re
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,8 +17,10 @@ from typing import Any
 from uuid import uuid4
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request, status
-from fastapi.exception_handlers import request_validation_exception_handler
-from fastapi.exception_handlers import http_exception_handler
+from fastapi.exception_handlers import (
+    http_exception_handler,
+    request_validation_exception_handler,
+)
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -51,11 +52,6 @@ from control_translation.terminal import TerminalState
 from control_translation.upstream_databricks import create_upstream_result_resolver
 
 logger = logging.getLogger(__name__)
-
-_SECRET_VALUE = re.compile(
-    r"(?i)\b(access[_ -]?token|api[_ -]?key|authorization|client[_ -]?secret|password)"
-    r"\b\s*[:=]\s*([^\s,;]+)"
-)
 
 _SETTINGS = get_settings()
 _REPOSITORY = create_run_repository(_SETTINGS)
@@ -627,7 +623,7 @@ def _storage_unavailable(
                 "run_id": run_id,
                 "result_id": result_id,
                 "error_type": type(root_cause).__name__,
-                "error": _sanitize_diagnostic(str(root_cause)),
+                "error": "Root-cause details are available only in server logs.",
                 "server_traceback_logged": True,
             },
         },
@@ -641,12 +637,6 @@ def _root_cause(exc: BaseException) -> BaseException:
         seen.add(id(root))
         root = root.__cause__
     return root
-
-
-def _sanitize_diagnostic(message: str) -> str:
-    """Redact common credential assignments and bound UI diagnostic size."""
-    redacted = _SECRET_VALUE.sub(lambda match: f"{match.group(1)}=[REDACTED]", message)
-    return redacted[:2000] or "No additional error detail was provided."
 
 
 def _log_storage_failure(

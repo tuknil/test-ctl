@@ -36,7 +36,11 @@ def sanitize_for_logging(value: Any, *, parent_key: str | None = None) -> Any:
         for raw_key, child in value.items():
             key = str(raw_key)
             normalized = key.lower()
-            if _is_secret_key(normalized) or normalized in _ARTIFACT_CONTENT_KEYS:
+            if (
+                _is_secret_key(normalized)
+                or normalized in _ARTIFACT_CONTENT_KEYS
+                or (parent_key == "json_body_field_feature" and normalized == "value")
+            ):
                 sanitized[key] = _REDACTED
             else:
                 sanitized[key] = sanitize_for_logging(child, parent_key=normalized)

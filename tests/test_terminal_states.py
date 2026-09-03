@@ -6,6 +6,7 @@ from control_translation import capability
 from control_translation.agents.translation_agent import TranslationProposal
 from control_translation.contracts import (
     ControlTranslationRequest,
+    JsonBodyFieldFeature,
     ProofLoopRequestContext,
     ProofLoopTranslationRequirements,
     ProvenMitigationPattern,
@@ -14,6 +15,7 @@ from control_translation.contracts import (
 )
 from control_translation.providers.fixtures import get_fixture_pattern
 from control_translation.terminal import TerminalState
+from control_translation.translation.engine import _akamai_json_body_semantic_errors
 
 
 def _request(target_technology: str, context_id: str) -> ControlTranslationRequest:
@@ -399,6 +401,144 @@ def test_request_body_form_rule_is_hardened_from_authoritative_request_context()
             ],
         },
     ]
+
+
+@pytest.mark.parametrize("run_mode", ["fixture", "live"])
+def test_typed_json_body_candidate_is_deterministic_and_review_only(run_mode: str):
+    class UnexpectedDoer:
+        def propose(self, **kwargs):
+            raise AssertionError("typed JSON translation must bypass the doer")
+
+    pattern = ProvenMitigationPattern(
+        proven_pattern_id="proven-pattern:candidate:generic-json",
+        vulnerability_id="CVE-EXAMPLE",
+        selected_control_class="waf",
+        discriminator_id="discriminator:generic-json",
+        discriminator_description="Opaque producer prose without adapter keywords.",
+        pattern_summary='SecRule REQUEST_BODY "@rx node_options.*--require"',
+        proof_record_ids=[
+            "mitigation-check-result:generic-json",
+            "bypass-validation-result:generic-json",
+        ],
+        json_body_field_feature=JsonBodyFieldFeature(
+            method="POST",
+            content_type="application/json",
+            field_path=["env", "node_options"],
+            value="--require",
+            value_match="contains-token",
+        ),
+    )
+    request = ControlTranslationRequest(
+        proven_pattern=pattern,
+        target_context=TargetContext(
+            target_technology="akamai-waf",
+            target_policy_context_id="akamai-policy:example:rev-17",
+        ),
+    )
+
+    envelope = capability.invoke(
+        request,
+        settings=capability.Settings(run_mode=run_mode, model_provider="att"),
+        doer=UnexpectedDoer(),
+    )
+
+    assert envelope.terminal_state == TerminalState.TRANSLATED
+    assert envelope.inference["proposal_source"] == "deterministic-json-body-field"
+    assert envelope.inference["llm_invoked"] is False
+    candidate = envelope.structured_result.primary_candidate
+    assert candidate is not None
+    artifact = json.loads(candidate.candidate_artifact.content_ref)
+    assert artifact["operation"] == "AND"
+    assert {condition["type"] for condition in artifact["conditions"]} == {
+        "requestMethodMatch",
+        "requestHeaderValueMatch",
+        "argsPostJSONMatch",
+    }
+    header_condition = next(
+        condition
+        for condition in artifact["conditions"]
+        if condition["type"] == "requestHeaderValueMatch"
+    )
+    assert header_condition["value"] == ["*application/json*"]
+    json_condition = next(
+        condition
+        for condition in artifact["conditions"]
+        if condition["type"] == "argsPostJSONMatch"
+    )
+    assert json_condition["parameter"] == "env.node_options"
+    assert json_condition["value"] == ["*--require*"]
+    assert json_condition["valueWildcard"] is True
+    assert not {"action", "deny", "alert"}.intersection(artifact)
+    assert candidate.candidate_id.endswith(
+        candidate.candidate_artifact.content_hash.removeprefix("sha256:")[:16]
+    )
+    metadata = candidate.candidate_metadata
+    assert metadata is not None
+    assert metadata.syntax_profile.id == "janus-akamai-like-custom-rule-demo@1"
+    assert metadata.syntax_profile.family == "akamai-like-custom-rule"
+    assert metadata.syntax_profile.validation_level == "shape-only"
+    assert metadata.syntax_profile.deployment_ready is False
+    binding = metadata.recommended_policy_binding
+    assert binding.action == "deny"
+    assert binding.attachment == "security-policy-custom-rule-binding"
+    assert binding.embedded_in_artifact is False
+    assert binding.requires_operator_review is True
+
+
+def test_json_body_semantic_judge_uses_target_like_wildcards():
+    feature = JsonBodyFieldFeature(
+        method="POST",
+        content_type="application/json",
+        field_path=["env", "node_options"],
+        value="--require",
+        value_match="contains-token",
+    )
+    base_conditions = [
+        {"type": "requestMethodMatch", "positiveMatch": True, "value": ["POST"]},
+        {
+            "type": "requestHeaderValueMatch",
+            "positiveMatch": True,
+            "header": "Content-Type",
+            "valueCase": False,
+            "valueWildcard": True,
+            "value": ["*application/json*"],
+        },
+    ]
+    exact_looking = {
+        "operation": "AND",
+        "conditions": [
+            *base_conditions,
+            {
+                "type": "argsPostJSONMatch",
+                "positiveMatch": True,
+                "parameter": "env.node_options",
+                "valueCase": True,
+                "valueWildcard": True,
+                "value": ["--require"],
+            },
+        ],
+    }
+    overly_broad = {
+        "operation": "AND",
+        "conditions": [
+            *base_conditions,
+            {
+                "type": "argsPostJSONMatch",
+                "positiveMatch": True,
+                "parameter": "env.node_options",
+                "valueCase": True,
+                "valueWildcard": True,
+                "value": ["*"],
+            },
+        ],
+    }
+
+    assert "does not match" in " ".join(
+        _akamai_json_body_semantic_errors(json.dumps(exact_looking), feature)
+    )
+    assert "benign" in " ".join(
+        _akamai_json_body_semantic_errors(json.dumps(overly_broad), feature)
+    )
 
 
 @pytest.mark.parametrize(
