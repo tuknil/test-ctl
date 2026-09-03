@@ -1,7 +1,6 @@
 name: CI - Python Build
 
-permissions:
-  contents: read
+
 
 on:
   schedule:
@@ -67,6 +66,19 @@ on:
         required: false
         type: string
 
+      enable_stage_deployment:
+        description: 'Push Stage Repo'
+        default: false
+        required: true
+        type: boolean
+
+
+      enable_Azure_deployment:
+        description: 'Push Azure ACA'
+        default: false
+        required: true
+        type: boolean
+
 jobs:
   run:
     name: Run Python CI Workflow
@@ -82,9 +94,12 @@ jobs:
       apps_to_build: ${{ github.event.inputs.apps_to_build }}
       selected_projects: ${{ github.event.inputs.selected_projects }}
 
-  call_devOp:
+  Call_DevOps:
     name: Call DevOps
+    permissions:
+      contents: read    
     needs: run
+    if: ${{ inputs.enable_stage_deployment == true }}
     runs-on: concordia-linux-cpu2-ram7gi
     steps:
       - name: Generate GitHub App token
@@ -122,7 +137,7 @@ jobs:
           echo "Images:"
           echo " control-translation"
           echo ""
-          echo "Target Repository : amp0047460-devop"
+          echo "Target Repository : apm0047460-DevOPS"
           echo "Event Type        : feature-build"
           echo "======================================"
 
@@ -133,7 +148,7 @@ jobs:
           script: |
             await github.rest.repos.createDispatchEvent({
               owner: context.repo.owner,
-              repo: 'amp0047460-devop',
+              repo: 'apm0047460-DevOPS',
               event_type: 'feature-build',
 
               client_payload: {
@@ -141,6 +156,8 @@ jobs:
                 ref: context.ref.replace('refs/heads/', ''),
                 sha: context.sha,
                 triggered_by: context.actor,
+                jfrog_group: 'apm0047460-dkr-group',
+                enable_azure_deployment: ${{ inputs.enable_Azure_deployment }},
 
                 images: [
                   {
