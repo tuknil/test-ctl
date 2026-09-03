@@ -36,6 +36,29 @@
       "title": "BypassCounterexample",
       "type": "object"
     },
+    "CompletionCallback": {
+      "additionalProperties": false,
+      "description": "Reserved callback contract; delivery remains deferred until orchestration is ready.",
+      "properties": {
+        "url": {
+          "format": "uri",
+          "minLength": 1,
+          "title": "Url",
+          "type": "string"
+        },
+        "event_contract_id": {
+          "const": "capability-run-event@1.0",
+          "title": "Event Contract Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url",
+        "event_contract_id"
+      ],
+      "title": "CompletionCallback",
+      "type": "object"
+    },
     "ControlTranslationRequest": {
       "additionalProperties": false,
       "description": "Input contract for a single control-translation invocation.",
@@ -572,9 +595,81 @@
             }
           ],
           "default": null
+        },
+        "callback": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CompletionCallback"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "title": "InvokeRequestEnvelope",
+      "type": "object"
+    },
+    "JsonBodyFieldFeature": {
+      "additionalProperties": false,
+      "description": "Authoritative JSON request field proven by the upstream proof loop.",
+      "properties": {
+        "kind": {
+          "const": "json-body-field",
+          "default": "json-body-field",
+          "title": "Kind",
+          "type": "string"
+        },
+        "method": {
+          "const": "POST",
+          "title": "Method",
+          "type": "string"
+        },
+        "content_type": {
+          "const": "application/json",
+          "title": "Content Type",
+          "type": "string"
+        },
+        "field_path": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 16,
+          "minItems": 1,
+          "title": "Field Path",
+          "type": "array"
+        },
+        "value": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Value",
+          "type": "string"
+        },
+        "value_match": {
+          "enum": [
+            "exact",
+            "contains-token",
+            "field-present"
+          ],
+          "title": "Value Match",
+          "type": "string"
+        },
+        "source": {
+          "const": "mitigation-check.test_basis.request",
+          "default": "mitigation-check.test_basis.request",
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "method",
+        "content_type",
+        "field_path",
+        "value",
+        "value_match"
+      ],
+      "title": "JsonBodyFieldFeature",
       "type": "object"
     },
     "OrchestrationRoutingContext": {
@@ -781,6 +876,17 @@
           "minItems": 2,
           "title": "Proof Record Ids",
           "type": "array"
+        },
+        "json_body_field_feature": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonBodyFieldFeature"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [

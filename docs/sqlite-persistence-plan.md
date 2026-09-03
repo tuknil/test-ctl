@@ -65,7 +65,7 @@ Behavior:
 Recommended SQLite connection settings:
 
 - `PRAGMA foreign_keys = ON`
-- `PRAGMA journal_mode = WAL`
+- `PRAGMA journal_mode = DELETE` for the durable single-replica mounted volume
 - `PRAGMA busy_timeout = 5000`
 - `PRAGMA synchronous = NORMAL`
 

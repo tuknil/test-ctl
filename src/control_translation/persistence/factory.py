@@ -5,6 +5,7 @@ from __future__ import annotations
 from control_translation.config import Settings
 from control_translation.persistence.base import PersistenceError, RunRepository
 from control_translation.persistence.databricks import DatabricksRunRepository
+from control_translation.persistence.split import SplitRunRepository
 from control_translation.persistence.sqlite import SQLiteRunRepository
 
 
@@ -35,7 +36,7 @@ def create_run_repository(settings: Settings) -> RunRepository:
             raise PersistenceError(
                 "Databricks persistence configuration is incomplete."
             )
-        return DatabricksRunRepository(
+        result_sink = DatabricksRunRepository(
             server_hostname=settings.databricks_server_hostname or "",
             http_path=settings.databricks_http_path or "",
             auth_type=auth_type,
@@ -45,5 +46,9 @@ def create_run_repository(settings: Settings) -> RunRepository:
             catalog=settings.databricks_catalog,
             schema=settings.databricks_schema,
             table=settings.databricks_results_table,
+        )
+        return SplitRunRepository(
+            SQLiteRunRepository(settings.database_path),
+            result_sink,
         )
     raise PersistenceError("Unsupported persistence backend configuration.")

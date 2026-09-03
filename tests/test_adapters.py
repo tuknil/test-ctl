@@ -1,10 +1,10 @@
+import json
+
 from control_translation.adapters import get_adapter
 from control_translation.adapters.akamai_waf import AkamaiWafAdapter
 from control_translation.adapters.edr_s1 import EdrS1Adapter
 from control_translation.adapters.firewall_generic import FirewallGenericAdapter
 from control_translation.policy_reader.fixtures import FixturePolicyReader
-
-import json
 
 
 def test_registry_resolves_known_adapters():
@@ -113,6 +113,27 @@ def test_akamai_adapter_enforces_condition_specific_header_key():
 
     assert result.valid is False
     assert any("valid only" in error for error in result.errors)
+
+
+def test_akamai_json_body_condition_requires_parameter():
+    adapter = AkamaiWafAdapter()
+    missing_parameter = json.dumps(
+        {
+            "operation": "AND",
+            "conditions": [
+                {
+                    "type": "argsPostJSONMatch",
+                    "positiveMatch": True,
+                    "value": ["--require"],
+                }
+            ],
+        }
+    )
+
+    result = adapter.validate_syntax(missing_parameter)
+
+    assert result.valid is False
+    assert any("parameter" in error for error in result.errors)
 
 
 def test_firewall_adapter_validates_expected_shape():

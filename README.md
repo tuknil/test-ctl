@@ -227,6 +227,49 @@ translation stage, it correctly reports `LLM invoked: no` even in live mode.
 
 ## Invoke
 
+## Asynchronous orchestration lifecycle
+
+New orchestration integrations use the durable polling API rather than holding
+an HTTP request open while translation runs:
+
+```text
+POST /v1/control-translation-runs
+GET  /v1/control-translation-runs/{run_id}
+GET  /v1/control-translation-runs/{run_id}/result
+POST /v1/control-translation-runs/{run_id}/cancel
+```
+
+Submission requires `Idempotency-Key` and `X-Correlation-ID`. The body
+`request_id` must equal the idempotency header, and body `correlation_id` must
+equal the correlation header. The request is normalized, SHA-256 hashed, and
+persisted as `queued` before the worker is signaled. An identical retry returns
+the same run. Reusing the key with changed semantic input returns
+`409 idempotency_conflict`.
+
+Workers claim persisted runs with a durable lease, heartbeat while inference
+or upstream resolution is active, and recover expired leases on startup or
+failover. `WORKER_MAX_ATTEMPTS` bounds recovery. Completion stores an immutable
+service result and compact canonical completion containing its Databricks
+reference, SHA-256, and byte size. Status polling never starts work. Callback
+delivery is intentionally deferred because the polling lifecycle is complete;
+submissions containing `callback` receive `400 callback_not_supported` rather
+than silently dropping an event.
+
+Deployment lifecycle state is stored at
+`/app/data/control_translation.db` on a durable mounted volume with SQLite
+`DELETE` journaling. Run exactly one service replica (`SERVICE_REPLICA_COUNT=1`).
+When `PERSISTENCE_BACKEND=databricks`, completed immutable results are written
+to Databricks while queues, leases, cancellation, and polling state remain in
+SQLite. SQLite also holds a fenced publication outbox containing the exact
+canonical result and completion metadata. Recovery reuses that staged output
+and verifies the idempotent Databricks row before atomically finalizing the
+lifecycle, so translation is not regenerated after a publish/finalize crash.
+Cancellation wins before publication becomes pending; afterward canonical
+completion wins because the Databricks write may already have succeeded.
+
+`POST /invoke` remains a synchronous compatibility facade and preserves its
+existing request and result contracts, including structured candidate output.
+
 ### Orchestration route (recommended)
 
 Orchestration calls `POST /invoke` after completing either accepted route:
@@ -359,6 +402,10 @@ decides whether that proposal is structurally acceptable.
 | `GET` | `/inference` | Safe mode/provider/model status; never returns keys/endpoints |
 | `GET` | `/schema` | Capability and supported-target summary |
 | `POST` | `/invoke` | Submit one translation request |
+| `POST` | `/v1/control-translation-runs` | Persist and queue one asynchronous translation |
+| `GET` | `/v1/control-translation-runs/{run_id}` | Read compact durable lifecycle status |
+| `GET` | `/v1/control-translation-runs/{run_id}/result` | Read the immutable terminal result |
+| `POST` | `/v1/control-translation-runs/{run_id}/cancel` | Request idempotent cancellation |
 | `GET` | `/v1/runs?limit=25&offset=0` | List safe, newest-first run summaries for the dashboard |
 | `GET` | `/runs/{run_id}` | Read a durable completion envelope by execution ID |
 | `GET` | `/v1/results/{result_id}` | Read the durable structured business result |
@@ -406,10 +453,10 @@ podman run --rm -p 8000:8000 --env-file .env control-translation-service:local
 The image does not contain `.env`, tests, local caches, or credentials. Its
 startup command reads `HOST` and `PORT` from the environment. Its health check
 uses `/ready`, so an invalid live-model configuration does not enter service.
-The image runs as a non-root user. When `PERSISTENCE_BACKEND=sqlite`, use
-Docker Compose or mount a writable volume at `/app/data`; SQLite data must not
-be written into the container image layer. Azure deployments can instead use
-Databricks SQL as the shared backend.
+The image runs as a non-root user. Mount a durable writable volume at
+`/app/data` for lifecycle state regardless of the immutable result backend;
+SQLite data must not be written into the container image layer. Azure
+deployments use Databricks SQL as the completed-result sink.
 
 For an orchestrator, configure:
 
@@ -419,8 +466,8 @@ For an orchestrator, configure:
 4. TLS, authentication, authorization, rate limits, and request-size limits
    at the API gateway;
 5. centralized logs/metrics with input and candidate redaction rules;
-6. `PERSISTENCE_BACKEND=databricks` for the Azure shared store, or one process
-  replica and a persistent volume while SQLite is configured.
+6. `PERSISTENCE_BACKEND=databricks` for the Azure result sink, plus one process
+  replica and a persistent volume for SQLite lifecycle state.
 
 Use `deploy/DEPLOYMENT.md` as the authoritative DevOps runbook. The older
 `deploy/DEVOPS-HANDOFF.html` remains a presentation-oriented handoff.
@@ -441,9 +488,7 @@ production or direct Internet exposure. The following controls remain:
   limiting, request-size limits, and network allowlists.
 - Provision and validate the deployment service principal's least-privilege
   grants for all three source tables, the result table, and SQL warehouse.
-- Initially retain one writer replica because idempotency lookup in the existing
-  table is not protected by a dedicated unique constraint; add a concurrency
-  strategy before unrestricted horizontal scaling.
+- Retain exactly one service replica while lifecycle coordination uses SQLite.
 - Add provider retry/backoff, circuit breaking, quotas, and production
   telemetry. The current model call has a configurable timeout but no retry.
 - Complete target-owner acceptance tests against non-production Akamai,

@@ -9,21 +9,29 @@ provided automatically by FastAPI).
 from __future__ import annotations
 
 import logging
-import re
-from time import perf_counter
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Query, Request, status
+from fastapi import FastAPI, Header, HTTPException, Query, Request, status
+from fastapi.exception_handlers import (
+    http_exception_handler,
+    request_validation_exception_handler,
+)
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from control_translation import capability
 from control_translation.adapters import ADAPTER_REGISTRY
 from control_translation.config import get_settings
 from control_translation.contracts import (
+    CapabilityRunStatus,
+    CapabilityRunSubmission,
     ControlTranslationResult,
     DirectBypassValidationResult,
     InvokeAPIRequest,
@@ -32,25 +40,27 @@ from control_translation.contracts import (
     RunListResponse,
 )
 from control_translation.diagnostics import diagnostic_json
+from control_translation.lifecycle import LifecycleWorker
 from control_translation.persistence import (
+    IdempotencyConflictError,
     PersistenceError,
     canonical_request_hash,
     create_run_repository,
+    normalized_request_digest,
 )
 from control_translation.terminal import TerminalState
 from control_translation.upstream_databricks import create_upstream_result_resolver
 
-
 logger = logging.getLogger(__name__)
-
-_SECRET_VALUE = re.compile(
-    r"(?i)\b(access[_ -]?token|api[_ -]?key|authorization|client[_ -]?secret|password)"
-    r"\b\s*[:=]\s*([^\s,;]+)"
-)
 
 _SETTINGS = get_settings()
 _REPOSITORY = create_run_repository(_SETTINGS)
 _UPSTREAM_RESOLVER = create_upstream_result_resolver(_SETTINGS)
+_LIFECYCLE_WORKER = LifecycleWorker(
+    lambda: _REPOSITORY,
+    lambda: _UPSTREAM_RESOLVER,
+    _SETTINGS,
+)
 
 
 @asynccontextmanager
@@ -73,7 +83,11 @@ async def lifespan(_: FastAPI):
         "Durable storage initialized backend=%s",
         _SETTINGS.normalized_persistence_backend,
     )
-    yield
+    _LIFECYCLE_WORKER.start()
+    try:
+        yield
+    finally:
+        _LIFECYCLE_WORKER.stop()
 
 app = FastAPI(
     title="control-translation",
@@ -87,6 +101,58 @@ app = FastAPI(
     openapi_url="/openapi.json" if _SETTINGS.enable_docs else None,
     lifespan=lifespan,
 )
+
+
+@app.exception_handler(RequestValidationError)
+async def lifecycle_validation_error(request: Request, exc: RequestValidationError):
+    if request.url.path.startswith("/v1/control-translation-runs"):
+        return _lifecycle_error(
+            400,
+            "invalid_request",
+            "Request body or required headers failed validation.",
+        )
+    return await request_validation_exception_handler(request, exc)
+
+
+@app.exception_handler(StarletteHTTPException)
+async def lifecycle_http_error(request: Request, exc: StarletteHTTPException):
+    """Keep lifecycle errors at the JSON root instead of under FastAPI detail."""
+    if request.url.path.startswith("/v1/control-translation-runs"):
+        if isinstance(exc.detail, dict) and {
+            "code",
+            "detail",
+            "retryable",
+        }.issubset(exc.detail):
+            payload = exc.detail
+        else:
+            payload = {
+                "code": "method_not_allowed" if exc.status_code == 405 else "request_failed",
+                "detail": str(exc.detail),
+                "retryable": _is_retryable_http_status(exc.status_code),
+            }
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=payload,
+            headers=exc.headers,
+        )
+    return await http_exception_handler(request, exc)
+
+
+@app.exception_handler(Exception)
+async def lifecycle_unhandled_error(request: Request, exc: Exception):
+    if request.url.path.startswith("/v1/control-translation-runs"):
+        logger.exception(
+            "Unhandled lifecycle request failure method=%s path=%s",
+            request.method,
+            request.url.path,
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
+        return _lifecycle_error(
+            500,
+            "internal_error",
+            "The capability lifecycle request failed unexpectedly.",
+        )
+    raise exc
 
 _UI_DIR = Path(__file__).resolve().parents[2] / "ui"
 
@@ -104,6 +170,25 @@ async def log_request_lifecycle(request: Request, call_next):
         query_names,
         client,
     )
+    if (
+        request.method == "POST"
+        and request.url.path == "/v1/control-translation-runs"
+        and request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        != "application/json"
+    ):
+        response = _lifecycle_error(
+            400,
+            "invalid_content_type",
+            "Content-Type must be application/json.",
+        )
+        logger.info(
+            "HTTP request completed method=%s path=%s status_code=%s duration_ms=%.2f",
+            request.method,
+            request.url.path,
+            response.status_code,
+            (perf_counter() - started) * 1000,
+        )
+        return response
     try:
         response = await call_next(request)
     except Exception:
@@ -247,7 +332,7 @@ def invoke_endpoint(payload: InvokeAPIRequest) -> ResultEnvelope:
             _log_invocation_result(existing.result, source="idempotency-cache")
             return existing.result
 
-    started_at = datetime.now(timezone.utc)
+    started_at = datetime.now(UTC)
     if direct_bypass_result is not None:
         result_envelope = capability.decline_direct_bypass(
             effective_envelope,
@@ -304,6 +389,155 @@ def invoke_endpoint(payload: InvokeAPIRequest) -> ResultEnvelope:
         _SETTINGS.normalized_persistence_backend,
     )
     return result_envelope
+
+
+def _lifecycle_error(http_status: int, code: str, detail: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=http_status,
+        content={
+            "code": code,
+            "detail": detail,
+            "retryable": _is_retryable_http_status(http_status),
+        },
+    )
+
+
+def _is_retryable_http_status(http_status: int) -> bool:
+    return http_status in {408, 425, 429} or http_status >= 500
+
+
+@app.post(
+    "/v1/control-translation-runs",
+    response_model=CapabilityRunSubmission,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def submit_control_translation_run(
+    payload: InvokeRequestEnvelope,
+    content_type: str = Header(alias="Content-Type"),
+    idempotency_key: str = Header(alias="Idempotency-Key", min_length=1),
+    correlation_id: str = Header(alias="X-Correlation-ID", min_length=1),
+):
+    """Persist one queued run before signaling the independent worker."""
+    if content_type.split(";", 1)[0].strip().lower() != "application/json":
+        return _lifecycle_error(
+            400,
+            "invalid_content_type",
+            "Content-Type must be application/json.",
+        )
+    if payload.request_id is None:
+        return _lifecycle_error(400, "request_id_required", "request_id is required.")
+    if payload.correlation_id is None:
+        return _lifecycle_error(
+            400, "correlation_id_required", "correlation_id is required."
+        )
+    if payload.request_id != idempotency_key:
+        return _lifecycle_error(
+            400,
+            "request_identity_mismatch",
+            "request_id and Idempotency-Key must identify the same request.",
+        )
+    if payload.correlation_id != correlation_id:
+        return _lifecycle_error(
+            400,
+            "correlation_identity_mismatch",
+            "correlation_id and X-Correlation-ID must match.",
+        )
+    if payload.idempotency_key not in (None, idempotency_key):
+        return _lifecycle_error(
+            400,
+            "request_identity_mismatch",
+            "Body idempotency_key must match request_id and Idempotency-Key.",
+        )
+    if payload.callback is not None:
+        return _lifecycle_error(
+            400,
+            "callback_not_supported",
+            "Completion callbacks are deferred; poll status and result endpoints.",
+        )
+    effective = payload.model_copy(update={"idempotency_key": idempotency_key})
+    digest = normalized_request_digest(effective)
+    try:
+        created = _REPOSITORY.create_lifecycle_run(
+            effective,
+            idempotency_key=idempotency_key,
+            request_digest=digest,
+        )
+    except IdempotencyConflictError:
+        return _lifecycle_error(
+            409,
+            "idempotency_conflict",
+            "Idempotency-Key is already bound to a different normalized request.",
+        )
+    except PersistenceError as exc:
+        raise _storage_unavailable(
+            operation="create-lifecycle-run",
+            exc=exc,
+            request_id=payload.request_id,
+            correlation_id=payload.correlation_id,
+        ) from exc
+    run_status = created.run.status
+    _LIFECYCLE_WORKER.wake()
+    response = CapabilityRunSubmission(
+        request_id=run_status.request_id,
+        correlation_id=run_status.correlation_id,
+        run_id=run_status.run_id,
+        status=run_status.status,
+        status_url=f"/v1/control-translation-runs/{run_status.run_id}",
+        result_url=f"/v1/control-translation-runs/{run_status.run_id}/result",
+        accepted_at=run_status.created_at,
+    )
+    return JSONResponse(
+        status_code=(
+            status.HTTP_200_OK
+            if not created.created and run_status.status in {"completed", "failed", "canceled"}
+            else status.HTTP_202_ACCEPTED
+        ),
+        content=response.model_dump(mode="json"),
+    )
+
+
+@app.get(
+    "/v1/control-translation-runs/{run_id}",
+    response_model=CapabilityRunStatus,
+)
+def get_control_translation_run(run_id: str):
+    try:
+        run = _REPOSITORY.get_lifecycle_run(run_id)
+    except PersistenceError as exc:
+        raise _storage_unavailable(operation="get-lifecycle-run", exc=exc, run_id=run_id) from exc
+    if run is None:
+        return _lifecycle_error(404, "run_not_found", "Run was not found.")
+    return run.status
+
+
+@app.get("/v1/control-translation-runs/{run_id}/result")
+def get_control_translation_run_result(run_id: str):
+    try:
+        run = _REPOSITORY.get_lifecycle_run(run_id)
+        result = _REPOSITORY.get_lifecycle_result(run_id) if run is not None else None
+    except PersistenceError as exc:
+        raise _storage_unavailable(operation="get-lifecycle-result", exc=exc, run_id=run_id) from exc
+    if run is None:
+        return _lifecycle_error(404, "run_not_found", "Run was not found.")
+    if run.status.status in {"queued", "running"}:
+        return _lifecycle_error(409, "run_not_terminal", "Run is not terminal.")
+    if result is None:
+        return run.status
+    return result
+
+
+@app.post(
+    "/v1/control-translation-runs/{run_id}/cancel",
+    response_model=CapabilityRunStatus,
+)
+def cancel_control_translation_run(run_id: str):
+    try:
+        run = _LIFECYCLE_WORKER.cancel_run(run_id)
+    except PersistenceError as exc:
+        raise _storage_unavailable(operation="cancel-lifecycle-run", exc=exc, run_id=run_id) from exc
+    if run is None:
+        return _lifecycle_error(404, "run_not_found", "Run was not found.")
+    return run.status
 
 
 @app.get("/runs/{run_id}", response_model=ResultEnvelope)
@@ -377,7 +611,10 @@ def _storage_unavailable(
     return HTTPException(
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         detail={
+            "code": "storage_unavailable",
+            "detail": "Durable result storage is unavailable.",
             "message": "Durable result storage is unavailable.",
+            "retryable": True,
             "diagnostic": {
                 "operation": operation,
                 "backend": _SETTINGS.normalized_persistence_backend,
@@ -386,7 +623,7 @@ def _storage_unavailable(
                 "run_id": run_id,
                 "result_id": result_id,
                 "error_type": type(root_cause).__name__,
-                "error": _sanitize_diagnostic(str(root_cause)),
+                "error": "Root-cause details are available only in server logs.",
                 "server_traceback_logged": True,
             },
         },
@@ -400,12 +637,6 @@ def _root_cause(exc: BaseException) -> BaseException:
         seen.add(id(root))
         root = root.__cause__
     return root
-
-
-def _sanitize_diagnostic(message: str) -> str:
-    """Redact common credential assignments and bound UI diagnostic size."""
-    redacted = _SECRET_VALUE.sub(lambda match: f"{match.group(1)}=[REDACTED]", message)
-    return redacted[:2000] or "No additional error detail was provided."
 
 
 def _log_storage_failure(

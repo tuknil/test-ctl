@@ -18,7 +18,6 @@ from xml.etree import ElementTree
 from control_translation.adapters.base import SyntaxValidationResult
 from control_translation.policy_reader.base import PolicySnapshot
 
-
 _VALID_ACTIONS = ("allow", "deny", "drop", "reset-client", "reset-server", "reset-both")
 
 # CLI: set rulebase security rules <name> from <z> to <z> source <s>
@@ -51,7 +50,9 @@ class FirewallGenericAdapter:
         "application",
     )
 
-    def supports_feature(self, discriminator_description: str) -> bool:
+    def supports_feature(
+        self, discriminator_description: str, json_body_field_feature=None
+    ) -> bool:
         text = discriminator_description.lower()
         return any(
             keyword in text
@@ -74,8 +75,10 @@ class FirewallGenericAdapter:
         return SyntaxValidationResult(
             valid=False,
             errors=[
-                "Candidate must be a PAN-OS security rule in CLI 'set rulebase "
-                "security rules ...' form or XML '<entry>' form."
+                (
+                    "Candidate must be a PAN-OS security rule in CLI 'set rulebase "
+                    "security rules ...' form or XML '<entry>' form."
+                )
             ],
         )
 

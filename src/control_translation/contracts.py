@@ -8,14 +8,21 @@ until it has passed through one of these models.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Any, Literal, Optional
+import re
+from datetime import UTC, datetime
+from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AnyHttpUrl,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 from control_translation.terminal import OutcomeReasonCode, TerminalState
-
 
 # ---------------------------------------------------------------------------
 # Shared value types
@@ -26,6 +33,37 @@ class StrictRequestModel(BaseModel):
     """Strict model used for all caller-controlled request contracts."""
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+
+class JsonBodyFieldFeature(StrictRequestModel):
+    """Authoritative JSON request field proven by the upstream proof loop."""
+
+    kind: Literal["json-body-field"] = "json-body-field"
+    method: Literal["POST"]
+    content_type: Literal["application/json"]
+    field_path: list[str] = Field(min_length=1, max_length=16)
+    value: str = Field(min_length=1, max_length=4096)
+    value_match: Literal["exact", "contains-token", "field-present"]
+    source: Literal["mitigation-check.test_basis.request"] = (
+        "mitigation-check.test_basis.request"
+    )
+
+    @field_validator("field_path")
+    @classmethod
+    def validate_field_path(cls, value: list[str]) -> list[str]:
+        safe_segment = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+        if not all(safe_segment.fullmatch(segment) for segment in value):
+            raise ValueError(
+                "field_path segments must contain only letters, digits, '_' or '-'"
+            )
+        return value
+
+    @field_validator("value")
+    @classmethod
+    def validate_nonblank_value(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("value must not be blank")
+        return value
 
 
 class ProvenMitigationPattern(StrictRequestModel):
@@ -39,6 +77,7 @@ class ProvenMitigationPattern(StrictRequestModel):
     discriminator_description: str
     pattern_summary: str
     proof_record_ids: list[str] = Field(min_length=2)
+    json_body_field_feature: JsonBodyFieldFeature | None = None
 
     @field_validator("proof_record_ids")
     @classmethod
@@ -56,11 +95,11 @@ class ProvenMitigationPattern(StrictRequestModel):
 class TargetContext(StrictRequestModel):
     """Identifies the target control technology and policy context."""
 
-    target_technology: Optional[str] = Field(
+    target_technology: str | None = Field(
         default=None,
         description="e.g. akamai-waf, firewall-generic, edr-s1"
     )
-    target_policy_context_id: Optional[str] = None
+    target_policy_context_id: str | None = None
 
 
 class TranslationPolicy(StrictRequestModel):
@@ -79,16 +118,16 @@ class TranslationPolicy(StrictRequestModel):
 class ControlTranslationRequest(StrictRequestModel):
     """Input contract for a single control-translation invocation."""
 
-    proven_pattern: Optional[ProvenMitigationPattern] = Field(
+    proven_pattern: ProvenMitigationPattern | None = Field(
         default=None,
         description=(
             "Legacy direct-input form. Omit when authoritative upstream "
             "Databricks result references are supplied in the envelope."
         ),
     )
-    target_context: Optional[TargetContext] = None
+    target_context: TargetContext | None = None
     translation_policy: TranslationPolicy = Field(default_factory=TranslationPolicy)
-    current_policy_snapshot_id: Optional[str] = Field(
+    current_policy_snapshot_id: str | None = Field(
         default=None,
         description=(
             "Caller-supplied snapshot id. If omitted, the capability will "
@@ -115,7 +154,7 @@ class ImplementsDiscriminator(BaseModel):
 
 
 class Placement(BaseModel):
-    policy_section: Optional[str] = None
+    policy_section: str | None = None
     ordering_constraints: list[str] = Field(default_factory=list)
     conflict_notes: list[str] = Field(default_factory=list)
 
@@ -136,6 +175,27 @@ class CandidateArtifact(BaseModel):
     emitted_as: str = "control-specific-mitigation-candidate"
 
 
+class CandidateSyntaxProfile(BaseModel):
+    id: str
+    family: str
+    validation_level: Literal["shape-only"] = "shape-only"
+    deployment_ready: Literal[False] = False
+
+
+class RecommendedPolicyBinding(BaseModel):
+    action: Literal["deny"] = "deny"
+    attachment: Literal["security-policy-custom-rule-binding"] = (
+        "security-policy-custom-rule-binding"
+    )
+    embedded_in_artifact: Literal[False] = False
+    requires_operator_review: Literal[True] = True
+
+
+class CandidateMetadata(BaseModel):
+    syntax_profile: CandidateSyntaxProfile
+    recommended_policy_binding: RecommendedPolicyBinding
+
+
 class PrimaryCandidate(BaseModel):
     candidate_id: str
     target_control_class: str
@@ -148,6 +208,7 @@ class PrimaryCandidate(BaseModel):
     translation_assumptions: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
     provenance: list[str] = Field(default_factory=list)
+    candidate_metadata: CandidateMetadata | None = None
 
 
 class EvidenceBinding(BaseModel):
@@ -170,13 +231,13 @@ class BypassCounterexample(BaseModel):
 class ProofLoopTranslationRequirements(BaseModel):
     """Authoritative payload forms a target translation must preserve."""
 
-    original_payload: Optional[str] = None
-    bypass_payload: Optional[str] = None
-    bypass_variant_or_encoding: Optional[str] = None
-    constraint_for_next_candidate: Optional[str] = None
+    original_payload: str | None = None
+    bypass_payload: str | None = None
+    bypass_variant_or_encoding: str | None = None
+    constraint_for_next_candidate: str | None = None
     post_waf_canonical_forms: list[str] = Field(default_factory=list)
-    effective_request: Optional[dict[str, Any]] = None
-    mutation_location: Optional[dict[str, Any]] = None
+    effective_request: dict[str, Any] | None = None
+    mutation_location: dict[str, Any] | None = None
 
     @property
     def required_payloads(self) -> tuple[str, ...]:
@@ -188,7 +249,7 @@ class ProofLoopTranslationRequirements(BaseModel):
         return tuple(dict.fromkeys(value for value in values if value))
 
     @property
-    def request_path(self) -> Optional[str]:
+    def request_path(self) -> str | None:
         if not self.effective_request:
             return None
         path = self.effective_request.get("path")
@@ -261,7 +322,7 @@ class DirectBypassValidationResult(StrictRequestModel):
     contract_id: Literal["bypass-validation@1.0"]
     result_id: str = Field(pattern=r"^bypass-validation-result:.+")
     run_id: str = Field(min_length=1)
-    result_ref: "DatabricksResultReference"
+    result_ref: DatabricksResultReference
     produced_at: datetime
     subject: DirectBypassSubject
     input_bindings: dict[str, Any]
@@ -274,7 +335,7 @@ class DirectBypassValidationResult(StrictRequestModel):
     prose_summary: str
 
     @model_validator(mode="after")
-    def validate_direct_result(self) -> "DirectBypassValidationResult":
+    def validate_direct_result(self) -> DirectBypassValidationResult:
         if self.result_ref.key != self.result_id:
             raise ValueError("result_ref.key must equal result_id")
         expected_run_id = self.result_id.removeprefix(
@@ -284,7 +345,7 @@ class DirectBypassValidationResult(StrictRequestModel):
             raise ValueError("bypass result_id must derive from run_id")
         prior = self.input_bindings.get("prior_mitigation_check")
         if not isinstance(prior, dict):
-            raise ValueError("prior_mitigation_check is required")
+            raise TypeError("prior_mitigation_check is required")
         if prior.get("contract_id") != "mitigation-check@1.0":
             raise ValueError("prior mitigation-check contract is unsupported")
         if prior.get("terminal_state") != "blocked" or prior.get("match") is not True:
@@ -315,7 +376,7 @@ class DirectBypassValidationResult(StrictRequestModel):
         return str(self.input_bindings["prior_mitigation_check"]["result_id"])
 
     @property
-    def mitigation_result_ref(self) -> "DatabricksResultReference":
+    def mitigation_result_ref(self) -> DatabricksResultReference:
         return DatabricksResultReference.model_validate(
             self.input_bindings["prior_mitigation_check"]["result_ref"]
         )
@@ -331,7 +392,7 @@ class InputBindings(BaseModel):
     target_technology: str
     target_policy_context_id: str
     configured_poc_defaults_used: bool = False
-    current_policy_snapshot_id: Optional[str] = None
+    current_policy_snapshot_id: str | None = None
     translation_policy_id: str
     proof_record_ids: list[str] = Field(default_factory=list)
 
@@ -342,15 +403,15 @@ class ControlTranslationResult(BaseModel):
     contract_id: str = "control-translation@1.0"
     result_id: str
     produced_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc)
+        default_factory=lambda: datetime.now(UTC)
     )
     subject: Subject
     input_bindings: InputBindings
     terminal_state: TerminalState
     outcome_reason: OutcomeReason
-    proof_loop_qualification: Optional["ProofLoopQualification"] = None
-    bypass_counterexample: Optional[BypassCounterexample] = None
-    primary_candidate: Optional[PrimaryCandidate] = None
+    proof_loop_qualification: ProofLoopQualification | None = None
+    bypass_counterexample: BypassCounterexample | None = None
+    primary_candidate: PrimaryCandidate | None = None
     evidence_bindings: list[EvidenceBinding] = Field(default_factory=list)
     prose_summary: str
 
@@ -361,8 +422,15 @@ class ControlTranslationResult(BaseModel):
 
 
 class Provenance(StrictRequestModel):
-    caller: Optional[str] = None
-    source: Optional[str] = None
+    caller: str | None = None
+    source: str | None = None
+
+
+class CompletionCallback(StrictRequestModel):
+    """Reserved callback contract; delivery remains deferred until orchestration is ready."""
+
+    url: AnyHttpUrl
+    event_contract_id: Literal["capability-run-event@1.0"]
 
 
 class DatabricksResultReference(StrictRequestModel):
@@ -381,7 +449,7 @@ class DatabricksResultReference(StrictRequestModel):
     key: str
 
     @model_validator(mode="after")
-    def validate_databricks_reference(self) -> "DatabricksResultReference":
+    def validate_databricks_reference(self) -> DatabricksResultReference:
         if self.system.strip().lower() != "databricks":
             raise ValueError("upstream result references must use Databricks")
         if not all(
@@ -402,7 +470,7 @@ class ProofLoopRoutingMetadata(StrictRequestModel):
     bypass_validation_result_ref: DatabricksResultReference
 
     @model_validator(mode="after")
-    def validate_route(self) -> "ProofLoopRoutingMetadata":
+    def validate_route(self) -> ProofLoopRoutingMetadata:
         if self.completed_iterations > self.max_iterations:
             raise ValueError("completed_iterations cannot exceed max_iterations")
         if self.bypass_validation_terminal_state == "no-bypass-found":
@@ -469,9 +537,12 @@ class OrchestrationUpstreamInput(StrictRequestModel):
     evidence_refs: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def validate_completion(self) -> "OrchestrationUpstreamInput":
+    def validate_completion(self) -> OrchestrationUpstreamInput:
         accepted_contracts = {
-            "defense-generation": {"defense-generation@1.0"},
+            "defense-generation": {
+                "defense-generation@1.0",
+                "defense-generation-result@1.0",
+            },
             "mitigation-check": {"mitigation-check@1.0"},
             # The deployed producer sends the common completion-envelope ID.
             # The canonical row itself is validated as bypass-validation@1.0.
@@ -521,7 +592,7 @@ class OrchestrationRoutingContext(StrictRequestModel):
     max_iterations: int = Field(ge=1)
 
     @model_validator(mode="after")
-    def validate_route(self) -> "OrchestrationRoutingContext":
+    def validate_route(self) -> OrchestrationRoutingContext:
         if self.route == "validated":
             if self.loop_exhausted or self.bypass_validation_terminal_state != "no-bypass-found":
                 raise ValueError("validated route requires no-bypass-found")
@@ -539,27 +610,28 @@ class OrchestrationRoutingContext(StrictRequestModel):
 
 
 class InvokeRequestEnvelope(StrictRequestModel):
-    contract_id: Optional[Literal["control-translation@1.0"]] = None
+    contract_id: Literal["control-translation@1.0"] | None = None
     input: ControlTranslationRequest = Field(default_factory=ControlTranslationRequest)
-    subject: Optional[InvocationSubject] = None
-    upstream_inputs: Optional[list[OrchestrationUpstreamInput]] = None
-    routing_context: Optional[OrchestrationRoutingContext] = None
-    upstream_result_refs: Optional[UpstreamResultReferences] = None
-    routing_metadata: Optional[ProofLoopRoutingMetadata] = None
+    subject: InvocationSubject | None = None
+    upstream_inputs: list[OrchestrationUpstreamInput] | None = None
+    routing_context: OrchestrationRoutingContext | None = None
+    upstream_result_refs: UpstreamResultReferences | None = None
+    routing_metadata: ProofLoopRoutingMetadata | None = None
     scope_config: dict[str, Any] = Field(default_factory=dict)
-    request_id: Optional[str] = Field(default=None, max_length=255)
-    correlation_id: Optional[str] = Field(default=None, min_length=1, max_length=255)
-    idempotency_key: Optional[str] = Field(default=None, min_length=1, max_length=255)
-    subject_record_revision_id: Optional[str] = Field(
+    request_id: str | None = Field(default=None, max_length=255)
+    correlation_id: str | None = Field(default=None, min_length=1, max_length=255)
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=255)
+    subject_record_revision_id: str | None = Field(
         default=None,
         min_length=1,
         max_length=255,
         description="Authoritative orchestration subject-record revision, when available.",
     )
-    provenance: Optional[Provenance] = None
+    provenance: Provenance | None = None
+    callback: CompletionCallback | None = None
 
     @model_validator(mode="after")
-    def validate_reference_routing(self) -> "InvokeRequestEnvelope":
+    def validate_reference_routing(self) -> InvokeRequestEnvelope:
         orchestration_fields_present = any(
             value is not None
             for value in (
@@ -676,10 +748,10 @@ class ResultEnvelope(BaseModel):
     result_id: str
     status: str
     terminal_state: TerminalState
-    request_id: Optional[str] = None
+    request_id: str | None = None
     correlation_id: str
     result_ref: ResultReference
-    upstream_result_refs: Optional[UpstreamResultReferences] = None
+    upstream_result_refs: UpstreamResultReferences | None = None
     structured_result: ControlTranslationResult
     prose: str
     reference_bundle: dict[str, Any] = Field(default_factory=dict)
@@ -704,7 +776,7 @@ class RunSummary(BaseModel):
     outcome_reason_code: str
     vulnerability_id: str
     target_technology: str
-    artifact_type: Optional[str] = None
+    artifact_type: str | None = None
     started_at: datetime
     completed_at: datetime
     result_href: str
@@ -719,3 +791,73 @@ class RunListResponse(BaseModel):
     offset: int = Field(ge=0)
     has_more: bool
     terminal_state_counts: dict[str, int] = Field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Asynchronous capability lifecycle
+# ---------------------------------------------------------------------------
+
+
+RunLifecycleStatus = Literal[
+    "queued", "running", "completed", "failed", "canceled"
+]
+
+
+class RunProgress(BaseModel):
+    phase: str
+    percent: int | None = Field(default=None, ge=0, le=100)
+    message: str
+
+
+class RunFailure(BaseModel):
+    code: str
+    detail: str
+    retryable: bool
+
+
+class CanonicalCompletion(BaseModel):
+    capability: Literal["control-translation"] = "control-translation"
+    contract_id: Literal["capability-completion@1.0"] = "capability-completion@1.0"
+    request_id: str
+    correlation_id: str
+    run_id: str
+    result_id: str
+    status: Literal["completed"] = "completed"
+    terminal_state: str
+    result_ref: DatabricksResultReference
+    evidence_refs: list[str] = Field(default_factory=list)
+    content_sha256: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
+    size_bytes: int = Field(ge=1)
+    created_at: datetime
+
+
+class CapabilityRunStatus(BaseModel):
+    capability: Literal["control-translation"] = "control-translation"
+    contract_id: Literal["capability-run-status@1.0"] = "capability-run-status@1.0"
+    request_id: str
+    correlation_id: str
+    run_id: str
+    status: RunLifecycleStatus
+    terminal_state: str | None = None
+    result_id: str | None = None
+    created_at: datetime
+    started_at: datetime | None = None
+    updated_at: datetime
+    completed_at: datetime | None = None
+    progress: RunProgress
+    failure: RunFailure | None = None
+    completion: CanonicalCompletion | None = None
+
+
+class CapabilityRunSubmission(BaseModel):
+    capability: Literal["control-translation"] = "control-translation"
+    contract_id: Literal["control-translation-run-submission@1.0"] = (
+        "control-translation-run-submission@1.0"
+    )
+    request_id: str
+    correlation_id: str
+    run_id: str
+    status: RunLifecycleStatus
+    status_url: str
+    result_url: str
+    accepted_at: datetime

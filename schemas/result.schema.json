@@ -65,6 +65,52 @@
       "title": "CandidateArtifact",
       "type": "object"
     },
+    "CandidateMetadata": {
+      "properties": {
+        "syntax_profile": {
+          "$ref": "#/$defs/CandidateSyntaxProfile"
+        },
+        "recommended_policy_binding": {
+          "$ref": "#/$defs/RecommendedPolicyBinding"
+        }
+      },
+      "required": [
+        "syntax_profile",
+        "recommended_policy_binding"
+      ],
+      "title": "CandidateMetadata",
+      "type": "object"
+    },
+    "CandidateSyntaxProfile": {
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "family": {
+          "title": "Family",
+          "type": "string"
+        },
+        "validation_level": {
+          "const": "shape-only",
+          "default": "shape-only",
+          "title": "Validation Level",
+          "type": "string"
+        },
+        "deployment_ready": {
+          "const": false,
+          "default": false,
+          "title": "Deployment Ready",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "family"
+      ],
+      "title": "CandidateSyntaxProfile",
+      "type": "object"
+    },
     "CollateralImpactPrior": {
       "properties": {
         "verdict": {
@@ -431,6 +477,17 @@
           },
           "title": "Provenance",
           "type": "array"
+        },
+        "candidate_metadata": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CandidateMetadata"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -494,6 +551,36 @@
         "bypass_validation_result_ref"
       ],
       "title": "ProofLoopQualification",
+      "type": "object"
+    },
+    "RecommendedPolicyBinding": {
+      "properties": {
+        "action": {
+          "const": "deny",
+          "default": "deny",
+          "title": "Action",
+          "type": "string"
+        },
+        "attachment": {
+          "const": "security-policy-custom-rule-binding",
+          "default": "security-policy-custom-rule-binding",
+          "title": "Attachment",
+          "type": "string"
+        },
+        "embedded_in_artifact": {
+          "const": false,
+          "default": false,
+          "title": "Embedded In Artifact",
+          "type": "boolean"
+        },
+        "requires_operator_review": {
+          "const": true,
+          "default": true,
+          "title": "Requires Operator Review",
+          "type": "boolean"
+        }
+      },
+      "title": "RecommendedPolicyBinding",
       "type": "object"
     },
     "ResultReference": {

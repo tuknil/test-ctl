@@ -6,14 +6,17 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from control_translation import capability
 from control_translation import api as api_module
+from control_translation import capability
 from control_translation.api import app
 from control_translation.config import Settings
-from control_translation.contracts import InvokeRequestEnvelope
+from control_translation.contracts import InvokeRequestEnvelope, ProofLoopRequestContext
 from control_translation.terminal import TerminalState
-from control_translation.upstream import UpstreamRecord
-
+from control_translation.upstream import (
+    UpstreamRecord,
+    _artifact_blocks_json_field_presence,
+    _json_body_field_feature,
+)
 
 CORRELATION_ID = "corr-proof-loop-1"
 SUBJECT_REVISION = "canonical-vulnerability-revision:1"
@@ -110,13 +113,274 @@ class FakeResolver:
         self.records = records
         self.fetched: list[str] = []
 
-    def fetch(self, reference):
+    def fetch(self, reference, *, cancellation_signal=None):
         self.fetched.append(reference.key)
         return self.records.get(reference.key)
 
 
 def _settings() -> Settings:
     return Settings(run_mode="fixture", model_provider="none")
+
+
+def test_flowise_58057_production_shape_derives_generic_json_field_candidate():
+    vulnerability_id = "CVE-2026-58057"
+    candidate_id = "candidate:CVE-2026-58057:waf:flowise"
+    body = _body()
+    body["subject"] = {
+        "vulnerability_id": vulnerability_id,
+        "candidate_id": candidate_id,
+    }
+    records = _records()
+    defense = records["defense-generation-result:defense-1"]
+    records[defense.result_id] = UpstreamRecord(
+        result_id=defense.result_id,
+        terminal_state=defense.terminal_state,
+        correlation_id=CORRELATION_ID,
+        subject_record_revision_id=SUBJECT_REVISION,
+        request={
+            "vulnerability_id": vulnerability_id,
+            "selected_control_class": "waf",
+        },
+        result={
+            "primary_candidate": {
+                "vulnerability_id": vulnerability_id,
+                "candidate_id": candidate_id,
+                "selected_control_class": "waf",
+                "discriminator": (
+                    "Authenticate to Flowise, create or modify a Custom MCP stdio "
+                    "node with environment variable 'node_options' set to '--require "
+                    "malicious-loader.js', and trigger MCP stdio execution to see "
+                    "whether the loader is run."
+                ),
+                "artifact_content": (
+                    "SecRule REQUEST_BODY \"@rx (?:\\\"node_options\\\"|"
+                    "'node_options'|\\bnode_options\\b)\" "
+                    "\"id:110479,phase:2,deny,status:403,log\""
+                ),
+            }
+        },
+    )
+    mitigation = records["mitigation-check-result:mitigation-1"]
+    records[mitigation.result_id] = UpstreamRecord(
+        result_id=mitigation.result_id,
+        terminal_state=mitigation.terminal_state,
+        correlation_id=CORRELATION_ID,
+        subject_record_revision_id=SUBJECT_REVISION,
+        request={},
+        result={
+            "correlation_id": CORRELATION_ID,
+            "terminal_state": "blocked",
+            "test_basis": {
+                "request": {
+                    "method": "POST",
+                    "path": "/",
+                    "headers": {"Content-Type": "application/json"},
+                    "body": json.dumps(
+                        {
+                            "env": {
+                                "node_options": "--require harmless-observation-loader.js"
+                            }
+                        }
+                    ),
+                }
+            },
+        },
+    )
+    bypass = records["bypass-validation-result:bypass-1"]
+    records[bypass.result_id] = UpstreamRecord(
+        result_id=bypass.result_id,
+        terminal_state=bypass.terminal_state,
+        correlation_id=CORRELATION_ID,
+        subject_record_revision_id=SUBJECT_REVISION,
+        request={},
+        result={
+            "correlation_id": CORRELATION_ID,
+            "terminal_state": "no-bypass-found",
+            "subject": {
+                "vulnerability_id": vulnerability_id,
+                "source_candidate_id": candidate_id,
+            },
+        },
+    )
+
+    result = capability.invoke_envelope(
+        InvokeRequestEnvelope.model_validate(body),
+        resolver=FakeResolver(records),
+        settings=_settings(),
+    )
+
+    assert result.terminal_state == TerminalState.TRANSLATED
+    assert result.inference["proposal_source"] == "deterministic-json-body-field"
+    assert result.inference["llm_invoked"] is False
+    candidate = result.structured_result.primary_candidate
+    assert candidate is not None
+    artifact = json.loads(candidate.candidate_artifact.content_ref)
+    json_condition = next(
+        item for item in artifact["conditions"] if item["type"] == "argsPostJSONMatch"
+    )
+    assert json_condition["parameter"] == "env.node_options"
+    assert json_condition["value"] == ["*"]
+    assert json_condition["valueWildcard"] is True
+    assert candidate.implements_discriminator.translation == "equivalent"
+
+
+@pytest.mark.parametrize(
+    ("method", "content_type", "body", "discriminator", "artifact"),
+    [
+        (
+            "GET",
+            "application/json",
+            '{"env":{"node_options":"--require marker.js"}}',
+            "node_options --require",
+            "node_options --require",
+        ),
+        (
+            "POST",
+            "application/json",
+            "not-json",
+            "node_options --require",
+            "node_options --require",
+        ),
+        (
+            "POST",
+            "application/json",
+            '{"env":{"node_options":"--require marker.js","x":NaN}}',
+            "node_options --require",
+            "node_options --require",
+        ),
+        (
+            "POST",
+            "application/json",
+            '{"env":{"node_options":"--require one.js","node_options":"--require two.js"}}',
+            "node_options --require",
+            "node_options --require",
+        ),
+        (
+            "POST",
+            "application/json",
+            '[{"node_options":"--require marker.js"}]',
+            "node_options --require",
+            "node_options --require",
+        ),
+        (
+            "POST",
+            "application/json",
+            '{"env":{"node_options":"--require marker.js"}}',
+            "some unrelated discriminator",
+            "node_options --require",
+        ),
+        (
+            "POST",
+            "application/json",
+            (
+                '{"first":{"node_options":"--require marker.js"},'
+                '"second":{"runtime_options":"--inspect debug.js"}}'
+            ),
+            "node_options --require runtime_options --inspect",
+            "node_options --require runtime_options --inspect",
+        ),
+    ],
+)
+def test_json_body_feature_safely_declines_unsafe_or_uncorroborated_requests(
+    method: str,
+    content_type: str,
+    body: str,
+    discriminator: str,
+    artifact: str,
+):
+    context = ProofLoopRequestContext(
+        method=method,
+        path="/generic",
+        headers={"Content-Type": content_type},
+        body=body,
+    )
+
+    assert _json_body_field_feature(
+        context,
+        discriminator=discriminator,
+        artifact_content=artifact,
+    ) is None
+
+
+def test_json_body_feature_ignores_unrelated_arrays_and_unusual_keys():
+    context = ProofLoopRequestContext(
+        method="POST",
+        path="/",
+        headers={"Content-Type": "application/json"},
+        body=json.dumps(
+            {
+                "env": {"node_options": "--require harmless-loader.js"},
+                "unrelated-items": [1, 2, {"ignored": True}],
+                "unsupported.key": "ignored",
+            }
+        ),
+    )
+
+    feature = _json_body_field_feature(
+        context,
+        discriminator="Set node_options to --require malicious-loader.js.",
+        artifact_content='SecRule REQUEST_BODY "@rx node_options" "id:1,deny"',
+    )
+
+    assert feature is not None
+    assert feature.field_path == ["env", "node_options"]
+    assert feature.value_match == "field-present"
+
+
+def test_json_body_field_presence_requires_same_request_body_rule_line():
+    context = ProofLoopRequestContext(
+        method="POST",
+        path="/",
+        headers={"Content-Type": "application/json"},
+        body='{"env":{"node_options":"--require harmless-loader.js"}}',
+    )
+
+    feature = _json_body_field_feature(
+        context,
+        discriminator="Set node_options to --require malicious-loader.js.",
+        artifact_content=(
+            'SecRule REQUEST_BODY "@rx unrelated_marker" "id:1,deny"\n'
+            '# node_options appears only in an unrelated comment'
+        ),
+    )
+
+    assert feature is None
+
+
+def test_field_presence_requires_a_pure_request_body_field_predicate():
+    pure_presence = (
+        'SecRule REQUEST_BODY "@rx (?:\\"node_options\\"|'
+        "'node_options'|\\bnode_options\\b)\" \"id:1,deny\""
+    )
+    narrow_value = (
+        'SecRule REQUEST_BODY "@rx node_options.*--require.*loader" '
+        '"id:2,deny"'
+    )
+
+    assert _artifact_blocks_json_field_presence(pure_presence, "node_options")
+    assert not _artifact_blocks_json_field_presence(narrow_value, "node_options")
+
+
+def test_field_presence_parser_rejects_long_unterminated_escape_sequence():
+    malformed = 'SecRule REQUEST_BODY "@rx node_options' + ("\\" * 20_000)
+
+    assert not _artifact_blocks_json_field_presence(malformed, "node_options")
+
+
+def test_json_body_feature_safely_declines_parser_recursion_limit():
+    body = '{"nested":' * 1200 + '"value"' + "}" * 1200
+    context = ProofLoopRequestContext(
+        method="POST",
+        path="/",
+        headers={"Content-Type": "application/json"},
+        body=body,
+    )
+
+    assert _json_body_field_feature(
+        context,
+        discriminator="nested value",
+        artifact_content='SecRule REQUEST_BODY "@rx nested" "id:1,deny"',
+    ) is None
 
 
 def test_reference_invocation_fetches_three_records_and_uses_waf_defaults():

@@ -7,7 +7,6 @@ from control_translation import api as api_module
 from control_translation.api import app
 from control_translation.persistence import PersistenceError
 
-
 client = TestClient(app)
 DIRECT_BYPASS_EXAMPLE = (
     Path(__file__).resolve().parents[1]
@@ -333,7 +332,10 @@ def test_persistence_failure_returns_redacted_service_unavailable(
     assert detail["diagnostic"]["request_id"] == "request-storage-failure"
     assert detail["diagnostic"]["correlation_id"] == "correlation-storage-failure"
     assert detail["diagnostic"]["error_type"] == "PersistenceError"
-    assert "MODIFY permission" in detail["diagnostic"]["error"]
+    assert detail["diagnostic"]["error"] == (
+        "Root-cause details are available only in server logs."
+    )
+    assert "MODIFY permission" not in response.text
     assert detail["diagnostic"]["server_traceback_logged"] is True
     assert "secret-idempotency-value" not in response.text
     assert "save-completed-run" in caplog.text
@@ -344,10 +346,14 @@ def test_persistence_failure_returns_redacted_service_unavailable(
     assert "secret-idempotency-value" not in caplog.text
 
 
-def test_ui_diagnostic_redacts_credential_assignments(monkeypatch):
+def test_ui_diagnostic_never_returns_root_cause_text(monkeypatch):
     class FailingRepository:
         def save_completed_run(self, *args, **kwargs):
-            cause = RuntimeError("PERMISSION_DENIED api_key=do-not-display")
+            cause = RuntimeError(
+                "Bearer do-not-display; "
+                "postgresql://user:password@internal.example/database; "
+                "unstructured-secret-phrase"
+            )
             raise PersistenceError("storage write failed") from cause
 
     monkeypatch.setattr(api_module, "_REPOSITORY", FailingRepository())
@@ -359,8 +365,12 @@ def test_ui_diagnostic_redacts_credential_assignments(monkeypatch):
     diagnostic = response.json()["detail"]["diagnostic"]
     assert response.status_code == 503
     assert diagnostic["error_type"] == "RuntimeError"
-    assert "api_key=[REDACTED]" in diagnostic["error"]
+    assert diagnostic["error"] == (
+        "Root-cause details are available only in server logs."
+    )
     assert "do-not-display" not in response.text
+    assert "internal.example" not in response.text
+    assert "unstructured-secret-phrase" not in response.text
 
 
 def test_ui_app_renders_diagnostic_log():

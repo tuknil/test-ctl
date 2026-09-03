@@ -12,6 +12,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from hashlib import sha256
 from urllib.parse import parse_qsl, quote, quote_plus
 
@@ -20,15 +21,24 @@ from control_translation.agents.translation_agent import (
     TranslationDoer,
     TranslationProposal,
 )
+from control_translation.cancellation import (
+    CancellationSignal,
+    OperationCancelled,
+    check_cancelled,
+)
 from control_translation.contracts import (
     CandidateArtifact,
+    CandidateMetadata,
+    CandidateSyntaxProfile,
     CollateralImpactPrior,
     ImplementsDiscriminator,
+    JsonBodyFieldFeature,
     Placement,
     PrimaryCandidate,
     ProofLoopRequestContext,
     ProofLoopTranslationRequirements,
     ProvenMitigationPattern,
+    RecommendedPolicyBinding,
 )
 from control_translation.policy_reader.base import PolicySnapshot
 from control_translation.translation import conflict_checker, syntax_validator
@@ -40,11 +50,15 @@ logger = logging.getLogger(__name__)
 class EngineFailure:
     reason: str  # "unsupported-feature" | "policy-conflict" | "provider-failure"
     detail: str
+    proposal_source: str = "none"
+    llm_invoked: bool = False
 
 
 @dataclass
 class EngineSuccess:
     candidate: PrimaryCandidate
+    proposal_source: str
+    llm_invoked: bool
 
 
 EngineResult = EngineFailure | EngineSuccess
@@ -68,10 +82,15 @@ def translate(
     request_context: ProofLoopRequestContext | None = None,
     allow_narrower_translation: bool = True,
     allow_equivalent_translation: bool = True,
+    cancellation_signal: CancellationSignal | None = None,
 ) -> EngineResult:
     # Mechanical gate 1: can this target technology plausibly express the
     # discriminator at all? Cheap check before spending an agent call.
-    if not adapter.supports_feature(pattern.discriminator_description):
+    check_cancelled(cancellation_signal)
+    if not adapter.supports_feature(
+        pattern.discriminator_description,
+        pattern.json_body_field_feature,
+    ):
         return EngineFailure(
             reason="unsupported-feature",
             detail=(
@@ -82,28 +101,48 @@ def translate(
 
     proposal = None
     proposal_from_doer = False
-    if target_technology == "akamai-waf" and translation_requirements is None:
-        proposal = _hardened_akamai_literal_proposal(pattern)
-        if proposal is None:
-            proposal = _hardened_akamai_form_body_proposal(pattern, request_context)
+    proposal_source = "none"
+    if target_technology == "akamai-waf":
+        proposal = _akamai_json_body_field_proposal(pattern)
+        if proposal is not None:
+            proposal_source = "deterministic-json-body-field"
+        elif translation_requirements is None:
+            proposal = _hardened_akamai_literal_proposal(pattern)
+            if proposal is not None:
+                proposal_source = "deterministic-anchored-literal"
+            else:
+                proposal = _hardened_akamai_form_body_proposal(pattern, request_context)
+                if proposal is not None:
+                    proposal_source = "deterministic-form-body"
     if proposal is None:
         # Doer: propose a candidate artifact (agent output, not yet trusted).
         try:
+            check_cancelled(cancellation_signal)
             proposal = doer.propose(
                 pattern=pattern,
                 target_technology=target_technology,
                 artifact_type=adapter.artifact_type,
                 snapshot=snapshot,
                 translation_requirements=translation_requirements,
+                cancellation_signal=cancellation_signal,
             )
+            check_cancelled(cancellation_signal)
             proposal_from_doer = True
+            proposal_source = "translation-doer"
+        except OperationCancelled:
+            raise
         except Exception as exc:  # provider/model failure
             logger.exception(
                 "Translation provider failed vulnerability_id=%s target_technology=%s",
                 pattern.vulnerability_id,
                 target_technology,
             )
-            return EngineFailure(reason="provider-failure", detail=str(exc))
+            return EngineFailure(
+                reason="provider-failure",
+                detail=str(exc),
+                proposal_source="translation-doer",
+                llm_invoked=True,
+            )
 
     policy_failure = _proposal_policy_failure(
         proposal,
@@ -111,23 +150,35 @@ def translate(
         allow_equivalent_translation=allow_equivalent_translation,
     )
     if policy_failure is not None:
+        policy_failure.proposal_source = proposal_source
+        policy_failure.llm_invoked = proposal_from_doer
         return policy_failure
 
     try:
         candidate_content = _normalize_candidate_content(proposal.candidate_content)
     except (TypeError, ValueError) as exc:
-        return EngineFailure(reason="provider-failure", detail=str(exc))
+        return EngineFailure(
+            reason="provider-failure",
+            detail=str(exc),
+            proposal_source=proposal_source,
+            llm_invoked=proposal_from_doer,
+        )
 
     # Judge gate 1: syntax validation (mechanical).
+    check_cancelled(cancellation_signal)
     syntax_result = syntax_validator.validate(adapter, candidate_content)
+    check_cancelled(cancellation_signal)
     if not syntax_result.valid:
         repair = getattr(doer, "repair", None) if proposal_from_doer else None
         if not callable(repair):
             return EngineFailure(
                 reason="unsupported-feature",
                 detail="; ".join(syntax_result.errors) or "Candidate failed syntax validation.",
+                proposal_source=proposal_source,
+                llm_invoked=proposal_from_doer,
             )
         try:
+            check_cancelled(cancellation_signal)
             proposal = TranslationProposal.model_validate(
                 repair(
                     pattern=pattern,
@@ -137,24 +188,37 @@ def translate(
                     translation_requirements=translation_requirements,
                     previous_proposal=proposal,
                     validation_errors=list(syntax_result.errors),
+                    cancellation_signal=cancellation_signal,
                 )
             )
+            check_cancelled(cancellation_signal)
             policy_failure = _proposal_policy_failure(
                 proposal,
                 allow_narrower_translation=allow_narrower_translation,
                 allow_equivalent_translation=allow_equivalent_translation,
             )
             if policy_failure is not None:
+                policy_failure.proposal_source = proposal_source
+                policy_failure.llm_invoked = True
                 return policy_failure
             candidate_content = _normalize_candidate_content(proposal.candidate_content)
+        except OperationCancelled:
+            raise
         except Exception as exc:
             logger.exception(
                 "Translation provider repair failed vulnerability_id=%s target_technology=%s",
                 pattern.vulnerability_id,
                 target_technology,
             )
-            return EngineFailure(reason="provider-failure", detail=str(exc))
+            return EngineFailure(
+                reason="provider-failure",
+                detail=str(exc),
+                proposal_source=proposal_source,
+                llm_invoked=True,
+            )
+        check_cancelled(cancellation_signal)
         syntax_result = syntax_validator.validate(adapter, candidate_content)
+        check_cancelled(cancellation_signal)
         if not syntax_result.valid:
             detail = "; ".join(syntax_result.errors) or "Candidate failed syntax validation."
             return EngineFailure(
@@ -163,6 +227,21 @@ def translate(
                     "Translation provider produced invalid target candidate syntax "
                     f"after one repair attempt: {detail}"
                 ),
+                proposal_source=proposal_source,
+                llm_invoked=True,
+            )
+
+    if target_technology == "akamai-waf" and pattern.json_body_field_feature:
+        semantic_errors = _akamai_json_body_semantic_errors(
+            candidate_content,
+            pattern.json_body_field_feature,
+        )
+        if semantic_errors:
+            return EngineFailure(
+                reason="unsupported-feature",
+                detail="; ".join(semantic_errors),
+                proposal_source=proposal_source,
+                llm_invoked=proposal_from_doer,
             )
 
     # Judge gate 2: an exact/equivalent Akamai translation must preserve the
@@ -177,17 +256,24 @@ def translate(
             return EngineFailure(
                 reason="unsupported-feature",
                 detail="; ".join(semantic_errors),
+                proposal_source=proposal_source,
+                llm_invoked=proposal_from_doer,
             )
 
     # Judge gate 3: conflict/placement detection (mechanical).
+    check_cancelled(cancellation_signal)
     conflicts = conflict_checker.detect_conflicts(
         adapter, candidate_content, snapshot
     )
+    check_cancelled(cancellation_signal)
 
     content_hash = "sha256:" + sha256(candidate_content.encode("utf-8")).hexdigest()
 
     candidate = PrimaryCandidate(
-        candidate_id=f"control-candidate:{pattern.vulnerability_id}:{target_technology}:1",
+        candidate_id=(
+            f"control-candidate:{pattern.vulnerability_id}:{target_technology}:"
+            f"{content_hash.removeprefix('sha256:')[:16]}"
+        ),
         target_control_class=pattern.selected_control_class,
         target_technology=target_technology,
         target_policy_context_id=target_policy_context_id,
@@ -212,8 +298,23 @@ def translate(
         translation_assumptions=proposal.translation_assumptions,
         limitations=proposal.limitations,
         provenance=list(pattern.proof_record_ids),
+        candidate_metadata=(
+            CandidateMetadata(
+                syntax_profile=CandidateSyntaxProfile(
+                    id="janus-akamai-like-custom-rule-demo@1",
+                    family="akamai-like-custom-rule",
+                ),
+                recommended_policy_binding=RecommendedPolicyBinding(),
+            )
+            if target_technology == "akamai-waf"
+            else None
+        ),
     )
-    return EngineSuccess(candidate=candidate)
+    return EngineSuccess(
+        candidate=candidate,
+        proposal_source=proposal_source,
+        llm_invoked=proposal_from_doer,
+    )
 
 
 def _normalize_candidate_content(content: object) -> str:
@@ -257,6 +358,167 @@ def _proposal_policy_failure(
             detail="Translation policy does not allow narrower translations.",
         )
     return None
+
+
+def _akamai_json_body_field_proposal(
+    pattern: ProvenMitigationPattern,
+) -> TranslationProposal | None:
+    feature = pattern.json_body_field_feature
+    if feature is None:
+        return None
+    parameter = ".".join(feature.field_path)
+    condition_value = "*" if feature.value_match == "field-present" else feature.value
+    rule = {
+        "name": f"JANUS-{pattern.vulnerability_id}-JSON-Body-Field",
+        "description": (
+            f"Matches the proven JSON request field {parameter}."
+        ),
+        "operation": "AND",
+        "conditions": [
+            {
+                "type": "requestMethodMatch",
+                "positiveMatch": True,
+                "value": [feature.method],
+            },
+            {
+                "type": "requestHeaderValueMatch",
+                "positiveMatch": True,
+                "header": "Content-Type",
+                "valueCase": False,
+                "valueWildcard": True,
+                "value": [f"*{feature.content_type}*"],
+            },
+            {
+                "type": "argsPostJSONMatch",
+                "positiveMatch": True,
+                "parameter": parameter,
+                "valueCase": True,
+                "valueWildcard": feature.value_match in {"contains-token", "field-present"},
+                "value": [
+                    condition_value
+                    if feature.value_match == "field-present"
+                    else f"*{condition_value}*"
+                    if feature.value_match == "contains-token"
+                    else condition_value
+                ],
+            },
+        ],
+        "tag": ["JANUS", "json-body-field", "virtual-patch"],
+    }
+    return TranslationProposal(
+        candidate_content=rule,
+        translation_label=(
+            "equivalent"
+            if feature.value_match in {"exact", "field-present"}
+            else "narrower"
+        ),
+        justification=(
+            "Mapped the uniquely corroborated Mitigation Check JSON field to an "
+            "Akamai-like JSON POST-argument condition that preserves the proven "
+            "Defense Generation blocking semantics."
+        ),
+        translation_assumptions=[
+            "The target supports dotted JSON field selection on argsPostJSONMatch.",
+            "The recommended deny action is assigned at the security-policy binding.",
+        ],
+        limitations=[
+            "This is a shape-validated Akamai-like demo candidate, not tenant-validated configuration.",
+            "Operator review and target-specific policy binding are required before deployment.",
+        ],
+    )
+
+
+def _akamai_json_body_semantic_errors(
+    candidate_content: str,
+    feature: JsonBodyFieldFeature,
+) -> list[str]:
+    rule = json.loads(candidate_content)
+    malicious_value = (
+        "janus-nonempty-proven-field"
+        if feature.value_match == "field-present"
+        else feature.value
+        if feature.value_match == "exact"
+        else f"janus-prefix {feature.value} janus-suffix"
+    )
+    malicious = _nested_json_value(feature.field_path, malicious_value)
+    benign = (
+        {}
+        if feature.value_match == "field-present"
+        else _nested_json_value(feature.field_path, "janus-benign-node-options")
+    )
+    if not _akamai_json_rule_matches(rule, feature, malicious):
+        return ["Akamai-like candidate does not match the proven malicious JSON field value"]
+    if _akamai_json_rule_matches(rule, feature, benign):
+        return ["Akamai-like candidate also matches a benign JSON field value"]
+    return []
+
+
+def _nested_json_value(path: list[str], value: str) -> dict:
+    document: object = value
+    for segment in reversed(path):
+        document = {segment: document}
+    return document  # type: ignore[return-value]
+
+
+def _akamai_json_rule_matches(
+    rule: dict,
+    feature: JsonBodyFieldFeature,
+    document: dict,
+) -> bool:
+    if rule.get("operation") != "AND":
+        return False
+    outcomes: list[bool] = []
+    for condition in rule.get("conditions", []):
+        condition_type = condition.get("type")
+        if condition_type == "requestMethodMatch":
+            outcomes.append(feature.method in _condition_values(condition))
+        elif condition_type == "requestHeaderValueMatch":
+            if str(condition.get("header", "")).lower() != "content-type":
+                return False
+            outcomes.append(
+                any(
+                    _wildcard_match(
+                        feature.content_type,
+                        value,
+                        case_sensitive=condition.get("valueCase") is True,
+                    )
+                    for value in _condition_values(condition)
+                )
+            )
+        elif condition_type == "argsPostJSONMatch":
+            if condition.get("parameter") != ".".join(feature.field_path):
+                return False
+            actual: object = document
+            for segment in feature.field_path:
+                if not isinstance(actual, dict) or segment not in actual:
+                    return False
+                actual = actual[segment]
+            if not isinstance(actual, str):
+                return False
+            configured = _condition_values(condition)
+            wildcard = condition.get("valueWildcard") is True
+            outcomes.append(
+                any(
+                    _wildcard_match(
+                        actual,
+                        value,
+                        case_sensitive=condition.get("valueCase") is True,
+                    )
+                    if wildcard
+                    else value == actual
+                    for value in configured
+                )
+            )
+        else:
+            return False
+    return bool(outcomes) and all(outcomes)
+
+
+def _wildcard_match(actual: str, pattern: str, *, case_sensitive: bool) -> bool:
+    if not case_sensitive:
+        actual = actual.casefold()
+        pattern = pattern.casefold()
+    return fnmatchcase(actual, pattern)
 
 
 def _hardened_akamai_literal_proposal(

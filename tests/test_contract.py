@@ -170,6 +170,17 @@ def test_bypass_completion_contracts_are_explicitly_supported(contract_id):
     assert InvokeRequestEnvelope.model_validate(body).upstream_inputs is not None
 
 
+@pytest.mark.parametrize(
+    "contract_id",
+    ["defense-generation@1.0", "defense-generation-result@1.0"],
+)
+def test_defense_generation_result_contracts_are_supported(contract_id):
+    body = _orchestration_envelope()
+    body["upstream_inputs"][0]["contract_id"] = contract_id
+
+    assert InvokeRequestEnvelope.model_validate(body).upstream_inputs is not None
+
+
 def test_exhausted_example_is_valid_production_orchestration_command():
     path = (
         Path(__file__).resolve().parents[1]

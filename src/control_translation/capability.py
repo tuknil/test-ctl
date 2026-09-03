@@ -15,7 +15,11 @@ from hashlib import sha256
 from uuid import uuid4
 
 from control_translation.adapters import get_adapter
-from control_translation.agents.translation_agent import TranslationDoer, build_translation_doer
+from control_translation.agents.translation_agent import (
+    TranslationDoer,
+    build_translation_doer,
+)
+from control_translation.cancellation import CancellationSignal, check_cancelled
 from control_translation.config import Settings, get_settings
 from control_translation.contracts import (
     BypassCounterexample,
@@ -37,17 +41,20 @@ from control_translation.contracts import (
 from control_translation.policy_reader.base import PolicyReader
 from control_translation.policy_reader.fixtures import FixturePolicyReader
 from control_translation.terminal import (
-    OutcomeReasonCode,
     TERMINAL_STATE_TO_STATUS,
+    OutcomeReasonCode,
     TerminalState,
 )
-from control_translation.translation.engine import EngineFailure, EngineSuccess, translate
+from control_translation.translation.engine import (
+    EngineFailure,
+    EngineSuccess,
+    translate,
+)
 from control_translation.upstream import (
     UpstreamResolutionError,
     UpstreamResultResolver,
     resolve_proof_loop,
 )
-
 
 logger = logging.getLogger(__name__)
 
@@ -138,10 +145,12 @@ def invoke(
     proof_loop_qualification: ProofLoopQualification | None = None,
     translation_requirements: ProofLoopTranslationRequirements | None = None,
     request_context: ProofLoopRequestContext | None = None,
+    cancellation_signal: CancellationSignal | None = None,
 ) -> ResultEnvelope:
     """Direct Python invocation entry point. Providers are injectable for
     testing; defaults resolve from configured settings (fixture-backed)."""
 
+    check_cancelled(cancellation_signal)
     settings = settings or get_settings()
     policy_reader = policy_reader or FixturePolicyReader()
     doer = doer or build_translation_doer(settings)
@@ -206,9 +215,13 @@ def invoke(
 
     # Gate 2: insufficient-context -- an ID alone is not policy content. Always
     # resolve the current snapshot so conflict checks cannot be bypassed.
+    check_cancelled(cancellation_signal)
     snapshot = policy_reader.read_snapshot(
-        target_technology, target_context.target_policy_context_id or ""
+        target_technology,
+        target_context.target_policy_context_id or "",
+        cancellation_signal=cancellation_signal,
     )
+    check_cancelled(cancellation_signal)
     if snapshot is None:
         result = _build_result(
             request,
@@ -263,7 +276,9 @@ def invoke(
         request_context=request_context,
         allow_narrower_translation=request.translation_policy.allow_narrower_translation,
         allow_equivalent_translation=request.translation_policy.allow_equivalent_translation,
+        cancellation_signal=cancellation_signal,
     )
+    check_cancelled(cancellation_signal)
 
     if isinstance(engine_result, EngineFailure):
         if engine_result.reason == "provider-failure":
@@ -287,7 +302,8 @@ def invoke(
         return _envelope(
             result,
             settings=settings,
-            llm_invoked=True,
+            llm_invoked=engine_result.llm_invoked,
+            proposal_source=engine_result.proposal_source,
             correlation_id=correlation_id,
         )
 
@@ -325,7 +341,8 @@ def invoke(
         return _envelope(
             result,
             settings=settings,
-            llm_invoked=True,
+            llm_invoked=engine_result.llm_invoked,
+            proposal_source=engine_result.proposal_source,
             correlation_id=correlation_id,
         )
 
@@ -356,7 +373,8 @@ def invoke(
     return _envelope(
         result,
         settings=settings,
-        llm_invoked=True,
+        llm_invoked=engine_result.llm_invoked,
+        proposal_source=engine_result.proposal_source,
         correlation_id=correlation_id,
     )
 
@@ -366,6 +384,7 @@ def _envelope(
     *,
     settings: Settings,
     llm_invoked: bool,
+    proposal_source: str = "none",
     correlation_id: str | None = None,
 ) -> ResultEnvelope:
     status = TERMINAL_STATE_TO_STATUS[result.terminal_state]
@@ -392,6 +411,7 @@ def _envelope(
             "provider": settings.model_provider,
             "model": settings.model_name,
             "llm_invoked": llm_invoked and settings.is_live,
+            "proposal_source": proposal_source,
             "credentials_configured": settings.credentials_configured,
         },
     )
@@ -402,9 +422,11 @@ def invoke_envelope(
     *,
     resolver: UpstreamResultResolver | None = None,
     settings: Settings | None = None,
+    cancellation_signal: CancellationSignal | None = None,
 ) -> ResultEnvelope:
     """Wraps `invoke` to accept the full API request envelope shape."""
 
+    check_cancelled(cancellation_signal)
     settings = settings or get_settings()
     request = envelope.input
     references = envelope.upstream_result_refs
@@ -432,6 +454,7 @@ def invoke_envelope(
                 expected_candidate_id=(
                     envelope.subject.candidate_id if envelope.subject else None
                 ),
+                cancellation_signal=cancellation_signal,
             )
         except UpstreamResolutionError as exc:
             logger.error(
@@ -478,7 +501,9 @@ def invoke_envelope(
             resolved.translation_requirements if references is not None else None
         ),
         request_context=(resolved.request_context if references is not None else None),
+        cancellation_signal=cancellation_signal,
     )
+    check_cancelled(cancellation_signal)
     if references is not None and resolved.qualification.route == "poc-exhaustion":
         structured = result.structured_result
         evidence_bindings = list(structured.evidence_bindings)

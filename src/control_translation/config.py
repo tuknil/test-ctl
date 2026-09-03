@@ -13,7 +13,6 @@ from functools import lru_cache
 from dotenv import load_dotenv
 from pydantic import BaseModel
 
-
 load_dotenv(override=False)
 
 
@@ -35,7 +34,8 @@ class Settings(BaseModel):
     host: str = "0.0.0.0"
     port: int = 8000
     persistence_backend: str = "sqlite"
-    database_path: str = "./data/control_translation.db"
+    database_path: str = "/app/data/control_translation.db"
+    service_replica_count: int = 1
     databricks_server_hostname: str | None = None
     databricks_http_path: str | None = None
     databricks_auth_type: str = "oauth-m2m"
@@ -45,6 +45,11 @@ class Settings(BaseModel):
     databricks_catalog: str = "36889_janus_dev"
     databricks_schema: str = "control_translation"
     databricks_results_table: str = "control_translation_results"
+    worker_poll_seconds: float = 0.25
+    worker_lease_seconds: int = 30
+    worker_heartbeat_seconds: float = 5.0
+    worker_max_attempts: int = 3
+    worker_shutdown_grace_seconds: float = 2.0
     default_target_technology: str = "akamai-waf"
     default_target_policy_context_id: str = "akamai-policy:example:rev-17"
 
@@ -92,8 +97,20 @@ class Settings(BaseModel):
             errors.append("PORT must be between 1 and 65535.")
         if not 1 <= self.model_request_timeout_seconds <= 300:
             errors.append("MODEL_REQUEST_TIMEOUT_SECONDS must be between 1 and 300.")
+        if self.worker_poll_seconds <= 0:
+            errors.append("WORKER_POLL_SECONDS must be greater than zero.")
+        if self.worker_lease_seconds < 2:
+            errors.append("WORKER_LEASE_SECONDS must be at least 2.")
+        if not 0 < self.worker_heartbeat_seconds < self.worker_lease_seconds:
+            errors.append("WORKER_HEARTBEAT_SECONDS must be positive and shorter than the lease.")
+        if self.worker_max_attempts < 1:
+            errors.append("WORKER_MAX_ATTEMPTS must be at least 1.")
         if self.normalized_persistence_backend not in {"sqlite", "databricks"}:
             errors.append("PERSISTENCE_BACKEND must be either 'sqlite' or 'databricks'.")
+        if self.service_replica_count != 1:
+            errors.append(
+                "SERVICE_REPLICA_COUNT must be 1 while lifecycle state uses SQLite."
+            )
         if self.normalized_persistence_backend == "databricks":
             required_databricks_settings = {
                 "DATABRICKS_SERVER_HOSTNAME": self.databricks_server_hostname,
@@ -164,8 +181,9 @@ def get_settings() -> Settings:
         port=int(os.getenv("PORT", "8000")),
         persistence_backend=os.getenv("PERSISTENCE_BACKEND", "sqlite"),
         database_path=os.getenv(
-            "DATABASE_PATH", "./data/control_translation.db"
+            "DATABASE_PATH", "/app/data/control_translation.db"
         ),
+        service_replica_count=int(os.getenv("SERVICE_REPLICA_COUNT", "1")),
         databricks_server_hostname=os.getenv("DATABRICKS_SERVER_HOSTNAME") or None,
         databricks_http_path=os.getenv("DATABRICKS_HTTP_PATH") or None,
         databricks_auth_type=os.getenv("DATABRICKS_AUTH_TYPE", "oauth-m2m"),
@@ -176,6 +194,15 @@ def get_settings() -> Settings:
         databricks_schema=os.getenv("DATABRICKS_SCHEMA", "control_translation"),
         databricks_results_table=os.getenv(
             "DATABRICKS_RESULTS_TABLE", "control_translation_results"
+        ),
+        worker_poll_seconds=float(os.getenv("WORKER_POLL_SECONDS", "0.25")),
+        worker_lease_seconds=int(os.getenv("WORKER_LEASE_SECONDS", "30")),
+        worker_heartbeat_seconds=float(
+            os.getenv("WORKER_HEARTBEAT_SECONDS", "5")
+        ),
+        worker_max_attempts=int(os.getenv("WORKER_MAX_ATTEMPTS", "3")),
+        worker_shutdown_grace_seconds=float(
+            os.getenv("WORKER_SHUTDOWN_GRACE_SECONDS", "2")
         ),
         default_target_technology=os.getenv(
             "DEFAULT_TARGET_TECHNOLOGY", "akamai-waf"

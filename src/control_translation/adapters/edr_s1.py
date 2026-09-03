@@ -18,7 +18,6 @@ import json
 from control_translation.adapters.base import SyntaxValidationResult
 from control_translation.policy_reader.base import PolicySnapshot
 
-
 _VALID_SEVERITIES = frozenset({"Low", "Medium", "High", "Critical"})
 _VALID_TREAT_AS_THREAT = frozenset({"Malicious", "Suspicious", "UNDEFINED"})
 
@@ -35,7 +34,9 @@ class EdrS1Adapter:
         "s1ql",
     )
 
-    def supports_feature(self, discriminator_description: str) -> bool:
+    def supports_feature(
+        self, discriminator_description: str, json_body_field_feature=None
+    ) -> bool:
         text = discriminator_description.lower()
         return any(
             keyword in text

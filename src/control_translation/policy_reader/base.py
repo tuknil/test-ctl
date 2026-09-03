@@ -13,6 +13,8 @@ from typing import Protocol
 
 from pydantic import BaseModel, Field
 
+from control_translation.cancellation import CancellationSignal
+
 
 class PolicySnapshot(BaseModel):
     """A read of the current live policy/config for a target technology."""
@@ -29,7 +31,11 @@ class PolicyReader(Protocol):
     """What the capability needs from the world to read current policy."""
 
     def read_snapshot(
-        self, target_technology: str, target_policy_context_id: str
+        self,
+        target_technology: str,
+        target_policy_context_id: str,
+        *,
+        cancellation_signal: CancellationSignal | None = None,
     ) -> PolicySnapshot | None:
         """Return the current policy snapshot, or None if unavailable."""
         ...

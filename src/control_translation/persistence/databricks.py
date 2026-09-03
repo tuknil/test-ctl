@@ -6,17 +6,28 @@ import json
 import logging
 import re
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from threading import Lock
 from time import perf_counter
 from typing import Any, Protocol
 
-from control_translation.contracts import InvokeRequestEnvelope, ResultEnvelope, RunSummary
+from control_translation.contracts import (
+    CapabilityRunStatus,
+    InvokeRequestEnvelope,
+    ResultEnvelope,
+    RunFailure,
+    RunProgress,
+    RunSummary,
+)
 from control_translation.persistence.base import (
+    CreatedLifecycleRun,
+    IdempotencyConflictError,
     IdempotencyRecord,
+    LifecycleRun,
     PersistenceError,
     RunSummaryPage,
+    canonical_result_bytes,
     canonical_request_hash,
 )
 
@@ -54,6 +65,7 @@ class DatabricksRunRepository:
         catalog: str,
         schema: str,
         table: str,
+        runs_table: str = "control_translation_runs",
         connection_factory: ConnectionFactory | None = None,
     ) -> None:
         self._server_hostname = server_hostname.strip()
@@ -70,6 +82,14 @@ class DatabricksRunRepository:
                 (catalog, "catalog"),
                 (schema, "schema"),
                 (table, "table"),
+            )
+        )
+        self._runs_table_name = ".".join(
+            _quote_identifier(value, label)
+            for value, label in (
+                (catalog, "catalog"),
+                (schema, "schema"),
+                (runs_table, "runs table"),
             )
         )
         self._connection_factory = connection_factory or self._default_connection
@@ -155,14 +175,28 @@ class DatabricksRunRepository:
         *,
         request_hash: str,
         started_at: datetime,
+        canonical_result: dict | None = None,
     ) -> None:
         """Atomically insert one completed result; retrying its result ID is safe."""
         del request_hash  # Recomputed from request_json during idempotency lookup.
         self.initialize()
-        structured_json = result.structured_result.model_dump_json()
+        structured_json = (
+            canonical_result_bytes(canonical_result).decode("utf-8")
+            if canonical_result is not None
+            else result.structured_result.model_dump_json()
+        )
+        if canonical_result is not None:
+            contract_id, status, terminal_state = _canonical_row_state(
+                canonical_result
+            )
+        else:
+            contract_id = result.contract_id
+            status = result.status
+            terminal_state = result.terminal_state.value
         completion_json = result.model_dump_json()
         request_json = request.model_dump_json()
         result_bytes = structured_json.encode("utf-8")
+        result_digest = sha256(result_bytes).hexdigest()
         evidence_refs = sorted(
             {
                 reference
@@ -184,7 +218,7 @@ class DatabricksRunRepository:
             upstream_result_refs = request.input.proven_pattern.proof_record_ids
         else:
             upstream_result_refs = []
-        created_at = started_at.astimezone(timezone.utc)
+        created_at = started_at.astimezone(UTC)
 
         sql = f"""
             MERGE INTO {self._table_name} AS target
@@ -208,14 +242,14 @@ class DatabricksRunRepository:
             request.request_id,
             result.correlation_id,
             result.capability,
-            result.contract_id,
-            result.terminal_state.value,
-            result.status,
+            contract_id,
+            terminal_state,
+            status,
             request.subject_record_revision_id,
             request_json,
             structured_json,
             completion_json,
-            sha256(result_bytes).hexdigest(),
+            result_digest,
             len(result_bytes),
             _compact_json(evidence_refs),
             _compact_json(upstream_result_refs),
@@ -223,6 +257,42 @@ class DatabricksRunRepository:
         )
         try:
             self._execute(sql, parameters)
+            persisted = self._execute(
+                f"""
+                SELECT run_id, contract_id, status, terminal_state,
+                    result_sha256, result_size_bytes, TO_JSON(result_json),
+                    TO_JSON(completion_json)
+                FROM {self._table_name}
+                WHERE result_id = ?
+                LIMIT 1
+                """,
+                (result.result_id,),
+                fetch="one",
+            )
+            if persisted is None or (
+                persisted[0] != result.run_id
+                or persisted[1] != contract_id
+                or persisted[2] != status
+                or persisted[3] != terminal_state
+                or persisted[4] != result_digest
+                or int(persisted[5]) != len(result_bytes)
+                or _parse_json_object(
+                    persisted[6],
+                    "Stored Databricks canonical result failed validation.",
+                )
+                != _parse_json_object(
+                    structured_json,
+                    "Canonical result failed validation.",
+                )
+                or _validate_result(
+                    persisted[7],
+                    "Stored Databricks completion failed contract validation.",
+                )
+                != result
+            ):
+                raise PersistenceError(
+                    "Immutable Databricks result identity conflicts with stored content."
+                )
         except PersistenceError:
             raise
         except Exception as exc:
@@ -305,10 +375,10 @@ class DatabricksRunRepository:
                     correlation_id,
                     status,
                     terminal_state,
-                    result_json:outcome_reason.code::STRING,
-                    result_json:subject.vulnerability_id::STRING,
-                    result_json:input_bindings.target_technology::STRING,
-                    result_json:primary_candidate.candidate_artifact.artifact_type::STRING,
+                    completion_json:structured_result.outcome_reason.code::STRING,
+                    completion_json:structured_result.subject.vulnerability_id::STRING,
+                    completion_json:structured_result.input_bindings.target_technology::STRING,
+                    completion_json:structured_result.primary_candidate.candidate_artifact.artifact_type::STRING,
                     created_at,
                     TRY_CAST(result_json:produced_at::STRING AS TIMESTAMP)
                 FROM {self._table_name}
@@ -360,6 +430,343 @@ class DatabricksRunRepository:
             terminal_state_counts={row[0]: int(row[1]) for row in count_rows},
         )
 
+    def create_lifecycle_run(
+        self,
+        request: InvokeRequestEnvelope,
+        *,
+        idempotency_key: str,
+        request_digest: str,
+        run_id: str | None = None,
+    ) -> CreatedLifecycleRun:
+        from uuid import uuid4
+
+        self.initialize()
+        effective_run_id = run_id or str(uuid4())
+        now = datetime.now(UTC)
+        try:
+            self._execute(
+                f"""
+                MERGE INTO {self._runs_table_name} AS target
+                USING (SELECT ? AS idempotency_key) AS source
+                ON target.idempotency_key = source.idempotency_key
+                WHEN NOT MATCHED THEN INSERT (
+                    run_id, request_id, correlation_id, idempotency_key,
+                    request_digest, request_json, status, progress_phase,
+                    progress_message, cancel_requested, attempt_number,
+                    created_at, accepted_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, PARSE_JSON(?), 'queued', 'queued', ?,
+                    false, 0, ?, ?, ?)
+                """,
+                (
+                    idempotency_key,
+                    effective_run_id,
+                    request.request_id,
+                    request.correlation_id,
+                    idempotency_key,
+                    request_digest,
+                    request.model_dump_json(by_alias=True),
+                    "Translation is queued.",
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            row = self._select_lifecycle("idempotency_key = ?", idempotency_key)
+        except PersistenceError:
+            raise
+        except Exception as exc:
+            raise PersistenceError("Unable to create durable lifecycle run.") from exc
+        if row is None:
+            raise PersistenceError("Created lifecycle run could not be read.")
+        if row.request_digest != request_digest:
+            raise IdempotencyConflictError(
+                "Idempotency key is already bound to different input."
+            )
+        return CreatedLifecycleRun(
+            run=row,
+            created=row.status.run_id == effective_run_id,
+        )
+
+    def get_lifecycle_run(self, run_id: str) -> LifecycleRun | None:
+        self.initialize()
+        return self._select_lifecycle("run_id = ?", run_id)
+
+    def get_lifecycle_result(self, run_id: str) -> dict | None:
+        self.initialize()
+        try:
+            row = self._execute(
+                f"SELECT TO_JSON(result_json) FROM {self._runs_table_name} WHERE run_id = ? LIMIT 1",
+                (run_id,),
+                fetch="one",
+            )
+        except Exception as exc:
+            raise PersistenceError("Unable to read durable lifecycle result.") from exc
+        if row is None or row[0] is None:
+            return None
+        try:
+            return json.loads(row[0])
+        except (TypeError, ValueError) as exc:
+            raise PersistenceError("Stored lifecycle result is invalid.") from exc
+
+    def claim_lifecycle_run(
+        self, *, worker_id: str, lease_seconds: int, max_attempts: int
+    ) -> LifecycleRun | None:
+        self.initialize()
+        now = datetime.now(UTC)
+        lease = now + timedelta(seconds=lease_seconds)
+        try:
+            self._execute(
+                f"""
+                UPDATE {self._runs_table_name}
+                SET status = 'canceled', terminal_state = 'canceled',
+                    progress_phase = 'canceled', progress_message = ?,
+                    completed_at = ?, updated_at = ?, worker_id = NULL,
+                    lease_expires_at = NULL
+                WHERE status = 'running' AND cancel_requested = true
+                  AND lease_expires_at < ?
+                """,
+                ("Cancellation completed after worker lease expiry.", now, now, now),
+            )
+            self._execute(
+                f"""
+                UPDATE {self._runs_table_name}
+                SET status = 'failed', terminal_state = 'malfunction',
+                    failure_json = PARSE_JSON(?), progress_phase = 'failed',
+                    progress_message = ?, completed_at = ?, updated_at = ?,
+                    worker_id = NULL, lease_expires_at = NULL
+                WHERE status = 'running' AND cancel_requested = false
+                  AND lease_expires_at < ? AND attempt_number >= ?
+                """,
+                (
+                    RunFailure(
+                        code="worker_attempts_exhausted",
+                        detail="Worker lease expired and the bounded attempt limit was reached.",
+                        retryable=False,
+                    ).model_dump_json(),
+                    "Worker attempts exhausted.",
+                    now,
+                    now,
+                    now,
+                    max_attempts,
+                ),
+            )
+            self._execute(
+                f"""
+                UPDATE {self._runs_table_name}
+                SET status = 'running', worker_id = ?, lease_expires_at = ?,
+                    last_heartbeat_at = ?, attempt_number = attempt_number + 1,
+                    started_at = COALESCE(started_at, ?), updated_at = ?,
+                    progress_phase = 'translating', progress_message = ?
+                WHERE run_id = (
+                    SELECT run_id FROM {self._runs_table_name}
+                    WHERE cancel_requested = false AND attempt_number < ?
+                      AND (status = 'queued' OR (status = 'running' AND lease_expires_at < ?))
+                    ORDER BY created_at, run_id LIMIT 1
+                )
+                """,
+                (
+                    worker_id,
+                    lease,
+                    now,
+                    now,
+                    now,
+                    "Translation is running.",
+                    max_attempts,
+                    now,
+                ),
+            )
+            row = self._select_lifecycle(
+                "worker_id = ? AND status = 'running'", worker_id
+            )
+        except Exception as exc:
+            raise PersistenceError("Unable to claim durable lifecycle run.") from exc
+        return row
+
+    def heartbeat_lifecycle_run(
+        self,
+        run_id: str,
+        *,
+        worker_id: str,
+        attempt_number: int,
+        lease_seconds: int,
+    ) -> bool:
+        now = datetime.now(UTC)
+        self._execute(
+            f"""
+            UPDATE {self._runs_table_name}
+            SET lease_expires_at = ?, last_heartbeat_at = ?, updated_at = ?
+            WHERE run_id = ? AND status = 'running' AND worker_id = ?
+                            AND attempt_number = ?
+            """,
+                        (
+                                now + timedelta(seconds=lease_seconds),
+                                now,
+                                now,
+                                run_id,
+                                worker_id,
+                                attempt_number,
+                        ),
+        )
+        row = self._select_lifecycle("run_id = ?", run_id)
+        return row is not None and row.worker_id == worker_id and row.status.status == "running"
+
+    def complete_lifecycle_run(
+        self,
+        run_id: str,
+        *,
+        worker_id: str,
+        attempt_number: int,
+        result: dict,
+        completion: dict,
+        result_id: str,
+        terminal_state: str,
+    ) -> bool:
+        now = datetime.now(UTC)
+        self._execute(
+            f"""
+            UPDATE {self._runs_table_name}
+            SET status = CASE WHEN cancel_requested THEN 'canceled' ELSE 'completed' END,
+                terminal_state = CASE WHEN cancel_requested THEN 'canceled' ELSE ? END,
+                result_id = CASE WHEN cancel_requested THEN NULL ELSE ? END,
+                result_json = CASE WHEN cancel_requested THEN NULL ELSE PARSE_JSON(?) END,
+                completion_json = CASE WHEN cancel_requested THEN NULL ELSE PARSE_JSON(?) END,
+                progress_phase = CASE WHEN cancel_requested THEN 'canceled' ELSE 'completed' END,
+                progress_percent = CASE WHEN cancel_requested THEN NULL ELSE 100 END,
+                progress_message = CASE WHEN cancel_requested THEN ? ELSE ? END,
+                completed_at = ?, updated_at = ?, worker_id = NULL, lease_expires_at = NULL
+                        WHERE run_id = ? AND status = 'running' AND worker_id = ?
+                            AND attempt_number = ? AND result_json IS NULL
+            """,
+            (
+                terminal_state,
+                result_id,
+                _compact_json(result),
+                _compact_json(completion),
+                "Cancellation completed.",
+                "Translation completed.",
+                now,
+                now,
+                run_id,
+                worker_id,
+                attempt_number,
+            ),
+        )
+        row = self._select_lifecycle("run_id = ?", run_id)
+        return row is not None and row.status.status == "completed"
+
+    def fail_lifecycle_run(
+        self,
+        run_id: str,
+        *,
+        worker_id: str,
+        attempt_number: int,
+        failure: RunFailure,
+        result: dict | None = None,
+    ) -> bool:
+        now = datetime.now(UTC)
+        self._execute(
+            f"""
+            UPDATE {self._runs_table_name}
+            SET status = CASE WHEN cancel_requested THEN 'canceled' ELSE 'failed' END,
+                terminal_state = CASE WHEN cancel_requested THEN 'canceled' ELSE 'malfunction' END,
+                failure_json = CASE WHEN cancel_requested THEN NULL ELSE PARSE_JSON(?) END,
+                result_json = CASE WHEN cancel_requested OR ? IS NULL THEN NULL ELSE PARSE_JSON(?) END,
+                progress_phase = CASE WHEN cancel_requested THEN 'canceled' ELSE 'failed' END,
+                progress_message = CASE WHEN cancel_requested THEN ? ELSE ? END,
+                completed_at = ?, updated_at = ?, worker_id = NULL, lease_expires_at = NULL
+                        WHERE run_id = ? AND status = 'running' AND worker_id = ?
+                            AND attempt_number = ?
+            """,
+            (
+                failure.model_dump_json(),
+                _compact_json(result) if result is not None else None,
+                _compact_json(result) if result is not None else None,
+                failure.detail,
+                now,
+                now,
+                run_id,
+                worker_id,
+                attempt_number,
+            ),
+        )
+        row = self._select_lifecycle("run_id = ?", run_id)
+        return row is not None and row.status.status in {"failed", "canceled"}
+
+    def cancel_lifecycle_run(self, run_id: str) -> LifecycleRun | None:
+        now = datetime.now(UTC)
+        self._execute(
+            f"""
+            UPDATE {self._runs_table_name}
+            SET cancel_requested = true,
+                status = 'canceled', terminal_state = 'canceled',
+                progress_phase = 'canceled',
+                progress_message = CASE WHEN status = 'queued' THEN ? ELSE ? END,
+                completed_at = ?, worker_id = NULL, lease_expires_at = NULL,
+                updated_at = CASE WHEN status IN ('queued', 'running') THEN ? ELSE updated_at END
+            WHERE run_id = ? AND status IN ('queued', 'running')
+            """,
+            (
+                "Run canceled before execution.",
+                "Cancellation completed.",
+                now,
+                now,
+                run_id,
+            ),
+        )
+        return self._select_lifecycle("run_id = ?", run_id)
+
+    def _select_lifecycle(self, where_clause: str, value: str) -> LifecycleRun | None:
+        try:
+            row = self._execute(
+                f"""
+                SELECT run_id, request_id, correlation_id, request_digest,
+                    TO_JSON(request_json), status, terminal_state, result_id,
+                    TO_JSON(completion_json), TO_JSON(failure_json), progress_phase,
+                    progress_percent, progress_message, cancel_requested, worker_id,
+                    attempt_number, created_at, started_at, updated_at, completed_at
+                FROM {self._runs_table_name}
+                WHERE {where_clause}
+                ORDER BY created_at LIMIT 1
+                """,
+                (value,),
+                fetch="one",
+            )
+        except Exception as exc:
+            raise PersistenceError("Unable to read durable lifecycle run.") from exc
+        if row is None:
+            return None
+        try:
+            request = InvokeRequestEnvelope.model_validate_json(row[4])
+            failure = RunFailure.model_validate_json(row[9]) if row[9] else None
+            status = CapabilityRunStatus(
+                request_id=row[1],
+                correlation_id=row[2],
+                run_id=row[0],
+                status=row[5],
+                terminal_state=row[6],
+                result_id=row[7],
+                created_at=row[16],
+                started_at=row[17],
+                updated_at=row[18],
+                completed_at=row[19],
+                progress=RunProgress(
+                    phase=row[10], percent=row[11], message=row[12]
+                ),
+                failure=failure,
+                completion=json.loads(row[8]) if row[8] else None,
+            )
+        except (TypeError, ValueError) as exc:
+            raise PersistenceError("Stored lifecycle run failed validation.") from exc
+        return LifecycleRun(
+            request=request,
+            status=status,
+            request_digest=row[3],
+            cancel_requested=bool(row[13]),
+            worker_id=row[14],
+            attempt_number=int(row[15]),
+            publication_state="none",
+        )
+
     def _execute(
         self,
         operation: str,
@@ -400,6 +807,9 @@ class DatabricksRunRepository:
             )
             return result
         except Exception as exc:
+            error_type = type(exc).__name__
+            error_code = getattr(exc, "error_code", None) or "-"
+            sql_state = getattr(exc, "sql_state", None) or "-"
             logger.exception(
                 "Databricks SQL failed statement_type=%s table=%s fetch=%s "
                 "parameter_count=%s duration_ms=%.2f error_type=%s "
@@ -409,9 +819,9 @@ class DatabricksRunRepository:
                 fetch or "none",
                 parameter_count,
                 (perf_counter() - started) * 1000,
-                type(exc).__name__,
-                getattr(exc, "error_code", None) or "-",
-                getattr(exc, "sql_state", None) or "-",
+                error_type,
+                error_code,
+                sql_state,
             )
             raise
         finally:
@@ -451,3 +861,27 @@ def _validate_result(value: str, message: str) -> ResultEnvelope:
         return ResultEnvelope.model_validate_json(value)
     except (TypeError, ValueError) as exc:
         raise PersistenceError(message) from exc
+
+
+def _canonical_row_state(result: dict) -> tuple[str, str, str]:
+    """Validate scalar columns owned by the canonical async result contract."""
+    contract_id = result.get("contract_id")
+    status = result.get("status")
+    terminal_state = result.get("terminal_state")
+    if contract_id != "control-translation-result@1.0":
+        raise PersistenceError("Canonical result contract_id is invalid.")
+    if status != "completed":
+        raise PersistenceError("Canonical result status must be completed.")
+    if terminal_state not in {"translated", "not-translatable", "malfunction"}:
+        raise PersistenceError("Canonical result terminal_state is invalid.")
+    return contract_id, status, terminal_state
+
+
+def _parse_json_object(value: str, message: str) -> dict:
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError) as exc:
+        raise PersistenceError(message) from exc
+    if not isinstance(parsed, dict):
+        raise PersistenceError(message)
+    return parsed

@@ -11,6 +11,7 @@ from typing import Protocol
 
 from pydantic import BaseModel, Field
 
+from control_translation.contracts import JsonBodyFieldFeature
 from control_translation.policy_reader.base import PolicySnapshot
 
 
@@ -26,7 +27,11 @@ class TargetAdapter(Protocol):
     artifact_type: str
     supported_features: tuple[str, ...]
 
-    def supports_feature(self, discriminator_description: str) -> bool:
+    def supports_feature(
+        self,
+        discriminator_description: str,
+        json_body_field_feature: JsonBodyFieldFeature | None = None,
+    ) -> bool:
         """Cheap mechanical check: can this target technology plausibly
         express the discriminator at all, before spending an agent call?"""
         ...
