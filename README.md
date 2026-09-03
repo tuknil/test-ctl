@@ -172,6 +172,10 @@ model ID, or API key is hardcoded in application code or the image.
 | `DATABRICKS_CATALOG` | Databricks | Unity Catalog catalog; defaults to `36889_janus_dev` |
 | `DATABRICKS_SCHEMA` | Databricks | Unity Catalog schema; defaults to `control_translation` |
 | `DATABRICKS_RESULTS_TABLE` | Databricks | Existing results table; defaults to `control_translation_results` |
+| `CAPABILITY_CALLBACK_TOKEN` | Callback submit | Secret-store injected bearer token; never returned or logged |
+| `CAPABILITY_CALLBACK_ALLOWED_HOSTS` | No | Comma-separated orchestration callback hostname allowlist |
+| `CAPABILITY_CALLBACK_TIMEOUT_SECONDS` | No | Callback HTTP timeout; default `10` |
+| `CAPABILITY_CALLBACK_POLL_INTERVAL_SECONDS` | No | Durable outbox scan interval; default `1` |
 | `DEFAULT_TARGET_TECHNOLOGY` | No | PoC fallback target; caller value wins; default `akamai-waf` |
 | `DEFAULT_TARGET_POLICY_CONTEXT_ID` | No | PoC fallback policy context; caller value wins |
 | `HOST` | No | Bind host; default `0.0.0.0` |
@@ -250,10 +254,11 @@ Workers claim persisted runs with a durable lease, heartbeat while inference
 or upstream resolution is active, and recover expired leases on startup or
 failover. `WORKER_MAX_ATTEMPTS` bounds recovery. Completion stores an immutable
 service result and compact canonical completion containing its Databricks
-reference, SHA-256, and byte size. Status polling never starts work. Callback
-delivery is intentionally deferred because the polling lifecycle is complete;
-submissions containing `callback` receive `400 callback_not_supported` rather
-than silently dropping an event.
+reference, SHA-256, and byte size. Status polling never starts work. The async
+submit route accepts the optional all-or-none `X-Janus-Callback-URL`,
+`X-Janus-Callback-Workflow-ID`, and `X-Janus-Callback-Signal` header group.
+Body `callback` values receive `400 callback_not_supported`; polling remains
+available through callback retries and configuration failures.
 
 Deployment lifecycle state is stored at
 `/app/data/control_translation.db` on a durable mounted volume with SQLite

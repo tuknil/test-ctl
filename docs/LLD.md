@@ -15,7 +15,9 @@ real Pydantic AI agent as the translation doer.
                  ┌────────────────────┐
    HTTP client   │   FastAPI api.py    │   static UI (ui/) served at "/"
   ───────────►   │  /health /schema    │
-                 │ /invoke /v1/runs    │
+                 │ /invoke /v1/control │
+                 │ -translation-runs   │
+                 │ /v1/runs /results   │
                  │ /runs/{id} /results │
                  └─────────┬───────────┘
                            │
@@ -39,6 +41,15 @@ real Pydantic AI agent as the translation doer.
                      ┌──────▼───────────────────────────────────────────────────────┐
                      │ Defense Generation | Mitigation Check | Bypass Validation   │
                      └──────────────────────────────────────────────────────────────┘
+
+                 ┌──────────────────────────────────────────────┐
+                 │ Durable lifecycle + callback outbox          │
+                 │ SQLite /app/data transaction                 │
+                 └──────────────────────┬───────────────────────┘
+                                        │ asynchronous retry
+                 ┌──────────────────────▼───────────────────────┐
+                 │ callbacks.py → orchestration callback API    │
+                 └──────────────────────────────────────────────┘
 ```
 
 ## 3. Data models
@@ -60,7 +71,9 @@ as full bypass clearance.
 
 ## 4. Sequence (happy path)
 
-1. `POST /invoke` validates the envelope and idempotency hash.
+1. `POST /v1/control-translation-runs` validates the envelope, idempotency
+   hash, and optional callback header group. The compatibility route
+   `POST /invoke` remains synchronous and does not accept callbacks.
 2. For a referenced request, `upstream_databricks.py` parameter-selects the
   exact three result IDs; `upstream.py` validates IDs, route states,
   correlation, subject revision, vulnerability, and candidate lineage.
@@ -174,13 +187,82 @@ omit the optional transport field. Readiness verifies connection/read health;
 deployment acceptance additionally requires a successful write and durable
 read-back smoke test.
 
+When callback headers are present, the SQLite lifecycle transaction stores the
+callback metadata with the queued run. After immutable result publication, the
+same transaction that commits lifecycle status `completed`, `failed`, or
+`canceled` inserts one `callback_deliveries` outbox row. In Databricks mode,
+Databricks remains the immutable result sink while the `/app/data` SQLite
+lifecycle database remains the durable callback outbox. This ordering makes
+the canonical status and result available before asynchronous delivery begins.
+
 Each repository's `list_runs` selects a safe projection for the UI: run and
 result identifiers, correlation identifier, state/reason, vulnerability,
 target, artifact type, and timestamps. It does not load or return stored
 request JSON or artifact content. The UI retrieves a full result on demand via
 `GET /runs/{run_id}` and renders dashboard values as text rather than HTML.
 
-## 10. Agent architecture
+## 10. Terminal callback delivery
+
+### Submission contract
+
+Both submit routes read these optional headers as one all-or-none group:
+
+- `X-Janus-Callback-URL`
+- `X-Janus-Callback-Workflow-ID`
+- `X-Janus-Callback-Signal`
+
+If none are present, execution remains polling-only. If any are present, all
+three are required. The URL must use HTTPS, contain no embedded credentials or
+fragment, and match `CAPABILITY_CALLBACK_ALLOWED_HOSTS` when that allowlist is
+configured. The signal must be exactly
+`janus.capability-completion.v1`. Only the Temporal workflow ID is accepted;
+there is no workflow run ID field.
+
+`CAPABILITY_CALLBACK_TOKEN` is loaded only from the process environment and is
+expected to be backed by an Azure Container Apps secret reference. It is never
+persisted, logged, or returned. A submit with valid callback headers still
+completes when the token is missing. The API logs a redacted configuration
+error, persists the canonical result and callback event, and leaves Status and
+Result polling available.
+
+### Event and payload
+
+Every terminal result creates at most one logical event with stable ID
+`control-translation:<run_id>:terminal:v1`. Existing successful and declined
+domain outcomes map to lifecycle `completed`; `malfunction` maps to `failed`.
+The callback body is strict and contains no result data or unknown fields:
+
+```json
+{
+  "workflow_id": "<temporal-child-workflow-id>",
+  "wakeup": {
+    "event_id": "control-translation:<run-id>:terminal:v1",
+    "capability": "control-translation",
+    "request_id": "<submit-request-id>",
+    "correlation_id": "<correlation-id>",
+    "run_id": "<capability-run-id>"
+  }
+}
+```
+
+### Delivery state machine
+
+`callbacks.py::CallbackDispatcher` scans durable due records outside the submit
+request. It sends `POST` with `Authorization: Bearer <token>` and
+`Content-Type: application/json`. A matching `202` response with only
+`event_id` and `status=accepted` marks delivery complete. Network failures and
+HTTP `408`, `425`, `429`, `500`, `502`, `503`, and `504` retry. `Retry-After`
+is honored. Otherwise retries use jittered delays based on 5 seconds, 15
+seconds, 30 seconds, 1 minute, 5 minutes, and then 15 minutes indefinitely,
+which exceeds the required 24-hour window.
+
+HTTP `400`, `401`, `404`, and `415` mark the event
+`configuration-failed` and emit an alert without logging the token. A `503`
+remains retryable. At-least-once duplicate sends are safe because every retry
+reuses the same event ID. Callback state never modifies the immutable
+canonical result, and polling remains the fallback for every failure mode.
+
+## 11. Agent architecture
 
 - Doer: `agents/translation_agent.py`. `TranslationProposal` is the only
   trusted output shape from the model.
@@ -191,7 +273,7 @@ request JSON or artifact content. The UI retrieves a full result on demand via
   both purely deterministic, both delegate the target-specific check to the
   adapter.
 
-## 11. Deployment architecture summary
+## 12. Deployment architecture summary
 
 Container needs: Python 3.11+ runtime, `uvicorn control_translation.api:app`
 entrypoint, port 8000, static `ui/` directory alongside `src/`, `.env`
@@ -200,7 +282,13 @@ DevOps handoff spec: `deploy/DEVOPS-HANDOFF.html`. A working `Dockerfile`,
 `.dockerignore`, and `docker-compose.yml` are included in this repo as a
 starting point for DevOps to adapt.
 
-## 12. Testing strategy
+Callback deployment additionally requires a secret reference for
+`CAPABILITY_CALLBACK_TOKEN`. Configure
+`CAPABILITY_CALLBACK_ALLOWED_HOSTS` with the approved orchestration API
+hostname. Callback token absence does not make `/ready`, `/runs/{run_id}`, or
+`/v1/results/{result_id}` unavailable.
+
+## 13. Testing strategy
 
 - **Contract tests** (`tests/test_contract.py`): request model accepts valid
   shape, rejects malformed input.
@@ -215,9 +303,14 @@ starting point for DevOps to adapt.
   `FixtureTranslationDoer` output shape, doer-factory wiring for both
   `fixture` and `live` `RUN_MODE` (live mode is only constructed, never
   invoked, in tests — no API key required).
+- **Callback tests** (`tests/test_callbacks.py`): all-or-none header handling,
+  HTTPS/signal/allowlist validation, atomic outbox creation, exact wakeup
+  payload, stable event IDs, `202` completion, retry/backoff and `Retry-After`,
+  configuration alerts, token redaction, duplicate safety, and polling
+  availability after callback failure.
 
 All default tests run offline with no network access or API key.
 
-## 13. Assumptions & open questions
+## 14. Assumptions & open questions
 
 See `docs/assumptions-and-followups.md` for the full list.

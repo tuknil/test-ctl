@@ -111,6 +111,9 @@ DATABRICKS_CLIENT_ID=<APPROVED_SERVICE_PRINCIPAL_APPLICATION_ID>
 DATABRICKS_CATALOG=36889_janus_dev
 DATABRICKS_SCHEMA=control_translation
 DATABRICKS_RESULTS_TABLE=control_translation_results
+CAPABILITY_CALLBACK_ALLOWED_HOSTS=<APPROVED_ORCHESTRATION_API_HOSTNAME>
+CAPABILITY_CALLBACK_TIMEOUT_SECONDS=10
+CAPABILITY_CALLBACK_POLL_INTERVAL_SECONDS=1
 DEFAULT_TARGET_TECHNOLOGY=akamai-waf
 DEFAULT_TARGET_POLICY_CONTEXT_ID=akamai-policy:example:rev-17
 HOST=0.0.0.0
@@ -123,10 +126,11 @@ Create this secret in the platform secret store:
 ```text
 ATT_INFERENCE_API_KEY=<ROTATED_APPROVED_SECRET>
 DATABRICKS_CLIENT_SECRET=<DATABRICKS_OAUTH_SECRET>
+CAPABILITY_CALLBACK_TOKEN=<SHARED_ORCHESTRATION_CALLBACK_SECRET>
 ```
 
 Map each secret to its same-named container environment variable at runtime.
-Do not send either secret through chat or store it in deployment source.
+Do not send these secrets through chat or store them in deployment source.
 PAT authentication (`DATABRICKS_AUTH_TYPE=pat` and secret `DATABRICKS_TOKEN`)
 is supported for temporary developer validation only; use OAuth M2M for the
 managed Azure deployment.

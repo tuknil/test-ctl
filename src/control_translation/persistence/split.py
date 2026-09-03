@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from control_translation.callbacks import CallbackDelivery, CallbackMetadata
 from control_translation.contracts import InvokeRequestEnvelope, ResultEnvelope, RunFailure
 from control_translation.persistence.base import (
     CreatedLifecycleRun,
@@ -70,12 +71,14 @@ class SplitRunRepository:
         idempotency_key: str,
         request_digest: str,
         run_id: str | None = None,
+        callback: CallbackMetadata | None = None,
     ) -> CreatedLifecycleRun:
         return self.lifecycle.create_lifecycle_run(
             request,
             idempotency_key=idempotency_key,
             request_digest=request_digest,
             run_id=run_id,
+            callback=callback,
         )
 
     def get_lifecycle_run(self, run_id: str) -> LifecycleRun | None:
@@ -195,3 +198,49 @@ class SplitRunRepository:
 
     def cancel_lifecycle_run(self, run_id: str) -> LifecycleRun | None:
         return self.lifecycle.cancel_lifecycle_run(run_id)
+
+    def list_due_callback_deliveries(
+        self, *, now: datetime, limit: int
+    ) -> tuple[CallbackDelivery, ...]:
+        return self.lifecycle.list_due_callback_deliveries(now=now, limit=limit)
+
+    def mark_callback_delivered(
+        self, event_id: str, *, delivered_at: datetime, status_code: int
+    ) -> None:
+        self.lifecycle.mark_callback_delivered(
+            event_id, delivered_at=delivered_at, status_code=status_code
+        )
+
+    def reschedule_callback_delivery(
+        self,
+        event_id: str,
+        *,
+        attempts: int,
+        next_attempt_at: datetime,
+        status_code: int | None,
+        error_category: str,
+    ) -> None:
+        self.lifecycle.reschedule_callback_delivery(
+            event_id,
+            attempts=attempts,
+            next_attempt_at=next_attempt_at,
+            status_code=status_code,
+            error_category=error_category,
+        )
+
+    def mark_callback_configuration_failed(
+        self,
+        event_id: str,
+        *,
+        attempts: int,
+        failed_at: datetime,
+        status_code: int | None,
+        error_category: str,
+    ) -> None:
+        self.lifecycle.mark_callback_configuration_failed(
+            event_id,
+            attempts=attempts,
+            failed_at=failed_at,
+            status_code=status_code,
+            error_category=error_category,
+        )

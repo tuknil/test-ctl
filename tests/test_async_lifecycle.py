@@ -210,7 +210,7 @@ def test_terminal_log_metric_contains_all_identities(caplog):
     assert f"result_id={terminal['result_id']}" in caplog.text
 
 
-def test_callback_is_explicitly_deferred():
+def test_body_callback_is_rejected_in_favor_of_headers():
     body = _body()
     body["callback"] = {
         "url": "https://orchestration.example/v1/capability-run-events",
@@ -224,7 +224,7 @@ def test_callback_is_explicitly_deferred():
     assert response.status_code == 400
     assert response.json() == {
         "code": "callback_not_supported",
-        "detail": "Completion callbacks are deferred; poll status and result endpoints.",
+        "detail": "Body callbacks are not supported; use the X-Janus-Callback-* headers.",
         "retryable": False,
     }
 

@@ -427,7 +427,7 @@ class Provenance(StrictRequestModel):
 
 
 class CompletionCallback(StrictRequestModel):
-    """Reserved callback contract; delivery remains deferred until orchestration is ready."""
+    """Legacy body callback shape; async submissions use transport headers."""
 
     url: AnyHttpUrl
     event_contract_id: Literal["capability-run-event@1.0"]

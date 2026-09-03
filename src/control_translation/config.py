@@ -50,6 +50,10 @@ class Settings(BaseModel):
     worker_heartbeat_seconds: float = 5.0
     worker_max_attempts: int = 3
     worker_shutdown_grace_seconds: float = 2.0
+    capability_callback_token: str | None = None
+    capability_callback_allowed_hosts: tuple[str, ...] = ()
+    capability_callback_timeout_seconds: float = 10.0
+    capability_callback_poll_interval_seconds: float = 1.0
     default_target_technology: str = "akamai-waf"
     default_target_policy_context_id: str = "akamai-policy:example:rev-17"
 
@@ -105,6 +109,12 @@ class Settings(BaseModel):
             errors.append("WORKER_HEARTBEAT_SECONDS must be positive and shorter than the lease.")
         if self.worker_max_attempts < 1:
             errors.append("WORKER_MAX_ATTEMPTS must be at least 1.")
+        if self.capability_callback_timeout_seconds <= 0:
+            errors.append("CAPABILITY_CALLBACK_TIMEOUT_SECONDS must be greater than zero.")
+        if self.capability_callback_poll_interval_seconds <= 0:
+            errors.append(
+                "CAPABILITY_CALLBACK_POLL_INTERVAL_SECONDS must be greater than zero."
+            )
         if self.normalized_persistence_backend not in {"sqlite", "databricks"}:
             errors.append("PERSISTENCE_BACKEND must be either 'sqlite' or 'databricks'.")
         if self.service_replica_count != 1:
@@ -203,6 +213,18 @@ def get_settings() -> Settings:
         worker_max_attempts=int(os.getenv("WORKER_MAX_ATTEMPTS", "3")),
         worker_shutdown_grace_seconds=float(
             os.getenv("WORKER_SHUTDOWN_GRACE_SECONDS", "2")
+        ),
+        capability_callback_token=os.getenv("CAPABILITY_CALLBACK_TOKEN") or None,
+        capability_callback_allowed_hosts=tuple(
+            host.strip().lower()
+            for host in os.getenv("CAPABILITY_CALLBACK_ALLOWED_HOSTS", "").split(",")
+            if host.strip()
+        ),
+        capability_callback_timeout_seconds=float(
+            os.getenv("CAPABILITY_CALLBACK_TIMEOUT_SECONDS", "10")
+        ),
+        capability_callback_poll_interval_seconds=float(
+            os.getenv("CAPABILITY_CALLBACK_POLL_INTERVAL_SECONDS", "1")
         ),
         default_target_technology=os.getenv(
             "DEFAULT_TARGET_TECHNOLOGY", "akamai-waf"

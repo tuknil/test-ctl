@@ -10,6 +10,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Lock
 
+from control_translation.callbacks import (
+    CallbackDelivery,
+    CallbackMetadata,
+)
 from control_translation.contracts import (
     CapabilityRunStatus,
     InvokeRequestEnvelope,
@@ -386,6 +390,7 @@ class SQLiteRunRepository:
         idempotency_key: str,
         request_digest: str,
         run_id: str | None = None,
+        callback: CallbackMetadata | None = None,
     ) -> CreatedLifecycleRun:
         """Atomically bind one idempotency key to one durable queued run."""
         from uuid import uuid4
@@ -405,6 +410,38 @@ class SQLiteRunRepository:
                         raise IdempotencyConflictError(
                             "Idempotency key is already bound to different input."
                         )
+                    if callback is not None:
+                        stored_callback = (
+                            row["callback_url"],
+                            row["callback_workflow_id"],
+                            row["callback_signal"],
+                        )
+                        submitted_callback = (
+                            callback.callback_url,
+                            callback.callback_workflow_id,
+                            callback.callback_signal,
+                        )
+                        if all(value is None for value in stored_callback):
+                            connection.execute(
+                                """
+                                UPDATE capability_run_lifecycle
+                                SET callback_url = ?, callback_workflow_id = ?,
+                                    callback_signal = ?, updated_at = ?
+                                WHERE run_id = ?
+                                """,
+                                (*submitted_callback, now, row["run_id"]),
+                            )
+                            self._create_callback_outbox_records(
+                                connection, now=now, run_id=row["run_id"]
+                            )
+                            row = connection.execute(
+                                "SELECT * FROM capability_run_lifecycle WHERE run_id = ?",
+                                (row["run_id"],),
+                            ).fetchone()
+                        elif stored_callback != submitted_callback:
+                            raise IdempotencyConflictError(
+                                "Idempotency key is already bound to different callback metadata."
+                            )
                     connection.commit()
                     return CreatedLifecycleRun(
                         run=_lifecycle_from_row(row), created=False
@@ -414,8 +451,9 @@ class SQLiteRunRepository:
                     INSERT INTO capability_run_lifecycle (
                         run_id, request_id, correlation_id, idempotency_key,
                         request_digest, request_json, status, progress_phase,
-                        progress_message, created_at, accepted_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, 'queued', 'queued', ?, ?, ?, ?)
+                        progress_message, created_at, accepted_at, updated_at,
+                        callback_url, callback_workflow_id, callback_signal
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'queued', 'queued', ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         effective_run_id,
@@ -428,6 +466,9 @@ class SQLiteRunRepository:
                         now,
                         now,
                         now,
+                        callback.callback_url if callback else None,
+                        callback.callback_workflow_id if callback else None,
+                        callback.callback_signal if callback else None,
                     ),
                 )
                 row = connection.execute(
@@ -519,6 +560,7 @@ class SQLiteRunRepository:
                         max_attempts,
                     ),
                 )
+                self._create_callback_outbox_records(connection, now=now)
                 row = connection.execute(
                     """
                     SELECT * FROM capability_run_lifecycle
@@ -766,6 +808,9 @@ class SQLiteRunRepository:
                                         ),
                 )
                 if canceled.rowcount == 1:
+                    self._create_callback_outbox_records(
+                        connection, now=now, run_id=run_id
+                    )
                     connection.commit()
                     return False
                 updated = connection.execute(
@@ -799,6 +844,10 @@ class SQLiteRunRepository:
                         now,
                     ),
                 )
+                if updated.rowcount == 1:
+                    self._create_callback_outbox_records(
+                        connection, now=now, run_id=run_id
+                    )
                 connection.commit()
                 return updated.rowcount == 1
         except (OSError, sqlite3.Error) as exc:
@@ -816,6 +865,7 @@ class SQLiteRunRepository:
         now = _utc_now()
         try:
             with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
                 updated = connection.execute(
                     """
                     UPDATE capability_run_lifecycle
@@ -877,6 +927,10 @@ class SQLiteRunRepository:
                         now,
                     ),
                 )
+                if updated.rowcount == 1:
+                    self._create_callback_outbox_records(
+                        connection, now=now, run_id=run_id
+                    )
                 connection.commit()
                 return updated.rowcount == 1
         except (OSError, sqlite3.Error) as exc:
@@ -934,6 +988,9 @@ class SQLiteRunRepository:
                             run_id,
                         ),
                     )
+                self._create_callback_outbox_records(
+                    connection, now=now, run_id=run_id
+                )
                 current = connection.execute(
                     "SELECT * FROM capability_run_lifecycle WHERE run_id = ?",
                     (run_id,),
@@ -943,6 +1000,134 @@ class SQLiteRunRepository:
             raise PersistenceError("Unable to cancel durable lifecycle run.") from exc
         assert current is not None
         return _lifecycle_from_row(current)
+
+    def list_due_callback_deliveries(
+        self, *, now: datetime, limit: int
+    ) -> tuple[CallbackDelivery, ...]:
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM callback_deliveries
+                    WHERE delivery_status IN ('pending', 'retry')
+                      AND next_attempt_at <= ?
+                    ORDER BY next_attempt_at, created_at, event_id
+                    LIMIT ?
+                    """,
+                    (now.astimezone(UTC).isoformat(), limit),
+                ).fetchall()
+        except (OSError, sqlite3.Error) as exc:
+            raise PersistenceError("Unable to list due callback deliveries.") from exc
+        return tuple(_callback_delivery_from_row(row) for row in rows)
+
+    def mark_callback_delivered(
+        self, event_id: str, *, delivered_at: datetime, status_code: int
+    ) -> None:
+        timestamp = delivered_at.astimezone(UTC).isoformat()
+        self._update_callback_delivery(
+            event_id,
+            """
+            UPDATE callback_deliveries
+            SET delivery_status = 'delivered', attempts = attempts + 1,
+                delivered_at = ?, last_status_code = ?, last_error_category = NULL,
+                updated_at = ?
+            WHERE event_id = ? AND delivery_status IN ('pending', 'retry')
+            """,
+            (timestamp, status_code, timestamp, event_id),
+        )
+
+    def reschedule_callback_delivery(
+        self,
+        event_id: str,
+        *,
+        attempts: int,
+        next_attempt_at: datetime,
+        status_code: int | None,
+        error_category: str,
+    ) -> None:
+        timestamp = datetime.now(UTC).isoformat()
+        self._update_callback_delivery(
+            event_id,
+            """
+            UPDATE callback_deliveries
+            SET delivery_status = 'retry', attempts = ?, next_attempt_at = ?,
+                last_status_code = ?, last_error_category = ?, updated_at = ?
+            WHERE event_id = ? AND delivery_status IN ('pending', 'retry')
+            """,
+            (
+                attempts,
+                next_attempt_at.astimezone(UTC).isoformat(),
+                status_code,
+                error_category,
+                timestamp,
+                event_id,
+            ),
+        )
+
+    def mark_callback_configuration_failed(
+        self,
+        event_id: str,
+        *,
+        attempts: int,
+        failed_at: datetime,
+        status_code: int | None,
+        error_category: str,
+    ) -> None:
+        timestamp = failed_at.astimezone(UTC).isoformat()
+        self._update_callback_delivery(
+            event_id,
+            """
+            UPDATE callback_deliveries
+            SET delivery_status = 'configuration-failed', attempts = ?,
+                configuration_failed_at = ?, last_status_code = ?,
+                last_error_category = ?, updated_at = ?
+            WHERE event_id = ? AND delivery_status IN ('pending', 'retry')
+            """,
+            (attempts, timestamp, status_code, error_category, timestamp, event_id),
+        )
+
+    def _update_callback_delivery(
+        self, event_id: str, statement: str, parameters: tuple
+    ) -> None:
+        del event_id
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.execute(statement, parameters)
+                connection.commit()
+        except (OSError, sqlite3.Error) as exc:
+            raise PersistenceError("Unable to update callback delivery state.") from exc
+
+    @staticmethod
+    def _create_callback_outbox_records(
+        connection: sqlite3.Connection, *, now: str, run_id: str | None = None
+    ) -> None:
+        run_filter = "AND run_id = ?" if run_id is not None else ""
+        parameters: tuple[str, ...] = (now, now, now) + (
+            (run_id,) if run_id else ()
+        )
+        connection.execute(
+            f"""
+            INSERT OR IGNORE INTO callback_deliveries (
+                event_id, run_id, callback_url, callback_workflow_id,
+                callback_signal, capability, request_id, correlation_id,
+                terminal_status, delivery_status, attempts, next_attempt_at,
+                created_at, updated_at
+            )
+            SELECT 'control-translation:' || run_id || ':terminal:v1', run_id,
+                callback_url, callback_workflow_id, callback_signal,
+                'control-translation', request_id, correlation_id, status,
+                'pending', 0, ?, ?, ?
+            FROM capability_run_lifecycle
+            WHERE status IN ('completed', 'failed', 'canceled')
+              AND callback_url IS NOT NULL
+              AND callback_workflow_id IS NOT NULL
+              AND callback_signal IS NOT NULL
+              {run_filter}
+            """,
+            parameters,
+        )
 
 
 def _utc_now() -> str:
@@ -987,4 +1172,29 @@ def _lifecycle_from_row(row: sqlite3.Row) -> LifecycleRun:
         worker_id=row["worker_id"],
         attempt_number=row["attempt_number"],
         publication_state=row["publication_state"],
+        callback=(
+            CallbackMetadata(
+                callback_url=row["callback_url"],
+                callback_workflow_id=row["callback_workflow_id"],
+                callback_signal=row["callback_signal"],
+            )
+            if row["callback_url"]
+            else None
+        ),
+    )
+
+
+def _callback_delivery_from_row(row: sqlite3.Row) -> CallbackDelivery:
+    return CallbackDelivery(
+        event_id=row["event_id"],
+        callback_url=row["callback_url"],
+        callback_workflow_id=row["callback_workflow_id"],
+        callback_signal=row["callback_signal"],
+        capability=row["capability"],
+        request_id=row["request_id"],
+        correlation_id=row["correlation_id"],
+        run_id=row["run_id"],
+        terminal_status=row["terminal_status"],
+        attempts=row["attempts"],
+        next_attempt_at=datetime.fromisoformat(row["next_attempt_at"]),
     )

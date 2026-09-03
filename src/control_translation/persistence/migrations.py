@@ -155,4 +155,41 @@ MIGRATIONS: tuple[tuple[int, str, str], ...] = (
             ON capability_run_lifecycle(publication_state, status, lease_expires_at);
         """,
     ),
+    (
+        4,
+        "durable_terminal_callback_outbox",
+        """
+        ALTER TABLE capability_run_lifecycle ADD COLUMN callback_url TEXT;
+        ALTER TABLE capability_run_lifecycle ADD COLUMN callback_workflow_id TEXT;
+        ALTER TABLE capability_run_lifecycle ADD COLUMN callback_signal TEXT;
+
+        CREATE TABLE callback_deliveries (
+            event_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL UNIQUE,
+            callback_url TEXT NOT NULL,
+            callback_workflow_id TEXT NOT NULL,
+            callback_signal TEXT NOT NULL,
+            capability TEXT NOT NULL,
+            request_id TEXT NOT NULL,
+            correlation_id TEXT NOT NULL,
+            terminal_status TEXT NOT NULL CHECK (
+                terminal_status IN ('completed', 'failed', 'canceled')
+            ),
+            delivery_status TEXT NOT NULL CHECK (
+                delivery_status IN ('pending', 'retry', 'delivered', 'configuration-failed')
+            ),
+            attempts INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at TEXT NOT NULL,
+            delivered_at TEXT,
+            configuration_failed_at TEXT,
+            last_status_code INTEGER,
+            last_error_category TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (run_id) REFERENCES capability_run_lifecycle(run_id) ON DELETE CASCADE
+        );
+        CREATE INDEX ix_callback_deliveries_due
+            ON callback_deliveries(delivery_status, next_attempt_at, created_at);
+        """,
+    ),
 )
