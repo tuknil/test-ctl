@@ -361,6 +361,12 @@ def test_field_presence_requires_a_pure_request_body_field_predicate():
     assert not _artifact_blocks_json_field_presence(narrow_value, "node_options")
 
 
+def test_field_presence_parser_rejects_long_unterminated_escape_sequence():
+    malformed = 'SecRule REQUEST_BODY "@rx node_options' + ("\\" * 20_000)
+
+    assert not _artifact_blocks_json_field_presence(malformed, "node_options")
+
+
 def test_json_body_feature_safely_declines_parser_recursion_limit():
     body = '{"nested":' * 1200 + '"value"' + "}" * 1200
     context = ProofLoopRequestContext(

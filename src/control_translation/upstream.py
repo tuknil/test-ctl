@@ -440,7 +440,7 @@ def _artifact_blocks_json_field_presence(artifact_content: str, field: str) -> b
         re.IGNORECASE,
     )
     request_body_rx = re.compile(
-        r'^\s*SecRule\s+REQUEST_BODY\s+"@rx\s+((?:\\.|[^"])*)"\s+"',
+        r'^\s*SecRule\s+REQUEST_BODY\s+"@rx\s+((?:\\.|[^"\\])*)"\s+"',
         re.IGNORECASE,
     )
     for line in artifact_content.splitlines():
