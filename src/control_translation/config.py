@@ -45,6 +45,7 @@ class Settings(BaseModel):
     databricks_catalog: str = "36889_janus_dev"
     databricks_schema: str = "control_translation"
     databricks_results_table: str = "control_translation_results"
+    require_upstream_reader_ready: bool = False
     worker_poll_seconds: float = 0.25
     worker_lease_seconds: int = 30
     worker_heartbeat_seconds: float = 5.0
@@ -205,6 +206,9 @@ def get_settings() -> Settings:
         databricks_results_table=os.getenv(
             "DATABRICKS_RESULTS_TABLE", "control_translation_results"
         ),
+        require_upstream_reader_ready=os.getenv(
+            "REQUIRE_UPSTREAM_READER_READY", "false"
+        ).strip().lower() in {"1", "true", "yes", "on"},
         worker_poll_seconds=float(os.getenv("WORKER_POLL_SECONDS", "0.25")),
         worker_lease_seconds=int(os.getenv("WORKER_LEASE_SECONDS", "30")),
         worker_heartbeat_seconds=float(

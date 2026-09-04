@@ -532,9 +532,15 @@ class OrchestrationUpstreamInput(StrictRequestModel):
     result_id: str = Field(min_length=1, max_length=512)
     terminal_state: str = Field(min_length=1, max_length=128)
     status: Literal["completed"]
+    request_id: str | None = Field(default=None, min_length=1, max_length=512)
     correlation_id: str = Field(min_length=1, max_length=255)
     result_ref: DatabricksResultReference
     evidence_refs: list[str] = Field(default_factory=list)
+    content_sha256: str | None = Field(
+        default=None, pattern=r"^sha256:[a-f0-9]{64}$"
+    )
+    size_bytes: int | None = Field(default=None, ge=1, le=200 * 1024 * 1024)
+    created_at: datetime | None = None
 
     @model_validator(mode="after")
     def validate_completion(self) -> OrchestrationUpstreamInput:
@@ -571,11 +577,62 @@ class OrchestrationUpstreamInput(StrictRequestModel):
             )
         if self.result_ref.key != self.result_id:
             raise ValueError("result_ref.key must equal result_id")
+        approved_references = {
+            "defense-generation": (
+                "defense-generation-result:",
+                "36889_janus_dev",
+                "defense_generation",
+                "defense_generation_results",
+            ),
+            "mitigation-check": (
+                "mitigation-check-result:",
+                "36889_janus_dev",
+                "mitigation-check",
+                "mitigation_check",
+            ),
+            "bypass-validation": (
+                "bypass-validation-result:",
+                "36889_janus_dev",
+                "bypass_validation",
+                "bypass_validation_results",
+            ),
+        }
+        prefix, catalog, schema, table = approved_references[self.capability]
+        if not self.result_id.startswith(prefix):
+            raise ValueError(
+                f"{self.capability} result_id has an invalid identity"
+            )
+        if (
+            self.result_ref.catalog,
+            self.result_ref.schema_name,
+            self.result_ref.table,
+        ) != (catalog, schema, table):
+            raise ValueError(
+                f"{self.capability} result_ref does not identify the approved table"
+            )
         if any(not reference for reference in self.evidence_refs):
             raise ValueError("evidence references cannot be empty")
         if len(self.evidence_refs) != len(set(self.evidence_refs)):
             raise ValueError("evidence references must be unique")
+        bounded = (self.content_sha256, self.size_bytes, self.created_at)
+        if any(value is not None for value in bounded) and (
+            self.request_id is None
+            or not all(value is not None for value in bounded)
+        ):
+            raise ValueError(
+                "strict upstream locator requires request_id, content_sha256, "
+                "size_bytes, and created_at"
+            )
         return self
+
+    @property
+    def is_strict_locator(self) -> bool:
+        return (
+            self.request_id is not None
+            and self.content_sha256 is not None
+            and self.size_bytes is not None
+            and self.created_at is not None
+        )
 
 
 class OrchestrationRoutingContext(StrictRequestModel):
@@ -632,15 +689,14 @@ class InvokeRequestEnvelope(StrictRequestModel):
 
     @model_validator(mode="after")
     def validate_reference_routing(self) -> InvokeRequestEnvelope:
-        orchestration_fields_present = any(
+        locator_mode = any(
             value is not None
             for value in (
-                self.contract_id,
                 self.upstream_inputs,
                 self.routing_context,
             )
         )
-        if orchestration_fields_present:
+        if locator_mode:
             if not all(
                 value is not None
                 for value in (
@@ -664,6 +720,11 @@ class InvokeRequestEnvelope(StrictRequestModel):
             inputs = {item.capability: item for item in self.upstream_inputs}
             if len(inputs) != 3:
                 raise ValueError("orchestration upstream capabilities must be unique")
+            strict_modes = [item.is_strict_locator for item in self.upstream_inputs]
+            if any(strict_modes) and not all(strict_modes):
+                raise ValueError(
+                    "strict locator mode requires bounded metadata for all upstream inputs"
+                )
             assert self.correlation_id is not None
             if any(
                 item.correlation_id != self.correlation_id

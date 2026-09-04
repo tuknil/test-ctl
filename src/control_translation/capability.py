@@ -454,6 +454,14 @@ def invoke_envelope(
                 expected_candidate_id=(
                     envelope.subject.candidate_id if envelope.subject else None
                 ),
+                immutable_locators=(
+                    tuple(envelope.upstream_inputs)
+                    if envelope.upstream_inputs is not None
+                    and all(
+                        item.is_strict_locator for item in envelope.upstream_inputs
+                    )
+                    else None
+                ),
                 cancellation_signal=cancellation_signal,
             )
         except UpstreamResolutionError as exc:

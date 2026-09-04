@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from control_translation import api as api_module
 from control_translation.api import app
+from control_translation.config import Settings
 from control_translation.persistence import PersistenceError
 
 client = TestClient(app)
@@ -401,6 +402,24 @@ def test_readiness_fails_when_storage_is_unavailable(monkeypatch):
 
     assert response.status_code == 503
     assert response.json()["detail"]["storage"] == "unavailable"
+
+
+def test_readiness_optionally_requires_upstream_reader(monkeypatch):
+    class UnavailableResolver:
+        def healthcheck(self):
+            return False
+
+    monkeypatch.setattr(
+        api_module,
+        "get_settings",
+        lambda: Settings(require_upstream_reader_ready=True),
+    )
+    monkeypatch.setattr(api_module, "_UPSTREAM_RESOLVER", UnavailableResolver())
+
+    response = client.get("/ready")
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["upstream_reader"] == "unavailable"
 
 
 def test_get_run_missing_returns_404():

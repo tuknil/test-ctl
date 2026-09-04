@@ -771,6 +771,20 @@
           "title": "Status",
           "type": "string"
         },
+        "request_id": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Request Id"
+        },
         "correlation_id": {
           "maxLength": 255,
           "minLength": 1,
@@ -786,6 +800,46 @@
           },
           "title": "Evidence Refs",
           "type": "array"
+        },
+        "content_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^sha256:[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Content Sha256"
+        },
+        "size_bytes": {
+          "anyOf": [
+            {
+              "maximum": 209715200,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Size Bytes"
+        },
+        "created_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Created At"
         }
       },
       "required": [

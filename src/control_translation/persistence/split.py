@@ -5,7 +5,11 @@ from __future__ import annotations
 from datetime import datetime
 
 from control_translation.callbacks import CallbackDelivery, CallbackMetadata
-from control_translation.contracts import InvokeRequestEnvelope, ResultEnvelope, RunFailure
+from control_translation.contracts import (
+    InvokeRequestEnvelope,
+    ResultEnvelope,
+    RunFailure,
+)
 from control_translation.persistence.base import (
     CreatedLifecycleRun,
     IdempotencyRecord,
@@ -33,7 +37,10 @@ class SplitRunRepository:
         self.result_sink.initialize()
 
     def healthcheck(self) -> bool:
-        return self.lifecycle.healthcheck() and self.result_sink.healthcheck()
+        # Liveness/readiness covers the local lifecycle coordinator only.
+        # Databricks publication failures are handled by the durable outbox and
+        # must not remove an otherwise healthy worker from service.
+        return self.lifecycle.healthcheck()
 
     def save_completed_run(
         self,

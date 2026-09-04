@@ -162,6 +162,7 @@ model ID, or API key is hardcoded in application code or the image.
 | `AZURE_OPENAI_API_VERSION` | Azure live | Provider API version |
 | `MODEL_REQUEST_TIMEOUT_SECONDS` | No | Model timeout, `1-300`; default `60` |
 | `PERSISTENCE_BACKEND` | No | `sqlite` (default) or `databricks` |
+| `REQUIRE_UPSTREAM_READER_READY` | No | `false` by default; when true, `/ready` also probes the configured Databricks upstream SQL reader |
 | `DATABASE_PATH` | No | SQLite file path; default `./data/control_translation.db` |
 | `DATABRICKS_SERVER_HOSTNAME` | Databricks | SQL workspace hostname (without `https://`) |
 | `DATABRICKS_HTTP_PATH` | Databricks | SQL warehouse HTTP path |
