@@ -222,15 +222,6 @@ def test_list_runs_empty_page_is_well_formed():
     }
 
 
-def test_demo_ui_contains_durable_runs_dashboard():
-    response = client.get("/")
-
-    assert response.status_code == 200
-    assert 'id="runsDashboard"' in response.text
-    assert 'id="runsTableBody"' in response.text
-    assert "Stored runs and translations" in response.text
-
-
 def test_correlation_id_is_preserved():
     body = _request_body("akamai-waf", "akamai-policy:example:rev-17")
     body["correlation_id"] = "corr-api-test"
@@ -371,23 +362,6 @@ def test_ui_diagnostic_never_returns_root_cause_text(monkeypatch):
     assert "do-not-display" not in response.text
     assert "internal.example" not in response.text
     assert "unstructured-secret-phrase" not in response.text
-
-
-def test_ui_app_renders_diagnostic_log():
-    response = client.get("/app.js")
-
-    assert response.status_code == 200
-    assert "Diagnostic log" in response.text
-    assert "Root cause" in response.text
-    assert "server/container log" in response.text
-
-
-def test_ui_app_renders_candidate_artifact_and_limitations():
-    response = client.get("/app.js")
-
-    assert response.status_code == 200
-    assert "candidate.candidate_artifact.content_ref" in response.text
-    assert "candidate.limitations" in response.text
 
 
 def test_readiness_fails_when_storage_is_unavailable(monkeypatch):

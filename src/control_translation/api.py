@@ -4,6 +4,10 @@ Endpoints follow the standard Janus capability-POC invocation surface:
 GET /health, GET /schema, POST /invoke, GET /runs/{run_id}. Swagger UI is
 available at /docs and the raw OpenAPI schema at /openapi.json (both
 provided automatically by FastAPI).
+
+This service is API-only. The demo UI is a separate deployable
+(`control_translation_ui`) that calls this API cross-origin from the browser,
+so browser access requires `CORS_ALLOWED_ORIGINS` to name the UI's origin.
 """
 
 from __future__ import annotations
@@ -11,7 +15,6 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from pathlib import Path
 from time import perf_counter
 from typing import Any
 from uuid import uuid4
@@ -22,8 +25,8 @@ from fastapi.exception_handlers import (
     request_validation_exception_handler,
 )
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from control_translation import capability
@@ -115,6 +118,18 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+if _SETTINGS.cors_allowed_origins:
+    # The demo UI runs on its own origin. Nothing here is credentialed: the
+    # API takes no cookies or browser auth, so credentials stay disallowed.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(_SETTINGS.cors_allowed_origins),
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["content-type", "idempotency-key", "x-correlation-id"],
+        max_age=600,
+    )
+
 
 @app.exception_handler(RequestValidationError)
 async def lifecycle_validation_error(request: Request, exc: RequestValidationError):
@@ -167,9 +182,6 @@ async def lifecycle_unhandled_error(request: Request, exc: Exception):
         )
     raise exc
 
-_UI_DIR = Path(__file__).resolve().parents[2] / "ui"
-
-
 @app.middleware("http")
 async def log_request_lifecycle(request: Request, call_next):
     """Log every HTTP request outcome without logging headers or query values."""
@@ -220,6 +232,25 @@ async def log_request_lifecycle(request: Request, call_next):
         (perf_counter() - started) * 1000,
     )
     return response
+
+
+@app.get("/")
+def service_descriptor() -> dict[str, Any]:
+    """Identify this service. The demo UI is deployed separately."""
+    return {
+        "service": "control-translation",
+        "contract_id": "control-translation@1.0",
+        "role": "api",
+        "docs": "/docs" if _SETTINGS.enable_docs else None,
+        "endpoints": [
+            "/health",
+            "/ready",
+            "/inference",
+            "/schema",
+            "/invoke",
+            "/v1/control-translation-runs",
+        ],
+    }
 
 
 @app.get("/health")
@@ -726,6 +757,3 @@ def _log_invocation_result(result: ResultEnvelope, *, source: str) -> None:
         diagnostic_json(result),
     )
 
-
-if _UI_DIR.exists():
-    app.mount("/", StaticFiles(directory=str(_UI_DIR), html=True), name="ui")

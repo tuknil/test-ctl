@@ -1,0 +1,18 @@
+# Runtime dependencies for the demo UI service image.
+#
+# This sits at the repository root, not under deploy/, because .gitignore
+# carries `Deploy/` for a local Azure bundle and that matches `deploy/` on
+# case-insensitive filesystems -- a build input placed there would be silently
+# untracked and the image would fail to build from a clean clone.
+#
+# The UI service serves static files and one generated config file. It must
+# NOT carry the capability API's model or Databricks dependencies, so it is
+# installed from this minimal list instead of the full distribution.
+#
+# These constraints mirror pyproject.toml exactly and
+# tests/test_ui_service.py::test_ui_requirements_match_pyproject fails if they
+# drift.
+fastapi>=0.116,<1
+pydantic>=2.8,<3
+python-dotenv>=1.0,<2
+uvicorn>=0.30,<1

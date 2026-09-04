@@ -14,7 +14,7 @@ import re
 from hashlib import sha256
 from uuid import uuid4
 
-from control_translation.adapters import get_adapter
+from control_translation.adapters import ADAPTER_REGISTRY, get_adapter
 from control_translation.agents.translation_agent import (
     TranslationDoer,
     build_translation_doer,
@@ -174,14 +174,18 @@ def invoke(
     target_technology = target_context.target_technology
     assert target_technology is not None
 
-    # Gate 1: scope-declined -- invalid/malformed target technology.
+    # Gate 1: scope-declined -- a target this deployment does not carry.
+    #
+    # CFS: scope-declined is "valid target outside configured coverage".
+    # cannot-express is for a target that cannot represent the pattern, which
+    # is a different question and is decided further down by the adapter.
     adapter = get_adapter(target_technology)
     if adapter is None:
         result = _build_result(
             request,
             TerminalState.SCOPE_DECLINED,
             OutcomeReasonCode.INVALID_INPUT,
-            detail=f"Target technology '{target_technology}' is outside configured coverage.",
+            detail=_unsupported_target_detail(target_technology),
             configured_poc_defaults_used=configured_poc_defaults_used,
             proof_loop_qualification=proof_loop_qualification,
         )
@@ -625,6 +629,19 @@ def decline_direct_bypass(
                 ),
             }
         }
+    )
+
+
+def _unsupported_target_detail(target_technology: str) -> str:
+    """Explain the decline in terms the caller can act on.
+
+    The state is scope-declined either way; the detail says whether the target
+    is outside this deployment's coverage or not a capability target at all.
+    """
+    supported = ", ".join(ADAPTER_REGISTRY)
+    return (
+        f"Target technology '{target_technology}' is outside configured coverage. "
+        f"This deployment translates only to {supported}."
     )
 
 

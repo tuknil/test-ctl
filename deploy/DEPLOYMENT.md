@@ -6,9 +6,14 @@ This repository is ready to deploy as a **controlled internal POC/demo service**
 It is not approved for unrestricted production or direct Internet exposure.
 See [Production gaps](#12-production-gaps-before-general-availability) before promoting it beyond an internal environment.
 
-The service:
+This repository now builds **two images**: the capability API
+(`Dockerfile`) and the demo UI (`Dockerfile.ui`). They deploy, scale, and
+roll back independently. Everything in this runbook applies to the API unless
+a section says otherwise; the UI is covered in §2.1, §3.1, and §4.4.
 
-- exposes a FastAPI API and static demo UI;
+The API service:
+
+- exposes the FastAPI capability API (the demo UI is a separate service);
 - supports deterministic fixture mode and live model mode;
 - fetches exact Defense Generation, Mitigation Check, and Bypass Validation
   records from Unity Catalog for orchestration requests;
@@ -43,7 +48,31 @@ The image:
 - starts with `python -m control_translation`;
 - reads its bind host and port from environment variables;
 - does not copy `.env`, tests, local virtual environments, caches, or credentials;
+- no longer ships the `ui/` directory;
 - performs a container health check against `/ready`.
+
+### 2.1 Demo UI image
+
+```bash
+podman build --format docker --file Dockerfile.ui \
+  --secret id=pip_conf,src="$HOME/.pip/pip.conf" \
+  --build-arg BASE_IMAGE=artifact.it.att.com/apm0014313-dkr-attcc-stage/python3.12-slim-instantclient:21_7.sshtest0.1 \
+  --tag <registry>/control-translation-ui:<version> .
+podman push <registry>/control-translation-ui:<version>
+```
+
+The UI image:
+
+- starts with `python -m control_translation_ui`;
+- installs only `ui-requirements.txt` — no model client and no
+  Databricks driver, so its dependency surface is a fraction of the API's;
+- ships the static `ui/` directory and serves one generated file,
+  `/config.js`, carrying `API_ENDPOINT`;
+- holds no capability state and needs no volume, so it scales horizontally;
+- performs a container health check against `/ready`.
+
+The shared monorepo CI pipeline currently builds only the API image. See the
+note in `.github/variables/apps.yaml` before registering the UI image.
 
 ## 3. Ports and routes
 
@@ -55,8 +84,21 @@ The image:
 | Readiness | `GET /ready` |
 | API invocation | `POST /invoke` |
 | Swagger | `GET /docs` when `ENABLE_DOCS=true` |
+| Service descriptor | `GET /` (JSON; the demo UI is no longer served here) |
+
+### 3.1 Demo UI ports and routes
+
+| Item | Value |
+|---|---|
+| Container port | `8080` by default; configurable with `UI_PORT` |
+| Liveness | `GET /health` |
+| Readiness | `GET /ready` (reports the resolved API endpoint) |
 | Demo UI | `GET /` |
 | Team flow page | `GET /demo.html` |
+| Browser runtime config | `GET /config.js` (`Cache-Control: no-store`) |
+
+The browser calls the API **directly** from the UI's origin. No API traffic
+passes through the UI service.
 
 Recommended probes:
 
@@ -153,6 +195,37 @@ Only configure the selected provider:
 | AT&T Inference | `MODEL_PROVIDER=att-inference`, `MODEL_NAME`, `ATT_INFERENCE_BASE_URL`, secret `ATT_INFERENCE_API_KEY` |
 
 Never set multiple provider API keys unless required by the approved platform design.
+
+### 4.4 Browser access and the demo UI service
+
+Two settings must agree, and both are written **as the browser resolves them**,
+never as internal platform DNS:
+
+| Service | Variable | Value |
+|---|---|---|
+| API | `CORS_ALLOWED_ORIGINS` | the UI's public origin, e.g. `https://control-translation-ui.example.com`. Comma-separated for several. No path, no trailing slash, and `*` is rejected |
+| UI | `API_ENDPOINT` | the API's public base URL, e.g. `https://control-translation.example.com` |
+
+`CORS_ALLOWED_ORIGINS` is empty by default, which blocks all browser access to
+the API. A wrong or missing value shows as a working UI page whose every call
+fails in the browser console; check it first when the demo page loads but stays
+empty.
+
+If both services sit behind one gateway hostname (`/` to the UI, the API paths
+to the API), set `API_ENDPOINT=` empty instead and leave
+`CORS_ALLOWED_ORIGINS` unset — the browser then stays same-origin.
+
+The complete UI deployment configuration is:
+
+```text
+API_ENDPOINT=<PUBLIC_API_BASE_URL>
+UI_HOST=0.0.0.0
+UI_PORT=8080
+```
+
+The UI service takes **no secrets**. Do not attach the API's secret store, the
+Databricks service principal, or the model key to a UI deployment; it has no
+code path that could use them.
 
 ## 5. Secret handling requirements
 
@@ -285,6 +358,10 @@ Expected checks:
   `reference_bundle`;
 - exhaustion retains `bypass-found` and reports `bypass_cleared=false`;
 - a successful live request reports `llm_invoked: true`;
+- the UI service returns `{"status":"ready","api_endpoint":"<PUBLIC_API_BASE_URL>"}`
+  from `GET /ready`, and `GET /config.js` publishes that same endpoint;
+- loading the UI in a browser fills the **Inference runtime** card, which
+  proves the cross-origin call to the API succeeded;
 - a request that omits `request_id` is assigned a non-null server-generated ID
   before the Databricks write;
 - container logs report `Invocation durably persisted` for the smoke request;
@@ -347,6 +424,9 @@ A `translated` response means the candidate passed the validators currently impl
 ## 13. DevOps handoff checklist
 
 - [ ] Immutable image built, tested, scanned, and pushed
+- [ ] Demo UI image built from `Dockerfile.ui`, scanned, and pushed
+- [ ] `API_ENDPOINT` (UI) and `CORS_ALLOWED_ORIGINS` (API) set to the public
+      origins and verified from a browser
 - [ ] Internal ingress/gateway configured
 - [ ] TLS and caller authentication enabled
 - [ ] Rate and request-size limits enabled

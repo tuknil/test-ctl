@@ -64,10 +64,13 @@ flowchart LR
   G --> P
   S --> H{Scope and context valid?}
   H -- No --> I[Typed declined result\nNo LLM call]
-  H -- Yes --> J{RUN_MODE}
+  H -- Yes --> T{Akamai: can the proven rule\nbe compiled in code?}
+  T -- Yes --> U[Deterministic ModSecurity\nto Akamai compiler\nNo LLM call]
+  T -- No --> J{RUN_MODE}
   J -- live --> K[LLM proposes candidate]
   J -- fixture --> L[Local template proposes candidate]
-  K --> M[Deterministic syntax validation]
+  U --> M[Deterministic syntax validation]
+  K --> M
   L --> M
   M --> N[Policy conflict check]
   N --> O[Reviewable result\nNever auto-deployed]
@@ -80,7 +83,9 @@ It never selects a conveniently recent row and never changes upstream data.
 
 ## What is sent to the LLM
 
-Only live mode calls a model. The server sends:
+A model is called only when live mode is configured *and* no deterministic
+path can express the proven pattern (see **Default Akamai execution path**).
+When one is called, the server sends:
 
 - target technology and expected artifact type;
 - the proven discriminator description and mitigation summary;
@@ -109,19 +114,149 @@ sequenceDiagram
   API-->>Caller: Typed result + inference evidence
 ```
 
+## Default Akamai execution path
+
+For `akamai-waf`, the candidate is derived from the authoritative upstream
+records **in code**. The translation doer -- the fixture template or the live
+LLM -- is a fallback, not the primary path. `translation/engine.py` tries these
+in order and stops at the first one that can express the proven pattern:
+
+| Order | `proposal_source` | Source of truth |
+|---|---|---|
+| 1 | `deterministic-json-body-field` | the JSON request field uniquely corroborated by Mitigation Check |
+| 2 | `deterministic-anchored-literal` | an anchored literal named-argument value in the proven rule |
+| 3 | `deterministic-form-body` | the authoritative proven form request body |
+| 4 | `deterministic-modsec-rule` | **general compilation of the proven ModSecurity rule itself** |
+| 5 | `translation-doer` | fixture template or live LLM |
+
+Rows 1-3 handle specific high-fidelity shapes. Row 4,
+`translation/modsec_akamai.py`, is the general path: the proven
+`SecRule` carried in the defense-generation artifact is parsed and compiled
+into the Akamai custom-rule JSON documented in `docs/syntexresearch.md`.
+Every result reports which path ran in `inference.proposal_source`, and the
+demo UI shows it next to `llm_invoked`.
+
+### What the compiler maps
+
+| ModSecurity | Akamai condition |
+|---|---|
+| `ARGS`, `ARGS_POST`, `REQUEST_BODY` | `argsPostMatch` |
+| `ARGS_GET`, `QUERY_STRING` | `uriQueryMatch` |
+| `XML` | `argsPostXMLMatch` |
+| `REQUEST_HEADERS:Name` / `REQUEST_HEADERS` | `requestHeaderValueMatch` / `requestHeaderMatch` |
+| `REQUEST_URI`, `REQUEST_URI_RAW`, `REQUEST_FILENAME` | `pathMatch` |
+| `REQUEST_COOKIES` | `cookieMatch` |
+| `REQUEST_METHOD` | `requestMethodMatch` |
+| `REMOTE_ADDR` (with `@ipMatch`) | `ipMatch` |
+
+Operators: `@rx`, `@contains`, `@beginsWith`, `@endsWith`, `@streq`, `@eq`,
+`@within`, `@pm`, `@ipMatch`, each with `!` negation mapping to
+`positiveMatch: false`. Alternative variables (`A|B`) become an `OR` rule;
+`chain`ed directives become an `AND` rule.
+
+`@rx` arguments are compiled into Akamai wildcard values: anchors decide
+whether the value is wrapped in `*`, alternations and small character classes
+are expanded into separate values, and `.`/`.*` become `?`/`*`. Pure-literal
+body, query, and path values also carry their URL-encoded, plus-encoded, and
+double-encoded transport forms, because the edge sees the request before
+ModSecurity's decoding transformations.
+
+### Encoding ladders
+
+Defense generation often enumerates recursive URL-encodings of a single
+character per alternation group:
+
+```
+person(?:\[|%5B|%255B|%25255B|%2525255B|%252525255B|%25252525255B)0(?:\]|%5D|...)...
+```
+
+Akamai `value` entries are flat wildcard strings with no alternation, so
+expanding five such groups positionally is a cross-product — 7^5 = 16,807
+values, past the 32-value cap — and the rule would decline.
+
+The compiler recognizes a group whose every branch is the previous branch
+URL-encoded once more, and aligns all such groups to a common depth. Real
+traffic encodes a value uniformly; one with `[` raw but `]` double-encoded is
+not worth enumerating. The result is one value per depth, seven instead of
+16,807, and every emitted value is one the source rule matches — so the
+candidate is a strict subset and can never over-block.
+
+Ladders of differing lengths have no common depth to align on and decline
+rather than guess; an ordinary alternation is not a ladder and still expands
+normally; and alignment does not lift the value cap.
+
+### What it refuses
+
+The compiler declines -- and the request falls back to the doer -- rather than
+guess. Counted repetition (`{n,m}`), lookarounds, backreferences, quantified
+multi-character groups, regex variable selectors, unlisted collections and
+operators, implicit operators, expansions past 32 values, and any literal `*`
+or `?` colliding with wildcard matching all decline.
+
+### Fidelity labels
+
+A mapping that preserves the source match set is labeled `equivalent`. When a
+construct has no wildcard image -- `\s`, `\d`, `\w`, negated or large
+character classes, `\b`, a quantified literal -- it is generalized to a
+wildcard and the candidate is labeled `narrower`, with an explicit limitation
+recording that generalization **can match a broader set of requests than the
+source rule** and requires operator collateral-impact review. As everywhere
+else in this service, the candidate is shape-validated only, carries no
+embedded action, and is never auto-deployed.
+
 ## What is real vs. fixture-backed
 
 - **Real:** FastAPI HTTP surface, Pydantic contracts, exact Databricks SQL
   reads from three upstream result tables, cross-record lineage and route
   validation, SQLite/Databricks result persistence, terminal-state routing,
-  deterministic syntax/conflict gates, and (when `RUN_MODE=live`) a real model
-  call. AT&T Inference uses its OpenAI-compatible HTTP API; other configured
+  deterministic syntax/conflict gates, the ModSecurity-to-Akamai custom-rule
+  compiler, and (when `RUN_MODE=live` and no deterministic path applies) a real
+  model call. AT&T Inference uses its OpenAI-compatible HTTP API; other configured
   providers use Pydantic AI.
 - **Fixture-backed:** policy snapshot reads (no live Akamai/Palo
   Alto/SentinelOne API access), legacy direct-input samples, and the default
   `FixtureTranslationDoer`.
 
 See `docs/assumptions-and-followups.md` for the full list and backlog.
+
+## Services
+
+This repository builds **three deployables**:
+
+| Service | Module | Image | Default port | Holds |
+|---|---|---|---|---|
+| Capability API (Python) | `control_translation` | `Dockerfile` | 8000 | contracts, upstream reads, translation, persistence, credentials |
+| Capability API (Go, lean) | `go-api` | `go-api/Dockerfile` | 8000 | the ModSecurity→Akamai compiler, sync + async routes, Databricks results |
+| Demo UI | `control_translation_ui` | `Dockerfile.ui` | 8080 | static assets only — no credentials, no capability state |
+
+The Go service exists because **the Python service is being phased out**. It is
+deliberately lean: one execution path (read the proven ModSecurity rule from
+the Defense Generation row the request names, compile it into an Akamai custom
+rule), one target technology, and the same persistence split as the Python
+service — SQLite coordinates the asynchronous lifecycle queue, Databricks
+stores the immutable results.
+
+`go-api/README.md` lists exactly what was removed and what has and has not been
+verified. In short: the compiler is pinned byte-for-byte to the Python
+service's output, the HTTP surface, the upstream reader and the lifecycle are
+tested against an in-process fake workspace, and **nothing has been run against
+a live Databricks workspace**.
+
+The browser loads the page from the UI service and calls the API **directly**.
+The UI service carries no API traffic. Two settings must therefore agree, and
+both are expressed as the *browser* sees them, never as internal service DNS:
+
+- UI `API_ENDPOINT` — the API's browser-reachable base URL. It is published to
+  the page at `/config.js`, so it must never be an internal-only hostname.
+- API `CORS_ALLOWED_ORIGINS` — the UI's origin. It is empty by default, which
+  means no browser may call the API at all.
+
+```mermaid
+flowchart LR
+  B[Browser] -->|GET / and /config.js| U[UI service :8080\nAPI_ENDPOINT]
+  B -->|POST /invoke, GET /inference, /v1/runs| A[API service :8000\nCORS_ALLOWED_ORIGINS]
+  O[Janus orchestration] -->|POST /v1/control-translation-runs| A
+```
 
 ## Install & run
 
@@ -130,12 +265,34 @@ Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 ```bash
 uv sync
 uv run pytest -q
-uv run uvicorn control_translation.api:app --reload
 ```
 
-Then open http://127.0.0.1:8000/ for the demo UI, or
-http://127.0.0.1:8000/docs for Swagger UI. The team flow guide is at
-http://127.0.0.1:8000/demo.html.
+Run the services in separate terminals:
+
+```bash
+uv run uvicorn control_translation.api:app --reload --port 8000
+```
+
+Or run the lean Go service instead (it needs real `DATABRICKS_*` settings and a
+writable `DATABASE_PATH`, or `/ready` fails):
+
+```bash
+cd go-api && go test ./... && go run ./cmd/api
+```
+
+```bash
+API_ENDPOINT=http://127.0.0.1:8000 uv run uvicorn control_translation_ui.app:app --reload --port 8080
+```
+
+The API needs `CORS_ALLOWED_ORIGINS=http://127.0.0.1:8080` in `.env` or the
+browser will block every call from the UI. `.env.example` already sets it.
+
+Then open http://127.0.0.1:8080/ for the demo UI and
+http://127.0.0.1:8080/demo.html for the team flow guide. Swagger UI stays on
+the API at http://127.0.0.1:8000/docs.
+
+Both services are also started together by `docker compose up --build`, which
+wires the two settings for you.
 
 ## Configuration
 
@@ -178,9 +335,22 @@ model ID, or API key is hardcoded in application code or the image.
 | `CAPABILITY_CALLBACK_POLL_INTERVAL_SECONDS` | No | Durable outbox scan interval; default `1` |
 | `DEFAULT_TARGET_TECHNOLOGY` | No | PoC fallback target; caller value wins; default `akamai-waf` |
 | `DEFAULT_TARGET_POLICY_CONTEXT_ID` | No | PoC fallback policy context; caller value wins |
-| `HOST` | No | Bind host; default `0.0.0.0` |
-| `PORT` | No | Bind port; default `8000` |
+| `HOST` | No | API bind host; default `0.0.0.0` |
+| `PORT` | No | API bind port; default `8000` |
 | `ENABLE_DOCS` | No | Enable `/docs`, `/redoc`, and `/openapi.json` |
+| `CORS_ALLOWED_ORIGINS` | Browser access | Comma-separated UI origins allowed to call the API. Empty by default; `*` is rejected |
+
+The demo UI service reads only these, and nothing else:
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `API_ENDPOINT` | Yes | API base URL **as the browser resolves it**; published at `/config.js`. Empty means same-origin |
+| `UI_HOST` | No | UI bind host; default `0.0.0.0` |
+| `UI_PORT` | No | UI bind port; default `8080` |
+| `UI_STATIC_DIR` | No | Static asset directory; defaults to `ui/` beside the package |
+
+A UI deployment needs no model, Databricks, or callback settings. Do not copy
+the API's `.env` into the UI container.
 
 ### AT&T Inference
 
@@ -375,7 +545,15 @@ revision, and provenance participate in the semantic idempotency hash.
   regenerate `schemas/request.schema.json`, and add compatibility tests.
 - **Tune output for an existing target:** prompt changes can guide the model,
   but prompt changes alone are not a safe production change. Update the
-  target adapter and deterministic syntax tests at the same time.
+  target adapter and deterministic syntax tests at the same time. For
+  `akamai-waf`, most output changes belong in
+  `translation/modsec_akamai.py`, not in the prompt, because the compiler
+  runs before the model.
+- **Support another ModSecurity construct for Akamai:** extend
+  `translation/modsec_akamai.py` (`_COMPONENTS` for a collection,
+  `_operator_match` for an operator, `_RegexTranslator` for a regex form) and
+  add a case to `tests/test_modsec_akamai.py`. Declining is always the correct
+  behavior when the Akamai equivalent is not certain.
 - **Add a new target technology:** add an adapter, register it in
   `ADAPTER_REGISTRY`, map its control class, add target prompt instructions,
   implement a policy reader/snapshot, and add syntax/conflict fixtures and
@@ -415,7 +593,17 @@ decides whether that proposal is structurally acceptable.
 | `GET` | `/runs/{run_id}` | Read a durable completion envelope by execution ID |
 | `GET` | `/v1/results/{result_id}` | Read the durable structured business result |
 | `GET` | `/docs` | Swagger UI when `ENABLE_DOCS=true` |
+| `GET` | `/` | Service descriptor; the demo UI is no longer served here |
+
+The demo UI service exposes its own small surface:
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/` | Demo UI |
 | `GET` | `/demo.html` | Team-friendly flow and demo guide |
+| `GET` | `/config.js` | Generated `API_ENDPOINT` for the browser; `no-store` |
+| `GET` | `/health` | Liveness |
+| `GET` | `/ready` | Readiness plus the resolved API endpoint |
 
 The main UI includes a **Stored runs and translations** dashboard. It refreshes
 after a successful invocation, supports bounded pagination, and loads a full
@@ -446,7 +634,7 @@ must pass before an image is promoted.
 
 ## Deployment
 
-The repository is container-deployable for an internal POC/demo:
+Two images, deployed and scaled independently:
 
 ```bash
 podman build --format docker \
@@ -455,13 +643,40 @@ podman build --format docker \
 podman run --rm -p 8000:8000 --env-file .env control-translation-service:local
 ```
 
-The image does not contain `.env`, tests, local caches, or credentials. Its
-startup command reads `HOST` and `PORT` from the environment. Its health check
-uses `/ready`, so an invalid live-model configuration does not enter service.
-The image runs as a non-root user. Mount a durable writable volume at
-`/app/data` for lifecycle state regardless of the immutable result backend;
-SQLite data must not be written into the container image layer. Azure
-deployments use Databricks SQL as the completed-result sink.
+```bash
+podman build --format docker -f Dockerfile.ui \
+  --secret id=pip_conf,src="$HOME/.pip/pip.conf" \
+  -t control-translation-ui:local .
+podman run --rm -p 8080:8080 \
+  -e API_ENDPOINT=https://control-translation.example.com \
+  control-translation-ui:local
+```
+
+Neither image contains `.env`, tests, local caches, or credentials, and both
+run as a non-root user with `/ready` as their health check.
+
+The API image reads `HOST` and `PORT`, and an invalid live-model configuration
+keeps it out of service. Mount a durable writable volume at `/app/data` for
+lifecycle state regardless of the immutable result backend; SQLite data must
+not be written into the container image layer. Azure deployments use Databricks
+SQL as the completed-result sink.
+
+The UI image ships only the static assets and a minimal dependency set
+(`ui-requirements.txt`) — no model client, no Databricks driver. It is
+stateless, needs no volume, and can be scaled horizontally. Give it
+`API_ENDPOINT` only; never inject the API's secrets into a UI deployment.
+
+Because the browser calls the API cross-origin, the API's
+`CORS_ALLOWED_ORIGINS` must list the UI's public origin exactly (scheme, host,
+and port, no trailing path). It is empty by default, so browser access is off
+until it is set. If the two services are fronted by one gateway hostname,
+route `/` to the UI, route the API paths to the API, and set `API_ENDPOINT` to
+the empty string to keep the browser same-origin — then no CORS entry is
+needed.
+
+CI currently builds only the API image; see the note in
+`.github/variables/apps.yaml` for registering the UI image with the shared
+monorepo pipeline.
 
 For an orchestrator, configure:
 

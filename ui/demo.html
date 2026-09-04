@@ -124,9 +124,11 @@
     </blockquote>
   </section>
 
+  <script src="/config.js"></script>
   <script>
     const status = document.getElementById('demoInferenceStatus');
-    fetch('/inference')
+    const apiEndpoint = ((window.CONTROL_TRANSLATION_CONFIG || {}).apiEndpoint || "").replace(/\/+$/, "");
+    fetch(`${apiEndpoint}/inference`)
       .then((response) => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
       .then((runtime) => {
         const live = runtime.execution_mode === 'live';

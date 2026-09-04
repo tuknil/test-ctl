@@ -29,6 +29,31 @@
   deterministic **judge** (`syntax_validator` + `conflict_checker`) gates
   the result before `translated` is ever emitted — no raw LLM text becomes
   a trusted fact.
+- For `akamai-waf` the doer is now a **fallback**. The default path compiles
+  the proven ModSecurity `SecRule` from the defense-generation artifact into
+  an Akamai custom rule in code (`translation/modsec_akamai.py`). Assumptions
+  this rests on:
+  - The defense-generation artifact for a WAF candidate is ModSecurity
+    `SecRule` syntax. Anything else fails to parse and falls back to the doer.
+  - The Akamai condition types, `valueCase` / `valueWildcard` flags, and the
+    `*` / `?` wildcard semantics are those documented in
+    `docs/syntexresearch.md`. They have **not** been executed against a tenant,
+    so wildcard behavior per condition type is unverified — this is the same
+    open integration as policy reads.
+  - ModSecurity evaluates its variables after transformations
+    (`t:urlDecodeUni` and friends); Akamai's evaluation point is assumed to be
+    equivalent for the mapped condition types. Because the edge may see
+    encoded forms, pure-literal body/query/path values are emitted with their
+    URL-, plus-, and double-encoded variants.
+  - `ARGS` is mapped to `argsPostMatch` only. ModSecurity `ARGS` also covers
+    query-string arguments, and the gap is recorded as a candidate limitation
+    rather than guessed at with an invented condition.
+  - Regex constructs with no wildcard image (`\s`, `\d`, `\w`, negated or
+    large character classes, `\b`, quantified literals) are generalized to a
+    wildcard. The resulting candidate is labeled `narrower` and carries an
+    explicit over-match limitation, but the contract has no "broader" label,
+    so the label is an approximation and operator collateral-impact review is
+    the real control.
 - API key and model config are read from a local `.env` file via
   `python-dotenv` — never committed. `.env.example` documents variable
   names only. Default/offline tests use `FixtureTranslationDoer` and
@@ -55,3 +80,11 @@
 - A bounded retry/repair loop for agent output that fails a judge gate
   (not implemented in this release — failures route straight to a
   terminal state).
+- Tenant validation of compiled Akamai custom rules: execute the
+  `deterministic-modsec-rule` output against a real App & API Protector
+  configuration to confirm wildcard and `valueCase` semantics per condition
+  type, then promote or correct the fidelity labels.
+- Extend the ModSecurity compiler to the constructs it currently declines
+  (counted repetition, lookarounds, quantified multi-character groups) if
+  real defense-generation output starts producing them at volume — measured
+  by how often `proposal_source` falls back to `translation-doer`.
