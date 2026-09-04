@@ -6,6 +6,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -24,6 +25,11 @@ type Settings struct {
 	Port               int
 	CORSAllowedOrigins []string
 
+	// DatabricksDSN is a single connection string in the databricks-sql-go
+	// format. It fills in hostname, HTTP path, token and optionally
+	// catalog/schema; explicit DATABRICKS_* variables override whatever it
+	// supplies, so one field can be changed without rewriting the string.
+	DatabricksDSN            string
 	DatabricksServerHostname string
 	DatabricksHTTPPath       string
 	DatabricksAuthType       string
@@ -50,6 +56,10 @@ type Settings struct {
 
 // Load reads settings from the process environment.
 func Load() Settings {
+	return applyDSN(load())
+}
+
+func load() Settings {
 	return Settings{
 		RunMode:       strEnv("RUN_MODE", "fixture"),
 		ModelProvider: strEnv("MODEL_PROVIDER", "none"),
@@ -60,6 +70,7 @@ func Load() Settings {
 		Port:               intEnv("PORT", 8000),
 		CORSAllowedOrigins: listEnv("CORS_ALLOWED_ORIGINS"),
 
+		DatabricksDSN:            os.Getenv("DATABRICKS_DSN"),
 		DatabricksServerHostname: os.Getenv("DATABRICKS_SERVER_HOSTNAME"),
 		DatabricksHTTPPath:       os.Getenv("DATABRICKS_HTTP_PATH"),
 		DatabricksAuthType:       strEnv("DATABRICKS_AUTH_TYPE", "oauth-m2m"),
@@ -81,6 +92,91 @@ func Load() Settings {
 		DefaultTargetTechnology:    strEnv("DEFAULT_TARGET_TECHNOLOGY", "akamai-waf"),
 		DefaultTargetPolicyContext: strEnv("DEFAULT_TARGET_POLICY_CONTEXT_ID", "akamai-policy:example:rev-17"),
 	}
+}
+
+// applyDSN expands DATABRICKS_DSN into the individual settings, leaving any
+// that were set explicitly alone. A malformed DSN is left in place so
+// ConfigurationErrors can report it; it is never echoed, because it carries a
+// token.
+func applyDSN(settings Settings) Settings {
+	parsed, err := parseDatabricksDSN(settings.DatabricksDSN)
+	if err != nil || parsed == nil {
+		return settings
+	}
+	if settings.DatabricksServerHostname == "" {
+		settings.DatabricksServerHostname = parsed.hostname
+	}
+	if settings.DatabricksHTTPPath == "" {
+		settings.DatabricksHTTPPath = parsed.httpPath
+	}
+	if settings.DatabricksToken == "" && parsed.token != "" {
+		settings.DatabricksToken = parsed.token
+		// A DSN carries a personal access token, so it selects PAT auth unless
+		// the deployment said otherwise explicitly.
+		if os.Getenv("DATABRICKS_AUTH_TYPE") == "" {
+			settings.DatabricksAuthType = "pat"
+		}
+	}
+	if parsed.catalog != "" && os.Getenv("DATABRICKS_CATALOG") == "" {
+		settings.DatabricksCatalog = parsed.catalog
+	}
+	if parsed.schema != "" && os.Getenv("DATABRICKS_SCHEMA") == "" {
+		settings.DatabricksSchema = parsed.schema
+	}
+	return settings
+}
+
+type databricksDSN struct {
+	hostname string
+	httpPath string
+	token    string
+	catalog  string
+	schema   string
+}
+
+// parseDatabricksDSN accepts the databricks-sql-go connection string:
+//
+//	token:<pat>@<host>:443/sql/1.0/warehouses/<id>?catalog=c&schema=s
+//
+// with an optional databricks:// scheme. It returns (nil, nil) when no DSN was
+// supplied. Errors never quote the DSN, which holds the token.
+func parseDatabricksDSN(dsn string) (*databricksDSN, error) {
+	dsn = strings.TrimSpace(dsn)
+	if dsn == "" {
+		return nil, nil
+	}
+	if !strings.Contains(dsn, "://") {
+		dsn = "databricks://" + dsn
+	}
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		return nil, errors.New("DATABRICKS_DSN is not a valid connection string")
+	}
+	if parsed.Scheme != "databricks" {
+		return nil, errors.New("DATABRICKS_DSN scheme must be databricks")
+	}
+	if parsed.Hostname() == "" {
+		return nil, errors.New("DATABRICKS_DSN must include a host")
+	}
+	result := &databricksDSN{
+		hostname: parsed.Hostname(),
+		httpPath: parsed.EscapedPath(),
+		catalog:  parsed.Query().Get("catalog"),
+		schema:   parsed.Query().Get("schema"),
+	}
+	if parsed.User != nil {
+		// The canonical form is token:<pat>@host; a bare user is taken as the
+		// token so a hand-written DSN still works.
+		if password, ok := parsed.User.Password(); ok {
+			result.token = password
+		} else {
+			result.token = parsed.User.Username()
+		}
+	}
+	if result.httpPath == "" || result.httpPath == "/" {
+		return nil, errors.New("DATABRICKS_DSN must include the warehouse HTTP path")
+	}
+	return result, nil
 }
 
 // IsLive reports whether the deployment claims live mode. This service has no
@@ -113,6 +209,11 @@ func (s Settings) ConfigurationErrors() []string {
 		errs = append(errs, "PORT must be between 1 and 65535.")
 	}
 	errs = append(errs, corsErrors(s.CORSAllowedOrigins)...)
+	if _, err := parseDatabricksDSN(s.DatabricksDSN); err != nil {
+		// The message names the problem without echoing the DSN, which holds
+		// a token.
+		errs = append(errs, err.Error()+".")
+	}
 	errs = append(errs, s.workerErrors()...)
 	errs = append(errs, s.databricksErrors()...)
 	return errs

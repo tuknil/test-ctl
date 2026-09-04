@@ -136,6 +136,39 @@ Cancellation wins before a result exists. Afterwards the completion wins,
 because the result is already in the immutable table and may already have been
 consumed.
 
+## Connecting to Databricks
+
+Either four variables:
+
+```bash
+DATABRICKS_SERVER_HOSTNAME=adb-7405605071306757.17.azuredatabricks.net
+DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/866109ed7dfce51a
+DATABRICKS_AUTH_TYPE=pat
+DATABRICKS_TOKEN=<pat>
+```
+
+or one, in the `databricks-sql-go` connection-string format:
+
+```bash
+DATABRICKS_DSN='token:<pat>@adb-7405605071306757.17.azuredatabricks.net:443/sql/1.0/warehouses/866109ed7dfce51a'
+```
+
+A `databricks://` scheme prefix is optional, and `?catalog=&schema=` are
+honored. A DSN carries a personal access token, so it selects PAT auth; OAuth
+M2M is not expressible as a DSN and needs the explicit variables.
+
+**Explicit variables win over the DSN**, so one field can be changed without
+rewriting the string, and an explicit `DATABRICKS_AUTH_TYPE=oauth-m2m` is not
+switched to PAT behind your back by a token in the DSN.
+
+The DSN holds a secret, which is the reason to think twice about it: a single
+string is easy to paste into a ticket, a shell history, or a `ps` listing,
+where four separate variables are not. The service never logs its settings, a
+malformed DSN is reported by name without echoing the value, and a test asserts
+the token appears in none of `/`, `/ready`, `/inference`, `/schema`,
+`/openapi.json`, or the process logs. Everything outside this process is on
+you.
+
 ## Persistence
 
 The split follows the Python service: **SQLite coordinates, Databricks
