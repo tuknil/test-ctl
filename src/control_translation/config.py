@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 from functools import lru_cache
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 from pydantic import BaseModel
@@ -33,6 +34,10 @@ class Settings(BaseModel):
     enable_docs: bool = True
     host: str = "0.0.0.0"
     port: int = 8000
+    # Browser origins allowed to call this API cross-origin. The demo UI is a
+    # separate service on its own origin, so it must be listed here. Empty
+    # (the default) means no browser may call the API.
+    cors_allowed_origins: tuple[str, ...] = ()
     persistence_backend: str = "sqlite"
     database_path: str = "/app/data/control_translation.db"
     service_replica_count: int = 1
@@ -99,6 +104,22 @@ class Settings(BaseModel):
             errors.append("RUN_MODE must be either 'fixture' or 'live'.")
         if not 1 <= self.port <= 65535:
             errors.append("PORT must be between 1 and 65535.")
+        for origin in self.cors_allowed_origins:
+            if origin == "*":
+                errors.append(
+                    "CORS_ALLOWED_ORIGINS must name explicit origins, not '*'."
+                )
+                continue
+            parsed = urlparse(origin)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                errors.append(
+                    f"CORS_ALLOWED_ORIGINS entry '{origin}' must be a full "
+                    "http or https origin."
+                )
+            elif parsed.path:
+                errors.append(
+                    f"CORS_ALLOWED_ORIGINS entry '{origin}' must not include a path."
+                )
         if not 1 <= self.model_request_timeout_seconds <= 300:
             errors.append("MODEL_REQUEST_TIMEOUT_SECONDS must be between 1 and 300.")
         if self.worker_poll_seconds <= 0:
@@ -189,6 +210,11 @@ def get_settings() -> Settings:
         in {"1", "true", "yes", "on"},
         host=os.getenv("HOST", "0.0.0.0"),
         port=int(os.getenv("PORT", "8000")),
+        cors_allowed_origins=tuple(
+            origin.strip().rstrip("/")
+            for origin in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",")
+            if origin.strip()
+        ),
         persistence_backend=os.getenv("PERSISTENCE_BACKEND", "sqlite"),
         database_path=os.getenv(
             "DATABASE_PATH", "/app/data/control_translation.db"

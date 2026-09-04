@@ -296,7 +296,7 @@ injected as container secrets (never baked into the image), durable volume at
 
 **Demo UI** (`Dockerfile.ui`): `uvicorn control_translation_ui.app:app`
 entrypoint, port 8080, the static `ui/` directory, and a single setting,
-`API_ENDPOINT`. It installs only `deploy/ui-requirements.txt`, so the UI image
+`API_ENDPOINT`. It installs only `ui-requirements.txt`, so the UI image
 carries no model client and no Databricks driver. It is stateless, needs no
 volume, and scales horizontally. It must never receive the API's secrets.
 

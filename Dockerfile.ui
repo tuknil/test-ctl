@@ -1,0 +1,48 @@
+# Demo UI service. Serves the static UI and publishes API_ENDPOINT to the
+# browser. Deployed and scaled independently of the capability API, and
+# installed without the API's model/Databricks dependencies.
+ARG BASE_IMAGE=artifact.it.att.com/astra-secure-container-catalog/python:3.12
+FROM ${BASE_IMAGE} AS base
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+RUN addgroup --system app && adduser --system --ingroup app app
+
+COPY ui-requirements.txt ./ui-requirements.txt
+
+# The corporate pip configuration is supplied as a build secret and exists
+# only for this layer. It is never copied into the image or build context.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=secret,id=pip_conf,required=false \
+    if [ -s /run/secrets/pip_conf ]; then export PIP_CONFIG_FILE=/run/secrets/pip_conf; fi && \
+    pip install --no-cache-dir -r ui-requirements.txt
+
+COPY src/control_translation_ui ./src/control_translation_ui
+# Static assets contain no runtime secrets.
+COPY ui ./ui
+
+RUN chown -R app:app /app
+
+ENV PYTHONPATH=/app/src \
+    UI_HOST=0.0.0.0 \
+    UI_PORT=8080 \
+    UI_STATIC_DIR=/app/ui
+# API_ENDPOINT is intentionally not defaulted here: it is deployment-specific
+# and must be the URL a *browser* can resolve, not an internal service name.
+
+USER app
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+    CMD python -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.getenv('UI_PORT', '8080') + '/ready')" || exit 1
+
+# The secure base image may define a Python entrypoint. Clear it so the
+# service command below is not interpreted as a Python script path.
+ENTRYPOINT []
+
+CMD ["python", "-m", "control_translation_ui"]
