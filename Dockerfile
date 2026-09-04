@@ -17,6 +17,7 @@ COPY src ./src
 # only for this layer. It is never copied into the image or build context.
 
 RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=secret,id=pip_conf,required=false \
     if [ -s /run/secrets/pip_conf ]; then export PIP_CONFIG_FILE=/run/secrets/pip_conf; fi && \
     pip install --no-cache-dir .
 
