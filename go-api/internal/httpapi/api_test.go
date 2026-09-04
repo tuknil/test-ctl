@@ -158,7 +158,7 @@ func TestReadinessFailsWhenDatabricksIsUnreachable(t *testing.T) {
 func TestReadinessFailsWhenDatabricksIsNotConfigured(t *testing.T) {
 	fake := storetest.NewFakeWorkspace(t)
 	settings := storetest.FakeSettings()
-	settings.DatabricksToken = "" // PAT auth with no token
+	settings.DatabricksDSN = "" // the connection has no other source
 	repository, err := store.New(settings, databricks.NewWithBaseURL(settings, fake.Server.URL))
 	if err != nil {
 		t.Fatalf("unable to open the store: %v", err)
@@ -171,7 +171,7 @@ func TestReadinessFailsWhenDatabricksIsNotConfigured(t *testing.T) {
 		t.Fatalf("ready = %d, want 503", recorder.Code)
 	}
 	errors := decode(t, recorder)["detail"].(map[string]any)["configuration_errors"].([]any)
-	if len(errors) == 0 || !strings.Contains(errors[0].(string), "DATABRICKS_TOKEN") {
+	if len(errors) == 0 || !strings.Contains(errors[0].(string), "DATABRICKS_DSN") {
 		t.Errorf("readiness should name the missing setting: %v", errors)
 	}
 }
@@ -198,6 +198,8 @@ func TestLiveModeIsRefused(t *testing.T) {
 func TestStatusEndpointsNeverReturnSecrets(t *testing.T) {
 	fake := storetest.NewFakeWorkspace(t)
 	settings := storetest.FakeSettings()
+	settings.DatabricksDSN =
+		"token:super-secret-pat@fake.databricks.example:443/sql/1.0/warehouses/abc"
 	settings.DatabricksToken = "super-secret-pat"
 	settings.DatabricksClientSecret = "super-secret-oauth"
 	repository, _ := store.New(settings, databricks.NewWithBaseURL(settings, fake.Server.URL))

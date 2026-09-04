@@ -5,13 +5,17 @@ import (
 	"testing"
 )
 
-// DATABRICKS_DSN is a convenience for the four connection settings. It carries
-// a token, so the rules that matter are: it must never be echoed in an error,
-// and an explicit variable must win over it so one field can be changed
-// without rewriting the string.
+// The Databricks connection is expressed only as DATABRICKS_DSN: one place a
+// workspace is configured, one place a credential lives. The rules that matter
+// are that both auth modes are expressible, that an ambiguous credential is
+// refused rather than guessed, and that nothing ever echoes the DSN.
 
-const testDSN = "token:dapi-secret-value@adb-7405605071306757.17.azuredatabricks.net:443" +
-	"/sql/1.0/warehouses/866109ed7dfce51a"
+const (
+	patDSN = "token:dapi-secret-value@adb-7405605071306757.17.azuredatabricks.net:443" +
+		"/sql/1.0/warehouses/866109ed7dfce51a"
+	oauthDSN = "an-application-id:an-oauth-secret@adb-7405605071306757.17.azuredatabricks.net:443" +
+		"/sql/1.0/warehouses/866109ed7dfce51a"
+)
 
 func settingsWithDSN(t *testing.T, dsn string, overrides map[string]string) Settings {
 	t.Helper()
@@ -22,8 +26,8 @@ func settingsWithDSN(t *testing.T, dsn string, overrides map[string]string) Sett
 	return Load()
 }
 
-func TestDSNSuppliesTheConnectionSettings(t *testing.T) {
-	settings := settingsWithDSN(t, testDSN, nil)
+func TestTokenDSNSelectsPersonalAccessTokenAuth(t *testing.T) {
+	settings := settingsWithDSN(t, patDSN, nil)
 
 	if settings.DatabricksServerHostname != "adb-7405605071306757.17.azuredatabricks.net" {
 		t.Errorf("hostname = %q", settings.DatabricksServerHostname)
@@ -31,29 +35,47 @@ func TestDSNSuppliesTheConnectionSettings(t *testing.T) {
 	if settings.DatabricksHTTPPath != "/sql/1.0/warehouses/866109ed7dfce51a" {
 		t.Errorf("http path = %q", settings.DatabricksHTTPPath)
 	}
-	if settings.DatabricksToken != "dapi-secret-value" {
-		t.Errorf("token was not taken from the DSN")
-	}
-	// A DSN carries a PAT, so it selects PAT auth rather than leaving the
-	// default asking for a client id and secret.
-	if settings.NormalizedDatabricksAuthType() != "pat" {
-		t.Errorf("auth type = %q, want pat", settings.DatabricksAuthType)
+	if settings.NormalizedDatabricksAuthType() != "pat" || settings.DatabricksToken != "dapi-secret-value" {
+		t.Errorf("auth = %q token set = %v",
+			settings.DatabricksAuthType, settings.DatabricksToken != "")
 	}
 	if problems := settings.databricksErrors(); len(problems) > 0 {
-		t.Errorf("a complete DSN should satisfy the Databricks settings: %v", problems)
+		t.Errorf("a complete DSN should validate: %v", problems)
+	}
+}
+
+// OAuth M2M stays expressible, so requiring a DSN does not force every
+// deployment onto a personal access token.
+func TestServicePrincipalDSNSelectsOAuth(t *testing.T) {
+	settings := settingsWithDSN(t, oauthDSN, nil)
+
+	if settings.NormalizedDatabricksAuthType() != "oauth-m2m" {
+		t.Fatalf("auth type = %q, want oauth-m2m", settings.DatabricksAuthType)
+	}
+	if settings.DatabricksClientID != "an-application-id" ||
+		settings.DatabricksClientSecret != "an-oauth-secret" {
+		t.Errorf("the client credentials were not taken from the DSN")
+	}
+	if settings.DatabricksToken != "" {
+		t.Errorf("a service-principal DSN must not set a token")
+	}
+	if problems := settings.databricksErrors(); len(problems) > 0 {
+		t.Errorf("an OAuth DSN should validate: %v", problems)
 	}
 }
 
 func TestDSNAcceptsAnExplicitScheme(t *testing.T) {
-	settings := settingsWithDSN(t, "databricks://"+testDSN, nil)
+	settings := settingsWithDSN(t, "databricks://"+patDSN, nil)
 
 	if settings.DatabricksServerHostname == "" || settings.DatabricksHTTPPath == "" {
-		t.Errorf("the scheme-prefixed form should parse: %+v", settings.DatabricksServerHostname)
+		t.Error("the scheme-prefixed form should parse")
 	}
 }
 
-func TestDSNCarriesOptionalCatalogAndSchema(t *testing.T) {
-	settings := settingsWithDSN(t, testDSN+"?catalog=other_catalog&schema=other_schema", nil)
+// The DSN is authoritative for what it expresses.
+func TestDSNCatalogAndSchemaWin(t *testing.T) {
+	settings := settingsWithDSN(t, patDSN+"?catalog=other_catalog&schema=other_schema",
+		map[string]string{"DATABRICKS_CATALOG": "ignored"})
 
 	if settings.DatabricksCatalog != "other_catalog" || settings.DatabricksSchema != "other_schema" {
 		t.Errorf("catalog/schema = %q/%q",
@@ -61,49 +83,49 @@ func TestDSNCarriesOptionalCatalogAndSchema(t *testing.T) {
 	}
 }
 
-// One field can be changed without rewriting the whole string.
-func TestExplicitSettingsOverrideTheDSN(t *testing.T) {
-	settings := settingsWithDSN(t, testDSN, map[string]string{
-		"DATABRICKS_HTTP_PATH": "/sql/1.0/warehouses/a-different-warehouse",
-		"DATABRICKS_CATALOG":   "explicit_catalog",
+// The individual connection variables are no longer read at all, so a
+// deployment still setting them gets a clear failure rather than a service
+// that silently ignores half its configuration.
+func TestIndividualConnectionVariablesAreNoLongerRead(t *testing.T) {
+	settings := settingsWithDSN(t, "", map[string]string{
+		"DATABRICKS_SERVER_HOSTNAME": "adb-example.azuredatabricks.net",
+		"DATABRICKS_HTTP_PATH":       "/sql/1.0/warehouses/abc",
+		"DATABRICKS_AUTH_TYPE":       "pat",
+		"DATABRICKS_TOKEN":           "dapi-secret-value",
+		"DATABRICKS_CLIENT_ID":       "an-application-id",
+		"DATABRICKS_CLIENT_SECRET":   "an-oauth-secret",
 	})
 
-	if settings.DatabricksHTTPPath != "/sql/1.0/warehouses/a-different-warehouse" {
-		t.Errorf("the explicit HTTP path should win: %q", settings.DatabricksHTTPPath)
+	if settings.DatabricksServerHostname != "" || settings.DatabricksToken != "" {
+		t.Error("the individual connection variables must not be read")
 	}
-	if settings.DatabricksCatalog != "explicit_catalog" {
-		t.Errorf("the explicit catalog should win: %q", settings.DatabricksCatalog)
-	}
-	// The rest still comes from the DSN.
-	if settings.DatabricksServerHostname == "" {
-		t.Error("the DSN should still supply the hostname")
+	problems := settings.databricksErrors()
+	if len(problems) != 1 || !strings.Contains(problems[0], "DATABRICKS_DSN is required") {
+		t.Errorf("a missing DSN should be the one reported problem: %v", problems)
 	}
 }
 
-// OAuth is not expressible as a DSN, so an explicit auth type is respected and
-// the DSN's token is not allowed to switch the deployment to PAT behind it.
-func TestExplicitOAuthAuthTypeIsNotOverriddenByADSN(t *testing.T) {
-	settings := settingsWithDSN(t, testDSN, map[string]string{
-		"DATABRICKS_AUTH_TYPE":     "oauth-m2m",
-		"DATABRICKS_CLIENT_ID":     "an-application-id",
-		"DATABRICKS_CLIENT_SECRET": "a-secret",
-	})
+// A bare username could be a PAT written without its prefix or a client id
+// missing its secret. Guessing would fail later against the workspace with a
+// worse message.
+func TestAmbiguousCredentialIsRefused(t *testing.T) {
+	settings := settingsWithDSN(t,
+		"dapi-secret-value@adb-example.azuredatabricks.net:443/sql/1.0/warehouses/abc", nil)
 
-	if settings.NormalizedDatabricksAuthType() != "oauth-m2m" {
-		t.Errorf("auth type = %q, want oauth-m2m", settings.DatabricksAuthType)
-	}
-	if problems := settings.databricksErrors(); len(problems) > 0 {
-		t.Errorf("OAuth alongside a DSN should still validate: %v", problems)
+	problems := settings.databricksErrors()
+	if len(problems) == 0 || !strings.Contains(problems[0], "token:<pat>") {
+		t.Errorf("an ambiguous credential should say what the forms are: %v", problems)
 	}
 }
 
-// The DSN holds a token, so a parse failure must name the problem without
-// quoting the value.
+// Every rejection names the problem without quoting the DSN.
 func TestMalformedDSNIsReportedWithoutEchoingIt(t *testing.T) {
 	cases := map[string]string{
 		"no warehouse path": "token:dapi-secret-value@adb-example.azuredatabricks.net:443",
 		"no host":           "token:dapi-secret-value@/sql/1.0/warehouses/abc",
 		"wrong scheme":      "postgres://token:dapi-secret-value@example.net/sql/1.0/warehouses/abc",
+		"no credential":     "adb-example.azuredatabricks.net:443/sql/1.0/warehouses/abc",
+		"empty token":       "token:@adb-example.azuredatabricks.net:443/sql/1.0/warehouses/abc",
 	}
 	for name, dsn := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -115,29 +137,15 @@ func TestMalformedDSNIsReportedWithoutEchoingIt(t *testing.T) {
 				if strings.Contains(problem, "DATABRICKS_DSN") {
 					reported = true
 				}
-				if strings.Contains(problem, "dapi-secret-value") {
-					t.Fatalf("a configuration error leaked the token: %s", problem)
+				for _, secret := range []string{"dapi-secret-value", "an-oauth-secret"} {
+					if strings.Contains(problem, secret) {
+						t.Fatalf("a configuration error leaked a credential: %s", problem)
+					}
 				}
 			}
 			if !reported {
 				t.Errorf("the malformed DSN should be reported: %v", problems)
 			}
 		})
-	}
-}
-
-func TestNoDSNLeavesTheExplicitSettingsAlone(t *testing.T) {
-	settings := settingsWithDSN(t, "", map[string]string{
-		"DATABRICKS_SERVER_HOSTNAME": "explicit.databricks.example",
-		"DATABRICKS_HTTP_PATH":       "/sql/1.0/warehouses/explicit",
-		"DATABRICKS_AUTH_TYPE":       "pat",
-		"DATABRICKS_TOKEN":           "explicit-token",
-	})
-
-	if settings.DatabricksServerHostname != "explicit.databricks.example" {
-		t.Errorf("hostname = %q", settings.DatabricksServerHostname)
-	}
-	if problems := settings.databricksErrors(); len(problems) > 0 {
-		t.Errorf("the explicit form should still validate: %v", problems)
 	}
 }

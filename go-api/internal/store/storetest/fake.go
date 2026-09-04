@@ -222,6 +222,9 @@ func FakeSettings() config.Settings {
 	return config.Settings{
 		RunMode: "fixture", ModelProvider: "none", ModelName: "not-configured",
 		EnableDocs: true, Host: "127.0.0.1", Port: 8000,
+		// The connection comes from a DSN, and the derived fields are what the
+		// client actually reads.
+		DatabricksDSN:              "token:fake-pat@fake.databricks.example:443/sql/1.0/warehouses/abc",
 		DatabricksServerHostname:   "fake.databricks.example",
 		DatabricksHTTPPath:         "/sql/1.0/warehouses/abc",
 		DatabricksAuthType:         "pat",

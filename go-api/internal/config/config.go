@@ -25,20 +25,23 @@ type Settings struct {
 	Port               int
 	CORSAllowedOrigins []string
 
-	// DatabricksDSN is a single connection string in the databricks-sql-go
-	// format. It fills in hostname, HTTP path, token and optionally
-	// catalog/schema; explicit DATABRICKS_* variables override whatever it
-	// supplies, so one field can be changed without rewriting the string.
-	DatabricksDSN            string
+	// DatabricksDSN is the single source for the connection. The fields below
+	// it are derived from it and are never read from the environment, so there
+	// is one place a workspace is configured and one place a credential lives.
+	DatabricksDSN string
+
 	DatabricksServerHostname string
 	DatabricksHTTPPath       string
 	DatabricksAuthType       string
 	DatabricksToken          string
 	DatabricksClientID       string
 	DatabricksClientSecret   string
-	DatabricksCatalog        string
-	DatabricksSchema         string
-	DatabricksResultsTable   string
+
+	// Table coordinates are not connection settings. They stay separate, and
+	// the DSN may override catalog and schema for the connection it describes.
+	DatabricksCatalog      string
+	DatabricksSchema       string
+	DatabricksResultsTable string
 
 	// The lifecycle queue is a local SQLite file: durable coordination for
 	// this replica only. Completed results go to Databricks.
@@ -70,16 +73,10 @@ func load() Settings {
 		Port:               intEnv("PORT", 8000),
 		CORSAllowedOrigins: listEnv("CORS_ALLOWED_ORIGINS"),
 
-		DatabricksDSN:            os.Getenv("DATABRICKS_DSN"),
-		DatabricksServerHostname: os.Getenv("DATABRICKS_SERVER_HOSTNAME"),
-		DatabricksHTTPPath:       os.Getenv("DATABRICKS_HTTP_PATH"),
-		DatabricksAuthType:       strEnv("DATABRICKS_AUTH_TYPE", "oauth-m2m"),
-		DatabricksToken:          os.Getenv("DATABRICKS_TOKEN"),
-		DatabricksClientID:       os.Getenv("DATABRICKS_CLIENT_ID"),
-		DatabricksClientSecret:   os.Getenv("DATABRICKS_CLIENT_SECRET"),
-		DatabricksCatalog:        strEnv("DATABRICKS_CATALOG", "36889_janus_dev"),
-		DatabricksSchema:         strEnv("DATABRICKS_SCHEMA", "control_translation"),
-		DatabricksResultsTable:   strEnv("DATABRICKS_RESULTS_TABLE", "control_translation_results"),
+		DatabricksDSN:          os.Getenv("DATABRICKS_DSN"),
+		DatabricksCatalog:      strEnv("DATABRICKS_CATALOG", "36889_janus_dev"),
+		DatabricksSchema:       strEnv("DATABRICKS_SCHEMA", "control_translation"),
+		DatabricksResultsTable: strEnv("DATABRICKS_RESULTS_TABLE", "control_translation_results"),
 
 		DatabasePath:               strEnv("DATABASE_PATH", "/app/data/control_translation.db"),
 		ServiceReplicaCount:        intEnv("SERVICE_REPLICA_COUNT", 1),
@@ -94,52 +91,54 @@ func load() Settings {
 	}
 }
 
-// applyDSN expands DATABRICKS_DSN into the individual settings, leaving any
-// that were set explicitly alone. A malformed DSN is left in place so
-// ConfigurationErrors can report it; it is never echoed, because it carries a
-// token.
+// applyDSN derives the connection settings from DATABRICKS_DSN. A malformed
+// DSN leaves them empty so ConfigurationErrors can report it; the DSN is never
+// echoed, because it carries a credential.
 func applyDSN(settings Settings) Settings {
 	parsed, err := parseDatabricksDSN(settings.DatabricksDSN)
 	if err != nil || parsed == nil {
 		return settings
 	}
-	if settings.DatabricksServerHostname == "" {
-		settings.DatabricksServerHostname = parsed.hostname
-	}
-	if settings.DatabricksHTTPPath == "" {
-		settings.DatabricksHTTPPath = parsed.httpPath
-	}
-	if settings.DatabricksToken == "" && parsed.token != "" {
-		settings.DatabricksToken = parsed.token
-		// A DSN carries a personal access token, so it selects PAT auth unless
-		// the deployment said otherwise explicitly.
-		if os.Getenv("DATABRICKS_AUTH_TYPE") == "" {
-			settings.DatabricksAuthType = "pat"
-		}
-	}
-	if parsed.catalog != "" && os.Getenv("DATABRICKS_CATALOG") == "" {
+	settings.DatabricksServerHostname = parsed.hostname
+	settings.DatabricksHTTPPath = parsed.httpPath
+	settings.DatabricksAuthType = parsed.authType
+	settings.DatabricksToken = parsed.token
+	settings.DatabricksClientID = parsed.clientID
+	settings.DatabricksClientSecret = parsed.clientSecret
+	// The DSN is authoritative for anything it expresses, including the
+	// catalog and schema of the connection it describes.
+	if parsed.catalog != "" {
 		settings.DatabricksCatalog = parsed.catalog
 	}
-	if parsed.schema != "" && os.Getenv("DATABRICKS_SCHEMA") == "" {
+	if parsed.schema != "" {
 		settings.DatabricksSchema = parsed.schema
 	}
 	return settings
 }
 
 type databricksDSN struct {
-	hostname string
-	httpPath string
-	token    string
-	catalog  string
-	schema   string
+	hostname     string
+	httpPath     string
+	authType     string
+	token        string
+	clientID     string
+	clientSecret string
+	catalog      string
+	schema       string
 }
 
 // parseDatabricksDSN accepts the databricks-sql-go connection string:
 //
 //	token:<pat>@<host>:443/sql/1.0/warehouses/<id>?catalog=c&schema=s
 //
-// with an optional databricks:// scheme. It returns (nil, nil) when no DSN was
-// supplied. Errors never quote the DSN, which holds the token.
+// The userinfo selects the authentication mode. A literal "token" username
+// means a personal access token; anything else is an OAuth M2M service
+// principal, where the username is the client id and the password its secret:
+//
+//	<client-id>:<client-secret>@<host>:443/sql/1.0/warehouses/<id>
+//
+// The databricks:// scheme is optional. It returns (nil, nil) when no DSN was
+// supplied. Errors never quote the DSN, which holds a credential.
 func parseDatabricksDSN(dsn string) (*databricksDSN, error) {
 	dsn = strings.TrimSpace(dsn)
 	if dsn == "" {
@@ -164,14 +163,26 @@ func parseDatabricksDSN(dsn string) (*databricksDSN, error) {
 		catalog:  parsed.Query().Get("catalog"),
 		schema:   parsed.Query().Get("schema"),
 	}
-	if parsed.User != nil {
-		// The canonical form is token:<pat>@host; a bare user is taken as the
-		// token so a hand-written DSN still works.
-		if password, ok := parsed.User.Password(); ok {
-			result.token = password
-		} else {
-			result.token = parsed.User.Username()
+	if parsed.User == nil {
+		return nil, errors.New("DATABRICKS_DSN must carry a credential")
+	}
+	username := parsed.User.Username()
+	password, hasPassword := parsed.User.Password()
+	switch {
+	case username == "token":
+		if !hasPassword || password == "" {
+			return nil, errors.New("DATABRICKS_DSN token form needs token:<pat>@host")
 		}
+		result.authType, result.token = "pat", password
+	case hasPassword && password != "":
+		result.authType = "oauth-m2m"
+		result.clientID, result.clientSecret = username, password
+	default:
+		// A bare username is ambiguous: it could be a PAT written without the
+		// token: prefix, or a client id missing its secret. Refuse rather than
+		// pick one and fail later against the workspace.
+		return nil, errors.New(
+			"DATABRICKS_DSN credential must be token:<pat> or <client-id>:<client-secret>")
 	}
 	if result.httpPath == "" || result.httpPath == "/" {
 		return nil, errors.New("DATABRICKS_DSN must include the warehouse HTTP path")
@@ -209,11 +220,6 @@ func (s Settings) ConfigurationErrors() []string {
 		errs = append(errs, "PORT must be between 1 and 65535.")
 	}
 	errs = append(errs, corsErrors(s.CORSAllowedOrigins)...)
-	if _, err := parseDatabricksDSN(s.DatabricksDSN); err != nil {
-		// The message names the problem without echoing the DSN, which holds
-		// a token.
-		errs = append(errs, err.Error()+".")
-	}
 	errs = append(errs, s.workerErrors()...)
 	errs = append(errs, s.databricksErrors()...)
 	return errs
@@ -251,27 +257,33 @@ func (s Settings) workerErrors() []string {
 }
 
 // databricksErrors validates the only persistence backend this build has.
+//
+// The connection comes from DATABRICKS_DSN alone, so a missing or malformed
+// DSN is the single thing to report; the derived fields cannot be wrong
+// independently of it.
 func (s Settings) databricksErrors() []string {
-	required := map[string]string{
-		"DATABRICKS_SERVER_HOSTNAME": s.DatabricksServerHostname,
-		"DATABRICKS_HTTP_PATH":       s.DatabricksHTTPPath,
-		"DATABRICKS_CATALOG":         s.DatabricksCatalog,
-		"DATABRICKS_SCHEMA":          s.DatabricksSchema,
-		"DATABRICKS_RESULTS_TABLE":   s.DatabricksResultsTable,
-	}
 	var errs []string
-	switch s.NormalizedDatabricksAuthType() {
-	case "pat":
-		required["DATABRICKS_TOKEN"] = s.DatabricksToken
-	case "oauth-m2m":
-		required["DATABRICKS_CLIENT_ID"] = s.DatabricksClientID
-		required["DATABRICKS_CLIENT_SECRET"] = s.DatabricksClientSecret
-	default:
-		errs = append(errs, "DATABRICKS_AUTH_TYPE must be either 'oauth-m2m' or 'pat'.")
+	if strings.TrimSpace(s.DatabricksDSN) == "" {
+		errs = append(errs,
+			"DATABRICKS_DSN is required: token:<pat>@<host>:443/sql/1.0/warehouses/<id> "+
+				"for a personal access token, or <client-id>:<client-secret>@... for an "+
+				"OAuth M2M service principal.")
+		return errs
 	}
-	var missing []string
-	for _, name := range sortedKeys(required) {
-		if strings.TrimSpace(required[name]) == "" {
+	if _, err := parseDatabricksDSN(s.DatabricksDSN); err != nil {
+		// Named, never echoed: the DSN carries a credential.
+		return append(errs, err.Error()+".")
+	}
+	missing := []string{}
+	for _, name := range []string{
+		"DATABRICKS_CATALOG", "DATABRICKS_RESULTS_TABLE", "DATABRICKS_SCHEMA",
+	} {
+		value := map[string]string{
+			"DATABRICKS_CATALOG":       s.DatabricksCatalog,
+			"DATABRICKS_SCHEMA":        s.DatabricksSchema,
+			"DATABRICKS_RESULTS_TABLE": s.DatabricksResultsTable,
+		}[name]
+		if strings.TrimSpace(value) == "" {
 			missing = append(missing, name)
 		}
 	}
@@ -349,17 +361,4 @@ func listEnv(name string) []string {
 		}
 	}
 	return items
-}
-
-func sortedKeys(m map[string]string) []string {
-	keys := make([]string, 0, len(m))
-	for key := range m {
-		keys = append(keys, key)
-	}
-	for i := 1; i < len(keys); i++ {
-		for j := i; j > 0 && keys[j] < keys[j-1]; j-- {
-			keys[j], keys[j-1] = keys[j-1], keys[j]
-		}
-	}
-	return keys
 }

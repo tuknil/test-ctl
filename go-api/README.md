@@ -138,36 +138,45 @@ consumed.
 
 ## Connecting to Databricks
 
-Either four variables:
+One variable. The Go service reads Databricks over the REST Statement
+Execution API, so a connection is a host, a warehouse path and a credential,
+and all three fit in a DSN:
 
 ```bash
-DATABRICKS_SERVER_HOSTNAME=adb-7405605071306757.17.azuredatabricks.net
-DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/866109ed7dfce51a
-DATABRICKS_AUTH_TYPE=pat
-DATABRICKS_TOKEN=<pat>
-```
-
-or one, in the `databricks-sql-go` connection-string format:
-
-```bash
+# personal access token
 DATABRICKS_DSN='token:<pat>@adb-7405605071306757.17.azuredatabricks.net:443/sql/1.0/warehouses/866109ed7dfce51a'
+
+# OAuth M2M service principal
+DATABRICKS_DSN='<client-id>:<client-secret>@adb-7405605071306757.17.azuredatabricks.net:443/sql/1.0/warehouses/866109ed7dfce51a'
 ```
 
-A `databricks://` scheme prefix is optional, and `?catalog=&schema=` are
-honored. A DSN carries a personal access token, so it selects PAT auth; OAuth
-M2M is not expressible as a DSN and needs the explicit variables.
+The userinfo selects the mode: a literal `token` username means a personal
+access token, anything else is a service principal. A bare username with no
+password is refused rather than guessed -- it could be a PAT written without
+its prefix or a client id missing its secret, and picking one would fail later
+against the workspace with a worse message. The `databricks://` scheme is
+optional, and `?catalog=&schema=` are honored and win, because the DSN is
+authoritative for what it expresses.
 
-**Explicit variables win over the DSN**, so one field can be changed without
-rewriting the string, and an explicit `DATABRICKS_AUTH_TYPE=oauth-m2m` is not
-switched to PAT behind your back by a token in the DSN.
+`DATABRICKS_SERVER_HOSTNAME`, `DATABRICKS_HTTP_PATH`, `DATABRICKS_AUTH_TYPE`,
+`DATABRICKS_TOKEN`, `DATABRICKS_CLIENT_ID` and `DATABRICKS_CLIENT_SECRET` are
+**not read at all**. A deployment still setting them fails readiness naming
+`DATABRICKS_DSN`, rather than starting with half its configuration silently
+ignored. The Python service still uses those variables; this is a Go-only
+change.
 
-The DSN holds a secret, which is the reason to think twice about it: a single
-string is easy to paste into a ticket, a shell history, or a `ps` listing,
-where four separate variables are not. The service never logs its settings, a
-malformed DSN is reported by name without echoing the value, and a test asserts
-the token appears in none of `/`, `/ready`, `/inference`, `/schema`,
-`/openapi.json`, or the process logs. Everything outside this process is on
-you.
+Table coordinates are not connection settings and stay separate, with working
+defaults: `DATABRICKS_CATALOG`, `DATABRICKS_SCHEMA`,
+`DATABRICKS_RESULTS_TABLE`.
+
+One variable means one place a workspace is configured and one place a
+credential lives, which is the reason to do it. It also concentrates a secret
+into a single string that is easy to paste into a ticket, a shell history or a
+`ps` listing. Inside this process that is handled: settings are never logged, a
+malformed or missing DSN is reported by name without echoing the value, and a
+test asserts no credential appears in `/`, `/ready`, `/inference`, `/schema`,
+`/openapi.json` or the process logs. Outside the process it is a deployment
+decision.
 
 ## Persistence
 
