@@ -42,6 +42,7 @@ from control_translation.contracts import (
 )
 from control_translation.policy_reader.base import PolicySnapshot
 from control_translation.translation import conflict_checker, syntax_validator
+from control_translation.translation.modsec_akamai import compile_akamai_custom_rule
 
 logger = logging.getLogger(__name__)
 
@@ -84,37 +85,37 @@ def translate(
     allow_equivalent_translation: bool = True,
     cancellation_signal: CancellationSignal | None = None,
 ) -> EngineResult:
-    # Mechanical gate 1: can this target technology plausibly express the
-    # discriminator at all? Cheap check before spending an agent call.
     check_cancelled(cancellation_signal)
-    if not adapter.supports_feature(
-        pattern.discriminator_description,
-        pattern.json_body_field_feature,
-    ):
-        return EngineFailure(
-            reason="unsupported-feature",
-            detail=(
-                f"{target_technology} adapter does not recognize a supported "
-                f"feature for discriminator: {pattern.discriminator_description}"
-            ),
-        )
 
+    # Default path for Akamai: derive the custom rule from the authoritative
+    # upstream artifact in code. The doer is only reached when no deterministic
+    # path can express the proven pattern.
     proposal = None
     proposal_from_doer = False
     proposal_source = "none"
     if target_technology == "akamai-waf":
-        proposal = _akamai_json_body_field_proposal(pattern)
-        if proposal is not None:
-            proposal_source = "deterministic-json-body-field"
-        elif translation_requirements is None:
-            proposal = _hardened_akamai_literal_proposal(pattern)
-            if proposal is not None:
-                proposal_source = "deterministic-anchored-literal"
-            else:
-                proposal = _hardened_akamai_form_body_proposal(pattern, request_context)
-                if proposal is not None:
-                    proposal_source = "deterministic-form-body"
+        proposal, proposal_source = _akamai_deterministic_proposal(
+            pattern,
+            translation_requirements=translation_requirements,
+            request_context=request_context,
+        )
+
     if proposal is None:
+        # Mechanical gate: can this target technology plausibly express the
+        # discriminator at all? Cheap check before spending an agent call. A
+        # deterministically compiled rule has already answered this question,
+        # so the keyword gate only guards the doer.
+        if not adapter.supports_feature(
+            pattern.discriminator_description,
+            pattern.json_body_field_feature,
+        ):
+            return EngineFailure(
+                reason="unsupported-feature",
+                detail=(
+                    f"{target_technology} adapter does not recognize a supported "
+                    f"feature for discriminator: {pattern.discriminator_description}"
+                ),
+            )
         # Doer: propose a candidate artifact (agent output, not yet trusted).
         try:
             check_cancelled(cancellation_signal)
@@ -358,6 +359,40 @@ def _proposal_policy_failure(
             detail="Translation policy does not allow narrower translations.",
         )
     return None
+
+
+def _akamai_deterministic_proposal(
+    pattern: ProvenMitigationPattern,
+    *,
+    translation_requirements: ProofLoopTranslationRequirements | None,
+    request_context: ProofLoopRequestContext | None,
+) -> tuple[TranslationProposal | None, str]:
+    """Build an Akamai candidate in code, most authoritative source first.
+
+    1. the JSON request field uniquely corroborated by Mitigation Check;
+    2. an anchored literal named-argument rule, hardened with encodings;
+    3. the authoritative proven form body from the Mitigation Check request;
+    4. general compilation of the proven ModSecurity rule itself.
+
+    Returns `(None, "none")` when the proven pattern needs the doer.
+    """
+    proposal = _akamai_json_body_field_proposal(pattern)
+    if proposal is not None:
+        return proposal, "deterministic-json-body-field"
+    if translation_requirements is None:
+        proposal = _hardened_akamai_literal_proposal(pattern)
+        if proposal is not None:
+            return proposal, "deterministic-anchored-literal"
+        proposal = _hardened_akamai_form_body_proposal(pattern, request_context)
+        if proposal is not None:
+            return proposal, "deterministic-form-body"
+    proposal = compile_akamai_custom_rule(
+        pattern,
+        translation_requirements=translation_requirements,
+    )
+    if proposal is not None:
+        return proposal, "deterministic-modsec-rule"
+    return None, "none"
 
 
 def _akamai_json_body_field_proposal(
