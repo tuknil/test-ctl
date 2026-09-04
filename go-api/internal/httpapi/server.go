@@ -52,22 +52,61 @@ func (s *Server) Start() { s.worker.Start() }
 // Stop drains the background worker within the configured grace period.
 func (s *Server) Stop() { s.worker.Stop() }
 
+// route binds one method and path to its handler. The router, the service
+// descriptor, and the OpenAPI document are all built from this one table, and
+// a test fails if the document and the table disagree -- a hand-written spec
+// that drifts from the code is worse than no spec.
+type route struct {
+	method  string
+	path    string
+	handler http.HandlerFunc
+}
+
+// routes is the capability surface. Documentation routes are added separately
+// because they are conditional on ENABLE_DOCS.
+func (s *Server) routes() []route {
+	return []route{
+		{http.MethodGet, "/", s.serviceDescriptor},
+		{http.MethodGet, "/health", s.health},
+		{http.MethodGet, "/ready", s.readiness},
+		{http.MethodGet, "/inference", s.inferenceStatus},
+		{http.MethodGet, "/schema", s.schema},
+		{http.MethodPost, "/invoke", s.invoke},
+		{http.MethodPost, "/v1/control-translation-runs", s.submitRun},
+		{http.MethodGet, "/v1/control-translation-runs/{run_id}", s.getRunStatus},
+		{http.MethodGet, "/v1/control-translation-runs/{run_id}/result", s.getRunResult},
+		{http.MethodPost, "/v1/control-translation-runs/{run_id}/cancel", s.cancelRun},
+		{http.MethodGet, "/runs/{run_id}", s.getRun},
+		{http.MethodGet, "/v1/runs", s.listRuns},
+		{http.MethodGet, "/v1/results/{result_id}", s.getResult},
+	}
+}
+
+// documentationRoutes serve the OpenAPI document and its two renderers. They
+// are absent entirely when ENABLE_DOCS is false, so a gateway-fronted or
+// closed deployment does not publish its own surface.
+func (s *Server) documentationRoutes() []route {
+	if !s.settings.EnableDocs {
+		return nil
+	}
+	return []route{
+		{http.MethodGet, "/openapi.json", s.openAPIDocument},
+		{http.MethodGet, "/docs", s.swaggerUI},
+		{http.MethodGet, "/redoc", s.redoc},
+	}
+}
+
 // Handler builds the router with logging and CORS applied.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /{$}", s.serviceDescriptor)
-	mux.HandleFunc("GET /health", s.health)
-	mux.HandleFunc("GET /ready", s.readiness)
-	mux.HandleFunc("GET /inference", s.inferenceStatus)
-	mux.HandleFunc("GET /schema", s.schema)
-	mux.HandleFunc("POST /invoke", s.invoke)
-	mux.HandleFunc("POST /v1/control-translation-runs", s.submitRun)
-	mux.HandleFunc("GET /v1/control-translation-runs/{run_id}", s.getRunStatus)
-	mux.HandleFunc("GET /v1/control-translation-runs/{run_id}/result", s.getRunResult)
-	mux.HandleFunc("POST /v1/control-translation-runs/{run_id}/cancel", s.cancelRun)
-	mux.HandleFunc("GET /runs/{run_id}", s.getRun)
-	mux.HandleFunc("GET /v1/runs", s.listRuns)
-	mux.HandleFunc("GET /v1/results/{result_id}", s.getResult)
+	for _, entry := range append(s.routes(), s.documentationRoutes()...) {
+		pattern := entry.path
+		if pattern == "/" {
+			// Anchor the root so it does not become a catch-all prefix.
+			pattern = "/{$}"
+		}
+		mux.HandleFunc(entry.method+" "+pattern, entry.handler)
+	}
 	return s.logRequests(s.withCORS(mux))
 }
 

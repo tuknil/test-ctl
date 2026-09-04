@@ -21,6 +21,14 @@ const provenSecRule = `SecRule ARGS:Researcher "@rx (?i)(?:'\\s+OR\\s+'1'='1|` +
 
 func newTestServer(t *testing.T) (http.Handler, *storetest.FakeWorkspace) {
 	t.Helper()
+	server, fake := newTestServerAndFake(t)
+	return server.Handler(), fake
+}
+
+// newTestServerAndFake exposes the Server itself, which the OpenAPI tests need
+// in order to compare the document against the route table.
+func newTestServerAndFake(t *testing.T) (*Server, *storetest.FakeWorkspace) {
+	t.Helper()
 	fake := storetest.NewFakeWorkspace(t)
 	settings := storetest.FakeSettings()
 	client := databricks.NewWithBaseURL(settings, fake.Server.URL)
@@ -31,7 +39,7 @@ func newTestServer(t *testing.T) (http.Handler, *storetest.FakeWorkspace) {
 	server := New(settings, repository, upstream.NewResolver(settings, client), newQueue(t))
 	server.Start()
 	t.Cleanup(server.Stop)
-	return server.Handler(), fake
+	return server, fake
 }
 
 // newQueue opens a lifecycle queue in the test's temporary directory.

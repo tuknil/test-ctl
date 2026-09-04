@@ -43,6 +43,34 @@ CORS_ALLOWED_ORIGINS=http://127.0.0.1:8080 go run ./cmd/api
 | `GET` | `/v1/runs` | bounded dashboard page |
 | `GET` | `/runs/{run_id}` | durable completion envelope |
 | `GET` | `/v1/results/{result_id}` | durable business result |
+| `GET` | `/openapi.json` | the OpenAPI 3.1 document |
+| `GET` | `/docs` | Swagger UI |
+| `GET` | `/redoc` | ReDoc |
+
+## API documentation
+
+`ENABLE_DOCS=true` (the default) serves `/openapi.json` with Swagger UI at
+`/docs` and ReDoc at `/redoc`. `ENABLE_DOCS=false` removes all three routes
+entirely and stops the service descriptor advertising them, so a
+gateway-fronted or closed deployment does not publish its own surface.
+
+The document is hand-authored rather than generated, so it describes what the
+service actually accepts -- the two `/invoke` forms, the header contract on the
+async submit, which fields are rejected -- instead of what a struct tag
+implies. It also says the thing a generator would never say: **a decline is a
+200 with a typed body, not an error status**, so a caller must read
+`terminal_state` rather than switch on the HTTP code.
+
+The cost of hand-authoring is drift, so a test cross-checks the document's
+paths and methods against the route table in both directions: a route missing
+from the document fails, and a documented path that is not routed fails. Both
+directions are verified to fail on real drift, not just asserted. A second test
+holds the advertised `TerminalState` enum to the states the service can emit.
+
+The two renderers load their assets from a public CDN, the same posture
+FastAPI's built-in `/docs` has in the Python service. A deployment without
+egress to that CDN gets an unstyled page; `/openapi.json` still serves the
+document, and it is the machine-readable artifact that matters.
 
 ## Where the rule comes from
 

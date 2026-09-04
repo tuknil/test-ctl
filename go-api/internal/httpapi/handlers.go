@@ -20,15 +20,16 @@ import (
 )
 
 func (s *Server) serviceDescriptor(w http.ResponseWriter, _ *http.Request) {
-	var docs any
+	var docs, openapi any
 	if s.settings.EnableDocs {
-		docs = "/docs"
+		docs, openapi = "/docs", "/openapi.json"
 	}
 	writeJSON(w, http.StatusOK, jsonx.Obj{}.
 		Set("service", "control-translation").
 		Set("contract_id", "control-translation@1.0").
 		Set("role", "api").
 		Set("docs", docs).
+		Set("openapi", openapi).
 		Set("endpoints", []string{
 			"/health", "/ready", "/inference", "/schema", "/invoke",
 			"/v1/control-translation-runs",
