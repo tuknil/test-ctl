@@ -27,8 +27,38 @@ type FakeWorkspace struct {
 	// upstream holds the proof-loop rows a referenced request reads, keyed by
 	// result_id.
 	upstream map[string][]*string
+	// upstreamMulti returns several rows for one key, for the ambiguity case.
+	upstreamMulti map[string][][]*string
 	// Fail makes the next statement return a workspace error.
 	Fail bool
+	// statements records what was sent, so tests can assert that caller input
+	// is bound as a parameter rather than concatenated into SQL.
+	statements []Statement
+}
+
+// Statement is one executed statement and the parameters bound to it.
+type Statement struct {
+	SQL        string
+	Parameters map[string]string
+}
+
+// Statements returns everything executed so far, in order.
+func (f *FakeWorkspace) Statements() []Statement {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]Statement{}, f.statements...)
+}
+
+// LastStatementMatching returns the most recent statement containing needle.
+func (f *FakeWorkspace) LastStatementMatching(needle string) (Statement, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for index := len(f.statements) - 1; index >= 0; index-- {
+		if strings.Contains(f.statements[index].SQL, needle) {
+			return f.statements[index], true
+		}
+	}
+	return Statement{}, false
 }
 
 // UpstreamRow registers one proof-loop row for the resolver to read. The
@@ -44,6 +74,40 @@ func (f *FakeWorkspace) UpstreamRow(resultID string, columns ...string) {
 		values = append(values, ptr(columns[index]))
 	}
 	f.upstream[resultID] = values
+}
+
+// UpstreamRowsFor registers several rows for one result_id, so an ambiguous
+// reference can be exercised.
+func (f *FakeWorkspace) UpstreamRowsFor(resultID string, rows ...[]string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.upstreamMulti == nil {
+		f.upstreamMulti = map[string][][]*string{}
+	}
+	converted := make([][]*string, 0, len(rows))
+	for _, row := range rows {
+		values := make([]*string, 0, len(row))
+		for index := range row {
+			values = append(values, ptr(row[index]))
+		}
+		converted = append(converted, values)
+	}
+	f.upstreamMulti[resultID] = converted
+}
+
+// OverwriteRow replaces fields on a stored result row, so a read-back
+// mismatch can be exercised.
+func (f *FakeWorkspace) OverwriteRow(resultID string, fields map[string]string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for index, row := range f.rows {
+		if row["result_id"] == resultID {
+			for key, value := range fields {
+				f.rows[index][key] = value
+			}
+			return
+		}
+	}
 }
 
 // DropUpstreamRow removes a registered row, so a missing reference can be
@@ -100,8 +164,8 @@ func (f *FakeWorkspace) handle(w http.ResponseWriter, r *http.Request) {
 	for _, item := range request.Parameters {
 		values[item.Name] = item.Value
 	}
-
 	statement := request.Statement
+	f.statements = append(f.statements, Statement{SQL: statement, Parameters: values})
 	var data [][]*string
 	switch {
 	case mergeValues.MatchString(statement):
@@ -185,7 +249,9 @@ func (f *FakeWorkspace) handle(w http.ResponseWriter, r *http.Request) {
 		data = [][]*string{{ptr("1")}}
 	case strings.Contains(statement, "WHERE result_id = ? LIMIT 2"):
 		// The resolver's read of one proof-loop row.
-		if row, ok := f.upstream[values["1"]]; ok {
+		if rows, ok := f.upstreamMulti[values["1"]]; ok {
+			data = rows
+		} else if row, ok := f.upstream[values["1"]]; ok {
 			data = [][]*string{row}
 		}
 	}

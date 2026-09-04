@@ -150,6 +150,11 @@ DATABRICKS_DSN='token:<pat>@adb-7405605071306757.17.azuredatabricks.net:443/sql/
 DATABRICKS_DSN='<client-id>:<client-secret>@adb-7405605071306757.17.azuredatabricks.net:443/sql/1.0/warehouses/866109ed7dfce51a'
 ```
 
+The format is the one the mitigation-check service uses
+(`claude_mitigate/api/databricks.go`), so a single operator-written string
+works for both: `token:<PAT>@<host>[:443]/sql/1.0/warehouses/<id>`, with the
+port optional. A test pins that both host forms parse to the same connection.
+
 The userinfo selects the mode: a literal `token` username means a personal
 access token, anything else is a service principal. A bare username with no
 password is refused rather than guessed -- it could be a PAT written without
@@ -167,7 +172,14 @@ change.
 
 Table coordinates are not connection settings and stay separate, with working
 defaults: `DATABRICKS_CATALOG`, `DATABRICKS_SCHEMA`,
-`DATABRICKS_RESULTS_TABLE`.
+`DATABRICKS_RESULTS_TABLE`. Note the last one differs from mitigation-check's
+`DATABRICKS_TABLE`; the two services write different tables and are configured
+separately, so the names do not collide, but they do not match either.
+
+Identifiers are refused rather than escaped. mitigation-check backticks a
+table name into the statement; this service rejects anything that is not a
+plain word, because here a catalog, schema and table can arrive from a request
+(the upstream references) and not just from configuration.
 
 One variable means one place a workspace is configured and one place a
 credential lives, which is the reason to do it. It also concentrates a secret

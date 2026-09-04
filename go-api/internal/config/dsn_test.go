@@ -149,3 +149,35 @@ func TestMalformedDSNIsReportedWithoutEchoingIt(t *testing.T) {
 		})
 	}
 }
+
+// The DSN format is shared with the mitigation-check service
+// (claude_mitigate/api/databricks.go), which documents it as
+// token:<PAT>@<host>[:443]/sql/1.0/warehouses/<id> and normalizes a missing
+// port to :443. One operator-written string has to work for both services, so
+// both host forms must parse to the same connection here.
+func TestDSNHostPortIsOptionalAsInTheMitigationCheckService(t *testing.T) {
+	const (
+		withPort    = "token:dapi-secret-value@adb-example.azuredatabricks.net:443/sql/1.0/warehouses/abc"
+		withoutPort = "token:dapi-secret-value@adb-example.azuredatabricks.net/sql/1.0/warehouses/abc"
+	)
+
+	ported := settingsWithDSN(t, withPort, nil)
+	bare := settingsWithDSN(t, withoutPort, nil)
+
+	if ported.DatabricksServerHostname != bare.DatabricksServerHostname {
+		t.Errorf("hostname differs by port: %q vs %q",
+			ported.DatabricksServerHostname, bare.DatabricksServerHostname)
+	}
+	if ported.DatabricksHTTPPath != bare.DatabricksHTTPPath {
+		t.Errorf("http path differs by port: %q vs %q",
+			ported.DatabricksHTTPPath, bare.DatabricksHTTPPath)
+	}
+	if ported.DatabricksToken != bare.DatabricksToken {
+		t.Error("the token differs by port")
+	}
+	for _, settings := range []Settings{ported, bare} {
+		if problems := settings.databricksErrors(); len(problems) > 0 {
+			t.Errorf("both host forms should validate: %v", problems)
+		}
+	}
+}
