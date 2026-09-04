@@ -56,14 +56,20 @@ func Invoke(request contracts.ControlTranslationRequest, options Options) contra
 	targetTechnology := request.TargetContext.TargetTechnology
 	targetPolicyContextID := request.TargetContext.TargetPolicyContextID
 
-	// Gate 1: scope-declined -- invalid/malformed target technology.
+	// Gate 1: the target technology this build can translate to.
+	//
+	// A firewall or EDR candidate is a control this deployment does not carry,
+	// not a malformed request, so it is cannot-express with the contract's
+	// purpose-built reason code rather than invalid-input. The distinction is
+	// what orchestration routes on: invalid-input says fix the request,
+	// cannot-express says this capability cannot produce the artifact.
 	adapter := adapters.Get(targetTechnology)
 	if adapter == nil {
 		result := buildResult(buildResultInput{
 			Request:                   request,
-			TerminalState:             terminal.ScopeDeclined,
-			ReasonCode:                terminal.ReasonInvalidInput,
-			Detail:                    fmt.Sprintf("Target technology '%s' is outside configured coverage.", targetTechnology),
+			TerminalState:             terminal.CannotExpress,
+			ReasonCode:                terminal.ReasonUnsupportedTargetTechnology,
+			Detail:                    unsupportedTargetDetail(targetTechnology),
 			ConfiguredPoCDefaultsUsed: configuredDefaultsUsed,
 			ProofLoopQualification:    options.ProofLoopQualification,
 		})
@@ -180,6 +186,23 @@ func Invoke(request contracts.ControlTranslationRequest, options Options) contra
 		ProofLoopQualification:    qualification,
 	})
 	return envelope(result, settings, outcome.Success.ProposalSource, options.CorrelationID)
+}
+
+// unsupportedTargetDetail explains the decline in terms the caller can act on:
+// whether the technology is a known control this build does not carry, or an
+// identifier the contract does not define at all.
+func unsupportedTargetDetail(targetTechnology string) string {
+	supported := strings.Join(adapters.SupportedTechnologies(), ", ")
+	if controlClass, known := adapters.KnownTechnologies[targetTechnology]; known {
+		return fmt.Sprintf(
+			"Target technology '%s' (%s control class) is a valid capability target, "+
+				"but this deployment translates only to %s. Route the %s candidate to a "+
+				"deployment that carries that adapter, or regenerate it for %s.",
+			targetTechnology, controlClass, supported, controlClass, supported)
+	}
+	return fmt.Sprintf(
+		"Target technology '%s' is not a recognized capability target. "+
+			"This deployment translates only to %s.", targetTechnology, supported)
 }
 
 func translatedDetail(qualification *contracts.ProofLoopQualification) string {

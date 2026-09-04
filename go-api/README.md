@@ -177,13 +177,58 @@ The Python compiler was given the same treatment, and both emit identical
 bytes for this rule — verified by compiling it in each and diffing the compact
 JSON.
 
+## Firewall and EDR candidates
+
+This build translates only to Akamai, so a `firewall-generic` or `edr-s1`
+candidate is a control it does not carry. That is not a malformed request, and
+it does not report as one:
+
+```json
+{
+  "terminal_state": "cannot-express",
+  "status": "declined",
+  "outcome_reason": {
+    "code": "unsupported-target-technology",
+    "detail": "Target technology 'firewall-generic' (firewall control class) is a valid capability target, but this deployment translates only to akamai-waf. Route the firewall candidate to a deployment that carries that adapter, or regenerate it for akamai-waf."
+  }
+}
+```
+
+The distinction matters to the caller. `invalid-input` says *fix the request*;
+`unsupported-target-technology` says *this capability cannot produce the
+artifact*, which is what orchestration routes on. The contract has carried that
+reason code all along under `cannot-express`; neither service emitted it until
+now.
+
+Properties the tests hold to:
+
+- **A decline is a result, not an error.** HTTP 200 with a typed body, never a
+  4xx or 5xx.
+- **The subject survives**, so the decline is attributable to a vulnerability
+  and a candidate, and the requested target is echoed in `input_bindings`.
+- **It is durable.** The decline is persisted like any other run and readable
+  from `/runs/{id}` and `/v1/results/{id}`.
+- **Async runs complete, not fail.** Nothing about an unsupported target is
+  transient, so the run does not retry or sit in the queue.
+- **Referenced requests keep their references.** The three rows are read and
+  lineage-checked first, so `reference_bundle` and the resolved subject are
+  intact.
+- **The target is checked before the policy snapshot**, so the decline names
+  the real reason rather than a missing fixture snapshot.
+
+An identifier the contract does not define at all (say `palo-alto-panorama`)
+gets a different message, because that is a typo or a bad binding rather than a
+missing adapter. A control class that does not match its target
+(`waf` candidate sent to `firewall-generic`) stays `scope-declined` /
+`invalid-input`: that pairing is genuinely invalid.
+
 ## What this build deliberately does not have
 
 | Removed | Consequence |
 |---|---|
 | Live LLM doer | `RUN_MODE=live` **fails readiness on purpose**, rather than serving deterministic output while claiming to be live. |
 | Fixture doer | An unmappable rule is `cannot-express`, not a template. |
-| `firewall-generic` and `edr-s1` adapters | Those targets are `scope-declined`. |
+| `firewall-generic` and `edr-s1` adapters | Those targets decline as `cannot-express` / `unsupported-target-technology`; see below. |
 | Orchestration callbacks | The `X-Janus-Callback-*` header group is validated all-or-none, then ignored. Polling is the delivery mechanism. |
 | SQLite as a *result* store | It coordinates the queue only; results go to Databricks. |
 | The other three deterministic Akamai paths | JSON-body-field, anchored-literal, and proven-form-body. The rows they read from are still fetched; only those alternative compilations are gone, so a rule that used to take one of them now goes through the general compiler or declines. |

@@ -73,15 +73,24 @@ func orchestrationBody(requestID string) string {
 // seedProofLoop registers the three rows the resolver will read. The column
 // order matches each role's SELECT.
 func seedProofLoop(fake *storetest.FakeWorkspace, artifactContent string) {
+	seedProofLoopForTarget(fake, artifactContent, "waf", "akamai-waf")
+}
+
+// seedProofLoopForTarget seeds a proof loop whose Defense Generation row names
+// a specific control class and target technology.
+func seedProofLoopForTarget(
+	fake *storetest.FakeWorkspace, artifactContent, controlClass, targetTechnology string,
+) {
 	defenseRequest, _ := json.Marshal(map[string]any{
-		"vulnerability_id": vulnerabilityID, "selected_control_class": "waf",
+		"vulnerability_id": vulnerabilityID, "selected_control_class": controlClass,
 		"correlation_id": correlationID,
 	})
 	defenseResult, _ := json.Marshal(map[string]any{
-		"correlation_id": correlationID,
+		"correlation_id":    correlationID,
+		"target_technology": targetTechnology,
 		"primary_candidate": map[string]any{
 			"vulnerability_id": vulnerabilityID, "candidate_id": candidateID,
-			"selected_control_class": "waf",
+			"selected_control_class": controlClass,
 			"discriminator": "Submit the Researcher parameter with SQL injection " +
 				"syntax and observe the authentication bypass.",
 			"artifact_content": artifactContent,

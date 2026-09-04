@@ -47,5 +47,25 @@ func Get(targetTechnology string) Adapter {
 // Registry exposes the adapters for the /schema endpoint.
 func Registry() []Adapter { return []Adapter{registry["akamai-waf"]} }
 
+// SupportedTechnologies lists what this build can translate to, for the
+// decline emitted when a request names something else.
+func SupportedTechnologies() []string {
+	names := make([]string, 0, len(registry))
+	for _, adapter := range Registry() {
+		names = append(names, adapter.TargetTechnology())
+	}
+	return names
+}
+
+// KnownTechnologies are the target technologies the capability contract
+// defines. A request naming one of these is a control this deployment simply
+// does not carry; anything else is very likely a typo or a bad binding, and
+// the decline says which.
+var KnownTechnologies = map[string]string{
+	"akamai-waf":       "waf",
+	"firewall-generic": "firewall",
+	"edr-s1":           "edr",
+}
+
 // TargetControlClasses binds each target technology to its control class.
 var TargetControlClasses = map[string]string{"akamai-waf": "waf"}

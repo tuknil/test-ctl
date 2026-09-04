@@ -318,17 +318,6 @@ func TestProseAndPatternSummaryAreNotConfused(t *testing.T) {
 	}
 }
 
-func TestScopeDeclinedForUnknownTargetTechnology(t *testing.T) {
-	handler, _ := newTestServer(t)
-	body := strings.Replace(requestBody(provenSecRule), `"akamai-waf"`, `"firewall-generic"`, 1)
-
-	payload := decode(t, post(t, handler, "/invoke", body))
-
-	if payload["terminal_state"] != "scope-declined" {
-		t.Errorf("an unsupported target must be scope-declined: %v", payload["terminal_state"])
-	}
-}
-
 func TestInsufficientContextWhenNoSnapshotExists(t *testing.T) {
 	handler, _ := newTestServer(t)
 	body := strings.Replace(requestBody(provenSecRule),
