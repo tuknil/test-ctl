@@ -8,6 +8,7 @@ from datetime import datetime
 from hashlib import sha256
 from typing import Protocol
 
+from control_translation.callbacks import CallbackDelivery, CallbackMetadata
 from control_translation.contracts import (
     CapabilityRunStatus,
     InvokeRequestEnvelope,
@@ -53,6 +54,7 @@ class LifecycleRun:
     worker_id: str | None
     attempt_number: int
     publication_state: str
+    callback: CallbackMetadata | None = None
 
 
 @dataclass(frozen=True)
@@ -160,6 +162,7 @@ class RunRepository(Protocol):
         idempotency_key: str,
         request_digest: str,
         run_id: str | None = None,
+        callback: CallbackMetadata | None = None,
     ) -> CreatedLifecycleRun: ...
 
     def get_lifecycle_run(self, run_id: str) -> LifecycleRun | None: ...
@@ -229,3 +232,31 @@ class RunRepository(Protocol):
     ) -> bool: ...
 
     def cancel_lifecycle_run(self, run_id: str) -> LifecycleRun | None: ...
+
+    def list_due_callback_deliveries(
+        self, *, now: datetime, limit: int
+    ) -> tuple[CallbackDelivery, ...]: ...
+
+    def mark_callback_delivered(
+        self, event_id: str, *, delivered_at: datetime, status_code: int
+    ) -> None: ...
+
+    def reschedule_callback_delivery(
+        self,
+        event_id: str,
+        *,
+        attempts: int,
+        next_attempt_at: datetime,
+        status_code: int | None,
+        error_category: str,
+    ) -> None: ...
+
+    def mark_callback_configuration_failed(
+        self,
+        event_id: str,
+        *,
+        attempts: int,
+        failed_at: datetime,
+        status_code: int | None,
+        error_category: str,
+    ) -> None: ...

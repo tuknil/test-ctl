@@ -28,6 +28,11 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from control_translation import capability
 from control_translation.adapters import ADAPTER_REGISTRY
+from control_translation.callbacks import (
+    CallbackDispatcher,
+    CallbackValidationError,
+    callback_metadata_from_headers,
+)
 from control_translation.config import get_settings
 from control_translation.contracts import (
     CapabilityRunStatus,
@@ -61,6 +66,12 @@ _LIFECYCLE_WORKER = LifecycleWorker(
     lambda: _UPSTREAM_RESOLVER,
     _SETTINGS,
 )
+_CALLBACK_DISPATCHER = CallbackDispatcher(
+    lambda: _REPOSITORY,
+    token=_SETTINGS.capability_callback_token,
+    timeout_seconds=_SETTINGS.capability_callback_timeout_seconds,
+    poll_interval_seconds=_SETTINGS.capability_callback_poll_interval_seconds,
+)
 
 
 @asynccontextmanager
@@ -84,10 +95,12 @@ async def lifespan(_: FastAPI):
         _SETTINGS.normalized_persistence_backend,
     )
     _LIFECYCLE_WORKER.start()
+    _CALLBACK_DISPATCHER.start()
     try:
         yield
     finally:
         _LIFECYCLE_WORKER.stop()
+        _CALLBACK_DISPATCHER.stop()
 
 app = FastAPI(
     title="control-translation",
@@ -416,6 +429,13 @@ def submit_control_translation_run(
     content_type: str = Header(alias="Content-Type"),
     idempotency_key: str = Header(alias="Idempotency-Key", min_length=1),
     correlation_id: str = Header(alias="X-Correlation-ID", min_length=1),
+    callback_url: str | None = Header(default=None, alias="X-Janus-Callback-URL"),
+    callback_workflow_id: str | None = Header(
+        default=None, alias="X-Janus-Callback-Workflow-ID"
+    ),
+    callback_signal: str | None = Header(
+        default=None, alias="X-Janus-Callback-Signal"
+    ),
 ):
     """Persist one queued run before signaling the independent worker."""
     if content_type.split(";", 1)[0].strip().lower() != "application/json":
@@ -452,8 +472,32 @@ def submit_control_translation_run(
         return _lifecycle_error(
             400,
             "callback_not_supported",
-            "Completion callbacks are deferred; poll status and result endpoints.",
+            "Body callbacks are not supported; use the X-Janus-Callback-* headers.",
         )
+    try:
+        callback = callback_metadata_from_headers(
+            {
+                "X-Janus-Callback-URL": callback_url,
+                "X-Janus-Callback-Workflow-ID": callback_workflow_id,
+                "X-Janus-Callback-Signal": callback_signal,
+            },
+            allowed_hosts=_SETTINGS.capability_callback_allowed_hosts,
+        )
+    except CallbackValidationError as exc:
+        return _lifecycle_error(400, "invalid_callback_headers", str(exc))
+    if callback is not None:
+        logger.info(
+            "Callback metadata accepted request_id=%s correlation_id=%s workflow_id=%s",
+            payload.request_id,
+            payload.correlation_id,
+            callback.callback_workflow_id,
+        )
+        if not _SETTINGS.capability_callback_token:
+            logger.error(
+                "Callback configuration error request_id=%s correlation_id=%s reason=missing-callback-token",
+                payload.request_id,
+                payload.correlation_id,
+            )
     effective = payload.model_copy(update={"idempotency_key": idempotency_key})
     digest = normalized_request_digest(effective)
     try:
@@ -461,6 +505,7 @@ def submit_control_translation_run(
             effective,
             idempotency_key=idempotency_key,
             request_digest=digest,
+            callback=callback,
         )
     except IdempotencyConflictError:
         return _lifecycle_error(

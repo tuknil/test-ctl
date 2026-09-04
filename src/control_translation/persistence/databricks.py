@@ -20,6 +20,7 @@ from control_translation.contracts import (
     RunProgress,
     RunSummary,
 )
+from control_translation.callbacks import CallbackMetadata
 from control_translation.persistence.base import (
     CreatedLifecycleRun,
     IdempotencyConflictError,
@@ -437,7 +438,9 @@ class DatabricksRunRepository:
         idempotency_key: str,
         request_digest: str,
         run_id: str | None = None,
+        callback: CallbackMetadata | None = None,
     ) -> CreatedLifecycleRun:
+        del callback
         from uuid import uuid4
 
         self.initialize()

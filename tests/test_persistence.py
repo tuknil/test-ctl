@@ -54,6 +54,7 @@ def test_schema_initialization_is_idempotent(tmp_path):
         (1, "initial_persistence_schema"),
         (2, "async_capability_lifecycle"),
         (3, "durable_result_publication_outbox"),
+        (4, "durable_terminal_callback_outbox"),
     ]
 
 

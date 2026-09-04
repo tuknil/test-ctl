@@ -43,6 +43,9 @@ DATABRICKS_CLIENT_ID=<DATABRICKS_SERVICE_PRINCIPAL_APPLICATION_ID>
 DATABRICKS_CATALOG=36889_janus_dev
 DATABRICKS_SCHEMA=control_translation
 DATABRICKS_RESULTS_TABLE=control_translation_results
+CAPABILITY_CALLBACK_ALLOWED_HOSTS=<APPROVED_ORCHESTRATION_API_HOSTNAME>
+CAPABILITY_CALLBACK_TIMEOUT_SECONDS=10
+CAPABILITY_CALLBACK_POLL_INTERVAL_SECONDS=1
 
 HOST=0.0.0.0
 PORT=8000
@@ -59,6 +62,7 @@ image build arguments, tickets, chat, logs, or a tracked `.env` file.
 |---|---|
 | `ATT_INFERENCE_API_KEY` | Approved AT&T Inference secret |
 | `DATABRICKS_CLIENT_SECRET` | Databricks OAuth M2M service-principal secret |
+| `CAPABILITY_CALLBACK_TOKEN` | Shared orchestration callback bearer secret |
 
 The local PAT setting `DATABRICKS_AUTH_TYPE=pat` / `DATABRICKS_TOKEN` is not
 an approved Azure deployment authentication design. Use OAuth M2M in Azure.
