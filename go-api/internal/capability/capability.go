@@ -56,19 +56,19 @@ func Invoke(request contracts.ControlTranslationRequest, options Options) contra
 	targetTechnology := request.TargetContext.TargetTechnology
 	targetPolicyContextID := request.TargetContext.TargetPolicyContextID
 
-	// Gate 1: the target technology this build can translate to.
+	// Gate 1: scope-declined -- a target this build does not carry.
 	//
-	// A firewall or EDR candidate is a control this deployment does not carry,
-	// not a malformed request, so it is cannot-express with the contract's
-	// purpose-built reason code rather than invalid-input. The distinction is
-	// what orchestration routes on: invalid-input says fix the request,
-	// cannot-express says this capability cannot produce the artifact.
+	// CFS: scope-declined is "valid target outside configured coverage".
+	// cannot-express is for a target that cannot represent the pattern, which
+	// is a different question the adapter answers further down. A firewall or
+	// EDR candidate is the former: Akamai is not being asked to express it, it
+	// was never asked at all.
 	adapter := adapters.Get(targetTechnology)
 	if adapter == nil {
 		result := buildResult(buildResultInput{
 			Request:                   request,
-			TerminalState:             terminal.CannotExpress,
-			ReasonCode:                terminal.ReasonUnsupportedTargetTechnology,
+			TerminalState:             terminal.ScopeDeclined,
+			ReasonCode:                terminal.ReasonInvalidInput,
 			Detail:                    unsupportedTargetDetail(targetTechnology),
 			ConfiguredPoCDefaultsUsed: configuredDefaultsUsed,
 			ProofLoopQualification:    options.ProofLoopQualification,
@@ -188,16 +188,18 @@ func Invoke(request contracts.ControlTranslationRequest, options Options) contra
 	return envelope(result, settings, outcome.Success.ProposalSource, options.CorrelationID)
 }
 
-// unsupportedTargetDetail explains the decline in terms the caller can act on:
-// whether the technology is a known control this build does not carry, or an
-// identifier the contract does not define at all.
+// unsupportedTargetDetail explains the decline in terms the caller can act on.
+// The state is scope-declined either way; the detail says whether the target is
+// a capability target outside this deployment's coverage, or not a capability
+// target at all.
 func unsupportedTargetDetail(targetTechnology string) string {
 	supported := strings.Join(adapters.SupportedTechnologies(), ", ")
 	if controlClass, known := adapters.KnownTechnologies[targetTechnology]; known {
 		return fmt.Sprintf(
-			"Target technology '%s' (%s control class) is a valid capability target, "+
-				"but this deployment translates only to %s. Route the %s candidate to a "+
-				"deployment that carries that adapter, or regenerate it for %s.",
+			"Target technology '%s' (%s control class) is a valid capability target "+
+				"but is outside this deployment's configured coverage, which is %s. "+
+				"Route the %s candidate to a deployment that carries that adapter, or "+
+				"regenerate it for %s.",
 			targetTechnology, controlClass, supported, controlClass, supported)
 	}
 	return fmt.Sprintf(

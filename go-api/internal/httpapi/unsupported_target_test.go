@@ -6,10 +6,11 @@ import (
 	"testing"
 )
 
-// This build translates only to Akamai. A firewall or EDR candidate is a
-// control it does not carry -- not a malformed request -- so it must decline
-// in a way orchestration can route on, and it must do so through every entry
-// point without losing the subject or the durable record.
+// This build translates only to Akamai. A firewall or EDR candidate is a valid
+// capability target outside its configured coverage, which the CFS defines as
+// scope-declined. The decline must carry a detail the caller can act on, and
+// must reach every entry point without losing the subject or the durable
+// record.
 
 func targetBody(targetTechnology, controlClass, policyContext string) string {
 	body := requestBody(provenSecRule)
@@ -39,17 +40,15 @@ func TestFirewallAndEdrCandidatesDeclineAsUnsupportedTargets(t *testing.T) {
 				t.Fatalf("invoke = %d, want 200: %s", recorder.Code, recorder.Body.String())
 			}
 			payload := decode(t, recorder)
-			if payload["terminal_state"] != "cannot-express" || payload["status"] != "declined" {
+			// CFS: a valid target outside configured coverage is scope-declined.
+			if payload["terminal_state"] != "scope-declined" || payload["status"] != "declined" {
 				t.Fatalf("terminal_state = %v / status = %v",
 					payload["terminal_state"], payload["status"])
 			}
 			structured := payload["structured_result"].(map[string]any)
 			reason := structured["outcome_reason"].(map[string]any)
-
-			// The contract has a purpose-built code for exactly this. Using
-			// invalid-input instead would tell the caller to fix the request.
-			if reason["code"] != "unsupported-target-technology" {
-				t.Errorf("reason code = %v, want unsupported-target-technology", reason["code"])
+			if reason["code"] != "invalid-input" {
+				t.Errorf("reason code = %v, want invalid-input", reason["code"])
 			}
 			detail := reason["detail"].(string)
 			for _, want := range []string{testCase.technology, testCase.controlClass, "akamai-waf"} {
@@ -75,7 +74,7 @@ func TestFirewallAndEdrCandidatesDeclineAsUnsupportedTargets(t *testing.T) {
 				t.Fatalf("the decline should be persisted, got %d rows", len(fake.Rows()))
 			}
 			run := decode(t, get(t, handler, "/runs/"+payload["run_id"].(string)))
-			if run["terminal_state"] != "cannot-express" {
+			if run["terminal_state"] != "scope-declined" {
 				t.Errorf("the durable run does not match: %v", run["terminal_state"])
 			}
 		})
@@ -91,8 +90,8 @@ func TestUnrecognizedTargetIsDistinguishedFromAMissingAdapter(t *testing.T) {
 		targetBody("palo-alto-panorama", "firewall", "policy:example")))
 
 	reason := payload["structured_result"].(map[string]any)["outcome_reason"].(map[string]any)
-	if reason["code"] != "unsupported-target-technology" {
-		t.Fatalf("reason code = %v", reason["code"])
+	if payload["terminal_state"] != "scope-declined" {
+		t.Fatalf("terminal_state = %v", payload["terminal_state"])
 	}
 	if !strings.Contains(reason["detail"].(string), "not a recognized capability target") {
 		t.Errorf("an unknown identifier should say so: %s", reason["detail"])
@@ -108,8 +107,9 @@ func TestUnsupportedTargetIsReportedBeforeMissingPolicyContext(t *testing.T) {
 		targetBody("firewall-generic", "firewall", "does-not-exist")))
 
 	reason := payload["structured_result"].(map[string]any)["outcome_reason"].(map[string]any)
-	if reason["code"] != "unsupported-target-technology" {
-		t.Errorf("reason code = %v, want unsupported-target-technology", reason["code"])
+	if !strings.Contains(reason["detail"].(string), "outside this deployment") {
+		t.Errorf("the decline should name the coverage limit, not the snapshot: %s",
+			reason["detail"])
 	}
 }
 
@@ -144,14 +144,14 @@ func TestAsyncRunForAnUnsupportedTargetCompletesWithItsDecline(t *testing.T) {
 	runID := decode(t, recorder)["run_id"].(string)
 
 	status := waitForStatus(t, handler, runID, "completed")
-	if status["terminal_state"] != "cannot-express" {
+	if status["terminal_state"] != "scope-declined" {
 		t.Errorf("terminal_state = %v", status["terminal_state"])
 	}
 	if status["failure"] != nil {
 		t.Errorf("a decline is not a failure: %v", status["failure"])
 	}
 	result := decode(t, get(t, handler, "/v1/control-translation-runs/"+runID+"/result"))
-	if result["terminal_state"] != "cannot-express" {
+	if result["terminal_state"] != "scope-declined" {
 		t.Errorf("the immutable result should carry the decline: %v", result["terminal_state"])
 	}
 }
@@ -164,12 +164,8 @@ func TestReferencedRequestForAFirewallCandidateDeclinesWithItsReferences(t *test
 
 	payload := decode(t, post(t, handler, "/invoke", orchestrationBody("req-firewall")))
 
-	if payload["terminal_state"] != "cannot-express" {
+	if payload["terminal_state"] != "scope-declined" {
 		t.Fatalf("terminal_state = %v: %s", payload["terminal_state"], payload)
-	}
-	reason := payload["structured_result"].(map[string]any)["outcome_reason"].(map[string]any)
-	if reason["code"] != "unsupported-target-technology" {
-		t.Errorf("reason code = %v", reason["code"])
 	}
 	// The rows were read and validated, so the caller can still trace the run.
 	bundle := payload["reference_bundle"].(map[string]any)

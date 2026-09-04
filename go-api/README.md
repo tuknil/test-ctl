@@ -185,20 +185,27 @@ it does not report as one:
 
 ```json
 {
-  "terminal_state": "cannot-express",
+  "terminal_state": "scope-declined",
   "status": "declined",
   "outcome_reason": {
-    "code": "unsupported-target-technology",
-    "detail": "Target technology 'firewall-generic' (firewall control class) is a valid capability target, but this deployment translates only to akamai-waf. Route the firewall candidate to a deployment that carries that adapter, or regenerate it for akamai-waf."
+    "code": "invalid-input",
+    "detail": "Target technology 'firewall-generic' (firewall control class) is a valid capability target but is outside this deployment's configured coverage, which is akamai-waf. Route the firewall candidate to a deployment that carries that adapter, or regenerate it for akamai-waf."
   }
 }
 ```
 
-The distinction matters to the caller. `invalid-input` says *fix the request*;
-`unsupported-target-technology` says *this capability cannot produce the
-artifact*, which is what orchestration routes on. The contract has carried that
-reason code all along under `cannot-express`; neither service emitted it until
-now.
+`scope-declined` is what the CFS specifies: *"valid target outside configured
+coverage"*. `cannot-express` is a different question — a target that **cannot
+represent the pattern** — which the adapter answers further down. Akamai is not
+failing to express a firewall rule here; it was never asked.
+
+The reason code is a known rough edge. `scope-declined` admits only
+`invalid-input`, `policy-conflict`, `loop-exhausted-with-bypass` and
+`bypass-found-requires-regeneration`, none of which means "outside configured
+coverage", so `invalid-input` carries it and the detail does the real work.
+`unsupported-target-technology` exists in the reason table under
+`cannot-express`, where the CFS definition does not fit it, and is emitted by
+neither service. Worth raising with whoever owns the contract.
 
 Properties the tests hold to:
 
@@ -217,10 +224,10 @@ Properties the tests hold to:
   the real reason rather than a missing fixture snapshot.
 
 An identifier the contract does not define at all (say `palo-alto-panorama`)
-gets a different message, because that is a typo or a bad binding rather than a
-missing adapter. A control class that does not match its target
-(`waf` candidate sent to `firewall-generic`) stays `scope-declined` /
-`invalid-input`: that pairing is genuinely invalid.
+gets a different message, because that is a typo or a bad binding rather than
+coverage this deployment happens to lack. A control class that does not match
+its target (a `waf` candidate sent to `firewall-generic`) declines the same
+way: that pairing is genuinely invalid.
 
 ## What this build deliberately does not have
 
@@ -228,7 +235,7 @@ missing adapter. A control class that does not match its target
 |---|---|
 | Live LLM doer | `RUN_MODE=live` **fails readiness on purpose**, rather than serving deterministic output while claiming to be live. |
 | Fixture doer | An unmappable rule is `cannot-express`, not a template. |
-| `firewall-generic` and `edr-s1` adapters | Those targets decline as `cannot-express` / `unsupported-target-technology`; see below. |
+| `firewall-generic` and `edr-s1` adapters | Those targets are `scope-declined`; see below. |
 | Orchestration callbacks | The `X-Janus-Callback-*` header group is validated all-or-none, then ignored. Polling is the delivery mechanism. |
 | SQLite as a *result* store | It coordinates the queue only; results go to Databricks. |
 | The other three deterministic Akamai paths | JSON-body-field, anchored-literal, and proven-form-body. The rows they read from are still fetched; only those alternative compilations are gone, so a rule that used to take one of them now goes through the general compiler or declines. |
