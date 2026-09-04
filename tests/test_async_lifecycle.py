@@ -334,6 +334,19 @@ def test_sqlite_lifecycle_uses_delete_journal(isolated_api_repository):
     assert journal_mode == "delete"
 
 
+def test_split_repository_readiness_does_not_probe_result_sink(tmp_path):
+    lifecycle = SQLiteRunRepository(tmp_path / "ready.db")
+    lifecycle.initialize()
+
+    class UnavailableResultSink:
+        def healthcheck(self):
+            raise AssertionError("Databricks must not be probed by readiness")
+
+    repository = SplitRunRepository(lifecycle, UnavailableResultSink())
+
+    assert repository.healthcheck() is True
+
+
 def test_expired_worker_lease_is_recovered_with_bounded_attempts(tmp_path):
     repository = SQLiteRunRepository(tmp_path / "lease.db")
     request = InvokeRequestEnvelope.model_validate(_body())

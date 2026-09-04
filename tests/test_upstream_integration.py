@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from time import monotonic
 
 import pytest
 from fastapi.testclient import TestClient
@@ -11,6 +12,11 @@ from control_translation import capability
 from control_translation.api import app
 from control_translation.config import Settings
 from control_translation.contracts import InvokeRequestEnvelope, ProofLoopRequestContext
+from control_translation.lifecycle import LifecycleWorker
+from control_translation.persistence import (
+    SQLiteRunRepository,
+    normalized_request_digest,
+)
 from control_translation.terminal import TerminalState
 from control_translation.upstream import (
     UpstreamRecord,
@@ -113,7 +119,13 @@ class FakeResolver:
         self.records = records
         self.fetched: list[str] = []
 
-    def fetch(self, reference, *, cancellation_signal=None):
+    def fetch(
+        self,
+        reference,
+        *,
+        immutable_locator=None,
+        cancellation_signal=None,
+    ):
         self.fetched.append(reference.key)
         return self.records.get(reference.key)
 
@@ -601,8 +613,12 @@ def _temporal_body() -> dict:
                 "result_id": reference["key"],
                 "terminal_state": terminal_state,
                 "status": "completed",
+                "request_id": f"{capability_name}-request-1",
                 "correlation_id": CORRELATION_ID,
                 "result_ref": reference,
+                "content_sha256": "sha256:" + "a" * 64,
+                "size_bytes": 1234,
+                "created_at": "2026-09-03T12:00:00Z",
             }
             for capability_name, contract_id, run_id, reference, terminal_state in (
                 (
@@ -854,6 +870,43 @@ def test_temporal_request_id_is_idempotent_at_invoke_endpoint(monkeypatch):
         ]
         == "encoding"
     )
+
+
+def test_temporal_immutable_locators_survive_async_lifecycle(tmp_path):
+    body = _temporal_body()
+    request = InvokeRequestEnvelope.model_validate(body)
+    repository = SQLiteRunRepository(tmp_path / "locator-lifecycle.db")
+    repository.initialize()
+    created = repository.create_lifecycle_run(
+        request,
+        idempotency_key=request.request_id or "",
+        request_digest=normalized_request_digest(request),
+    )
+    worker = LifecycleWorker(
+        lambda: repository,
+        lambda: FakeResolver(_temporal_records()),
+        _settings(),
+    )
+    worker.wake()
+    try:
+        deadline = monotonic() + 5
+        result = None
+        while monotonic() < deadline:
+            current = repository.get_lifecycle_run(created.run.status.run_id)
+            assert current is not None
+            if current.status.status in {"completed", "failed", "canceled"}:
+                result = repository.get_lifecycle_result(
+                    created.run.status.run_id
+                )
+                break
+        assert result is not None
+        assert result["status"] == "completed"
+        assert result["provenance"]["upstream_inputs"] == [
+            item.model_dump(mode="json", by_alias=True)
+            for item in request.upstream_inputs or []
+        ]
+    finally:
+        worker.stop()
 
 
 def test_temporal_missing_policy_snapshot_is_typed_decline():

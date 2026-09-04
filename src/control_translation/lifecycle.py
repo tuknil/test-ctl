@@ -491,6 +491,14 @@ def build_lifecycle_result(
         "artifacts": artifacts,
         "inference": result.inference,
         "provenance": {
+            "upstream_inputs": (
+                [
+                    item.model_dump(mode="json", by_alias=True)
+                    for item in request.upstream_inputs
+                ]
+                if request.upstream_inputs is not None
+                else None
+            ),
             "upstream_result_refs": (
                 request.upstream_result_refs.model_dump(mode="json", by_alias=True)
                 if request.upstream_result_refs is not None

@@ -45,6 +45,15 @@ non-retryable unless their error envelope explicitly says otherwise.
 ## Authoritative source tables
 
 The service reads exactly one `result_id` from each reference supplied by orchestration.
+Legacy orchestration entries without bounded metadata remain accepted. Strict
+immutable-locator mode is selected when bounded metadata is present. In that
+mode all three `upstream_inputs` entries must include the producer's
+`request_id`, canonical `content_sha256`, exact `size_bytes`, and `created_at`.
+The service then rejects a locator unless its capability, approved table,
+result-ID prefix, `result_ref.key`, run/result/request/correlation identities,
+terminal state, canonical digest/size, and creation timestamp all match the
+resolved row and producer completion. Partial or mixed strict metadata is
+rejected rather than downgraded to legacy mode.
 
 | Role | Unity Catalog table | Physical payload shape read by Control Translation | Required state |
 |---|---|---|---|
@@ -53,6 +62,43 @@ The service reads exactly one `result_id` from each reference supplied by orches
 | Bypass Validation | `36889_janus_dev.bypass_validation.bypass_validation_results` | `result_id`, `terminal_state`, `correlation_id`, `request_json` JSON string, `result_json` JSON string | Route-dependent |
 
 Identifiers are validated before interpolation and result IDs are passed as SQL parameters. No broad scan or “latest row” fallback is used.
+
+The expected orchestration entry shape is:
+
+```json
+{
+  "capability": "defense-generation",
+  "contract_id": "defense-generation-result@1.0",
+  "request_id": "dg-request:CVE-2026-1234:waf:4",
+  "correlation_id": "janus-correlation:example-001",
+  "run_id": "defense-run:example-001",
+  "result_id": "defense-generation-result:example-001",
+  "status": "completed",
+  "terminal_state": "candidate-produced",
+  "result_ref": {
+    "system": "databricks",
+    "catalog": "36889_janus_dev",
+    "schema": "defense_generation",
+    "table": "defense_generation_results",
+    "key": "defense-generation-result:example-001"
+  },
+  "evidence_refs": [],
+  "content_sha256": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "size_bytes": 4096,
+  "created_at": "2026-09-03T12:00:00Z"
+}
+```
+
+Mitigation Check and Bypass Validation use the same fields with their own
+capability, contract, state, IDs, and approved result references. The complete
+command contains exactly one entry for each of the three capabilities.
+
+Inline producer JSON remains supported. If an approved row contains a
+`janus-volume-payload-manifest@1.0`, Control Translation lazily reads only the
+content-addressed object under the catalog and schema from that producer's
+approved result reference, with its fixed `payloads` Volume name, and verifies
+the strict manifest, digest, byte count, JSON object shape, and resolved result
+identity before use. Private Volume paths are never accepted from the command.
 
 The three records must resolve to one unambiguous value for each of:
 
@@ -212,6 +258,10 @@ routing context, subject, and provenance. It excludes only the duplicated body
 `idempotency_key` transport field. Reusing a key with the same digest returns
 the original run; changing any semantic field returns
 `409 idempotency_conflict`.
+
+The immutable async result preserves the complete `upstream_inputs` locators
+under `provenance.upstream_inputs`; queued lifecycle storage and publication
+recovery retain the same values unchanged.
 
 Completed requests are persisted before success is returned:
 

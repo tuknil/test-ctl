@@ -2,20 +2,25 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from collections.abc import Callable
-from typing import Any, Protocol
+from datetime import UTC, datetime
+from hashlib import sha256
 from time import perf_counter
+from typing import Any, Protocol
 
 from control_translation.cancellation import CancellationSignal, check_cancelled
-from control_translation.contracts import DatabricksResultReference
+from control_translation.contracts import (
+    DatabricksResultReference,
+    OrchestrationUpstreamInput,
+)
 from control_translation.upstream import (
     UpstreamRecord,
     UpstreamResolutionError,
     decode_json_object,
 )
-
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9_-]+$")
 logger = logging.getLogger(__name__)
@@ -33,6 +38,11 @@ class _Connection(Protocol):
 
 
 ConnectionFactory = Callable[[], _Connection]
+VolumeReader = Callable[[str, int], bytes]
+
+_MAX_UPSTREAM_RESULT_BYTES = 200 * 1024 * 1024
+_PAYLOAD_MANIFEST_TYPE = "janus-volume-payload-manifest"
+_PAYLOAD_REFERENCE = re.compile(r"^payload://sha256/([a-f0-9]{64})$")
 
 
 class DatabricksUpstreamResultResolver:
@@ -48,6 +58,8 @@ class DatabricksUpstreamResultResolver:
         client_id: str | None = None,
         client_secret: str | None = None,
         connection_factory: ConnectionFactory | None = None,
+        volume_reader: VolumeReader | None = None,
+        max_result_bytes: int = _MAX_UPSTREAM_RESULT_BYTES,
     ) -> None:
         self._server_hostname = server_hostname.strip()
         self._http_path = http_path.strip()
@@ -57,12 +69,17 @@ class DatabricksUpstreamResultResolver:
         self._client_secret = client_secret
         if self._auth_type not in {"oauth-m2m", "pat"}:
             raise ValueError("Invalid Databricks authentication type.")
+        if max_result_bytes <= 0:
+            raise ValueError("Upstream result byte limit must be positive.")
         self._connection_factory = connection_factory or self._default_connection
+        self._volume_reader = volume_reader or self._default_volume_reader
+        self._max_result_bytes = max_result_bytes
 
     def fetch(
         self,
         reference: DatabricksResultReference,
         *,
+        immutable_locator: OrchestrationUpstreamInput | None = None,
         cancellation_signal: CancellationSignal | None = None,
     ) -> UpstreamRecord | None:
         check_cancelled(cancellation_signal)
@@ -86,8 +103,8 @@ class DatabricksUpstreamResultResolver:
                 "defense_generation_results",
             )
             operation = f"""
-                SELECT result_id, terminal_state, TO_JSON(request_json),
-                       TO_JSON(result_json)
+                  SELECT run_id, result_id, terminal_state, TO_JSON(request_json),
+                      TO_JSON(result_json), produced_at
                 FROM {table_name}
                 WHERE result_id = ?
                 LIMIT 2
@@ -100,7 +117,7 @@ class DatabricksUpstreamResultResolver:
                 "mitigation_check",
             )
             operation = f"""
-                SELECT result_id, result_json
+                SELECT run_id, result_id, result_json
                 FROM {table_name}
                 WHERE result_id = ?
                 LIMIT 2
@@ -113,8 +130,10 @@ class DatabricksUpstreamResultResolver:
                 "bypass_validation_results",
             )
             operation = f"""
-                SELECT result_id, terminal_state, correlation_id,
-                       request_json, result_json
+                  SELECT run_id, result_id, request_id, correlation_id,
+                      capability, contract_id, terminal_state, status,
+                      request_json, result_json, completion_json,
+                      result_sha256, result_size_bytes, created_at
                 FROM {table_name}
                 WHERE result_id = ?
                 LIMIT 2
@@ -160,6 +179,9 @@ class DatabricksUpstreamResultResolver:
                 (perf_counter() - started) * 1000,
             )
         except Exception as exc:
+            error_type = type(exc).__name__
+            error_code = getattr(exc, "error_code", None) or "-"
+            sql_state = getattr(exc, "sql_state", None) or "-"
             logger.exception(
                 "Upstream Databricks read failed shape=%s table=%s result_id=%s "
                 "duration_ms=%.2f error_type=%s error_code=%s sql_state=%s",
@@ -167,9 +189,9 @@ class DatabricksUpstreamResultResolver:
                 table_name,
                 reference.key,
                 (perf_counter() - started) * 1000,
-                type(exc).__name__,
-                getattr(exc, "error_code", None) or "-",
-                getattr(exc, "sql_state", None) or "-",
+                error_type,
+                error_code,
+                sql_state,
             )
             raise
         finally:
@@ -194,33 +216,107 @@ class DatabricksUpstreamResultResolver:
         if row is None:
             return None
         if shape == "defense":
-            request = decode_json_object(row[2], "Defense Generation request_json")
-            result = decode_json_object(row[3], "Defense Generation result_json")
-            terminal_state = row[1]
+            run_id, result_id, terminal_state = row[0], row[1], row[2]
+            request = self._decode_payload(
+                row[3],
+                "Defense Generation request_json",
+                shape=shape,
+                approved_volume=(
+                    reference.catalog,
+                    reference.schema_name,
+                    "payloads",
+                ),
+            )
+            result = self._decode_payload(
+                row[4],
+                "Defense Generation result_json",
+                shape=shape,
+                approved_volume=(
+                    reference.catalog,
+                    reference.schema_name,
+                    "payloads",
+                ),
+            )
             correlation_id = _find_one(result, request, key="correlation_id")
             subject_revision = _find_one(
                 result, request, key="subject_record_revision_id"
             )
+            completion = None
+            row_created_at = row[5]
+            row_digest = None
+            row_size = None
         elif shape == "mitigation":
+            run_id, result_id = row[0], row[1]
             request = {}
-            result = decode_json_object(row[1], "Mitigation Check result_json")
+            result = self._decode_payload(
+                row[2],
+                "Mitigation Check result_json",
+                shape=shape,
+                approved_volume=(
+                    reference.catalog,
+                    reference.schema_name,
+                    "payloads",
+                ),
+            )
             terminal_state = result.get("terminal_state")
             correlation_id = result.get("correlation_id")
             subject_revision = _find_one(
                 result, key="subject_record_revision_id"
             )
+            completion = None
+            row_created_at = None
+            row_digest = None
+            row_size = None
         else:
-            request = decode_json_object(row[3], "Bypass Validation request_json")
-            result = decode_json_object(row[4], "Bypass Validation result_json")
-            terminal_state = row[1] or result.get("terminal_state")
-            correlation_id = row[2] or _find_one(
+            run_id, result_id = row[0], row[1]
+            request = self._decode_payload(
+                row[8],
+                "Bypass Validation request_json",
+                shape=shape,
+                approved_volume=(
+                    reference.catalog,
+                    reference.schema_name,
+                    "payloads",
+                ),
+            )
+            result = self._decode_payload(
+                row[9],
+                "Bypass Validation result_json",
+                shape=shape,
+                approved_volume=(
+                    reference.catalog,
+                    reference.schema_name,
+                    "payloads",
+                ),
+            )
+            completion = decode_json_object(
+                row[10], "Bypass Validation completion_json"
+            )
+            terminal_state = row[6] or result.get("terminal_state")
+            correlation_id = row[3] or _find_one(
                 result, request, key="correlation_id"
             )
             subject_revision = _find_one(
                 result, request, key="subject_record_revision_id"
             )
+            row_created_at = row[13]
+            row_digest = row[11]
+            row_size = row[12]
+        self._verify_immutable_result(
+            shape=shape,
+            reference=reference,
+            locator=immutable_locator,
+            run_id=str(run_id or ""),
+            result_id=str(result_id or ""),
+            terminal_state=str(terminal_state or ""),
+            result=result,
+            completion=completion,
+            row_digest=row_digest,
+            row_size=row_size,
+            row_created_at=row_created_at,
+        )
         return UpstreamRecord(
-            result_id=row[0],
+            result_id=str(result_id),
             terminal_state=str(terminal_state or ""),
             correlation_id=(
                 str(correlation_id) if isinstance(correlation_id, str) else None
@@ -229,6 +325,284 @@ class DatabricksUpstreamResultResolver:
             request=request,
             result=result,
         )
+
+    def _decode_payload(
+        self,
+        value: Any,
+        label: str,
+        *,
+        shape: str,
+        approved_volume: tuple[str, str, str] | None = None,
+    ) -> dict[str, Any]:
+        payload = decode_json_object(value, label)
+        if payload.get("contract_type") != _PAYLOAD_MANIFEST_TYPE:
+            return payload
+        content = self._hydrate_payload_manifest(
+            payload,
+            producer=label.split(" request_json", 1)[0].split(" result_json", 1)[0],
+            approved_volume=approved_volume
+            or (
+                "36889_janus_dev",
+                {
+                    "defense": "defense_generation",
+                    "mitigation": "mitigation-check",
+                    "bypass": "bypass_validation",
+                }[shape],
+                "payloads",
+            ),
+        )
+        return decode_json_object(content, f"hydrated {label}")
+
+    def _hydrate_payload_manifest(
+        self,
+        manifest: dict[str, Any],
+        *,
+        producer: str,
+        approved_volume: tuple[str, str, str],
+    ) -> bytes:
+        expected_keys = {
+            "contract_type",
+            "contract_version",
+            "reference",
+            "media_type",
+            "encoding",
+            "content_sha256",
+            "size_bytes",
+            "volume",
+        }
+        match = _PAYLOAD_REFERENCE.fullmatch(
+            str(manifest.get("reference") or "")
+        )
+        digest = match.group(1) if match is not None else ""
+        volume = manifest.get("volume")
+        catalog, schema, volume_name = approved_volume
+        expected_volume = {
+            "catalog": catalog,
+            "schema": schema,
+            "name": volume_name,
+        }
+        size = manifest.get("size_bytes")
+        if (
+            set(manifest) != expected_keys
+            or not digest
+            or manifest.get("contract_version") != "1.0"
+            or manifest.get("media_type") != "application/json"
+            or manifest.get("encoding") != "identity"
+            or manifest.get("content_sha256") != f"sha256:{digest}"
+            or type(size) is not int
+            or not 0 < size <= self._max_result_bytes
+            or volume != expected_volume
+        ):
+            raise UpstreamResolutionError(
+                f"{producer} payload manifest is invalid"
+            )
+        path = (
+            f"/Volumes/{catalog}/{schema}/{volume_name}/sha256/"
+            f"{digest[:2]}/{digest[2:4]}/{digest}"
+        )
+        try:
+            content = self._volume_reader(path, self._max_result_bytes)
+        except Exception as exc:
+            raise UpstreamResolutionError(
+                f"{producer} payload manifest could not be hydrated"
+            ) from exc
+        if (
+            len(content) != size
+            or sha256(content).hexdigest() != digest
+            or len(content) > self._max_result_bytes
+        ):
+            raise UpstreamResolutionError(
+                f"{producer} payload manifest integrity verification failed"
+            )
+        return content
+
+    def _verify_immutable_result(
+        self,
+        *,
+        shape: str,
+        reference: DatabricksResultReference,
+        locator: OrchestrationUpstreamInput | None,
+        run_id: str,
+        result_id: str,
+        terminal_state: str,
+        result: dict[str, Any],
+        completion: dict[str, Any] | None,
+        row_digest: Any,
+        row_size: Any,
+        row_created_at: Any,
+    ) -> None:
+        role = {
+            "defense": "Defense Generation",
+            "mitigation": "Mitigation Check",
+            "bypass": "Bypass Validation",
+        }[shape]
+        if result_id != reference.key:
+            raise UpstreamResolutionError(
+                f"{role} row result_id does not match its reference"
+            )
+        expected_capability = {
+            "defense": "defense-generation",
+            "mitigation": "mitigation-check",
+            "bypass": "bypass-validation",
+        }[shape]
+        expected_contracts = {
+            "defense": {"defense-generation@1.0", "defense-generation-result@1.0"},
+            "mitigation": {"mitigation-check@1.0"},
+            "bypass": {"bypass-validation@1.0"},
+        }[shape]
+        if result.get("capability") != expected_capability and (
+            shape != "bypass" or result.get("capability") is not None
+        ):
+            raise UpstreamResolutionError(f"{role} capability identity is invalid")
+        if result.get("contract_id") not in expected_contracts:
+            raise UpstreamResolutionError(f"{role} result contract is unsupported")
+        expected_result_ref = reference.model_dump(mode="json", by_alias=True)
+        identities: dict[str, Any] = {
+            "run_id": run_id,
+            "result_id": result_id,
+            "terminal_state": terminal_state,
+            "result_ref": expected_result_ref,
+        }
+        if shape != "bypass":
+            identities["status"] = "completed"
+        strict_locator = locator is not None and locator.is_strict_locator
+        for field, expected in identities.items():
+            if (strict_locator or field in result) and result.get(field) != expected:
+                raise UpstreamResolutionError(
+                    f"{role} result {field} does not match the immutable row"
+                )
+        declared_digest = result.get("content_sha256")
+        declared_size = result.get("size_bytes")
+        digest: str | None = None
+        size: int | None = None
+        if strict_locator or declared_digest is not None or declared_size is not None or shape == "bypass":
+            digest, size = _producer_integrity(shape, result)
+            if shape in {"defense", "mitigation"} and (
+                declared_digest != digest or declared_size != size
+            ):
+                raise UpstreamResolutionError(
+                    f"{role} canonical digest or size is invalid"
+                )
+        if shape == "bypass":
+            if str(row_digest or "") != digest or int(row_size or -1) != size:
+                raise UpstreamResolutionError(
+                    "Bypass Validation persisted digest or size is invalid"
+                )
+            _verify_completion(
+                completion or {},
+                role=role,
+                expected={
+                    **identities,
+                    "status": "completed",
+                    "capability": expected_capability,
+                    "content_sha256": digest,
+                    "size_bytes": size,
+                },
+            )
+        if locator is None:
+            return
+        if not strict_locator:
+            return
+        assert digest is not None and size is not None
+        locator_values: dict[str, Any] = {
+            "run_id": locator.run_id,
+            "result_id": locator.result_id,
+            "terminal_state": locator.terminal_state,
+            "result_ref": expected_result_ref,
+        }
+        if shape == "bypass":
+            assert completion is not None
+            _verify_completion(
+                completion,
+                role=role,
+                expected={
+                    "capability": locator.capability,
+                    "run_id": locator.run_id,
+                    "result_id": locator.result_id,
+                    "request_id": locator.request_id,
+                    "correlation_id": locator.correlation_id,
+                    "terminal_state": locator.terminal_state,
+                    "status": locator.status,
+                    "result_ref": expected_result_ref,
+                    "content_sha256": locator.content_sha256,
+                    "size_bytes": locator.size_bytes,
+                },
+            )
+        else:
+            locator_values.update(
+                request_id=locator.request_id,
+                correlation_id=locator.correlation_id,
+                status=locator.status,
+            )
+        for field, expected in locator_values.items():
+            if result.get(field) != expected:
+                raise UpstreamResolutionError(
+                    f"{role} result {field} differs from the immutable locator"
+                )
+        if digest != locator.content_sha256 or size != locator.size_bytes:
+            raise UpstreamResolutionError(
+                f"{role} canonical digest or size differs from the immutable locator"
+            )
+        result_created_at = _parse_datetime(
+            result.get("created_at") or result.get("produced_at"), role
+        )
+        if result_created_at != locator.created_at.astimezone(UTC):
+            raise UpstreamResolutionError(
+                f"{role} created_at differs from the immutable locator"
+            )
+        if row_created_at is not None and _parse_datetime(row_created_at, role) != result_created_at:
+            raise UpstreamResolutionError(
+                f"{role} row created_at differs from the canonical result"
+            )
+
+    def _default_volume_reader(self, path: str, max_bytes: int) -> bytes:
+        from databricks.sdk import WorkspaceClient
+        from databricks.sdk.core import Config
+
+        if self._auth_type == "pat":
+            if not self._token:
+                raise RuntimeError("Databricks PAT configuration is incomplete")
+            config = Config(
+                host=f"https://{self._server_hostname}", token=self._token
+            )
+        else:
+            if not self._client_id or not self._client_secret:
+                raise RuntimeError("Databricks OAuth configuration is incomplete")
+            config = Config(
+                host=f"https://{self._server_hostname}",
+                client_id=self._client_id,
+                client_secret=self._client_secret,
+            )
+        response = WorkspaceClient(config=config).files.download(path)
+        content = _read_files_response(response, max_bytes)
+        if len(content) > max_bytes:
+            raise ValueError("Databricks Volume payload exceeds the configured limit")
+        return content
+
+    def healthcheck(self) -> bool:
+        """Verify the configured upstream SQL reader without reading results."""
+        connection: _Connection | None = None
+        cursor: _Cursor | None = None
+        try:
+            connection = self._connection_factory()
+            cursor = connection.cursor()
+            cursor.execute("SELECT 1")
+            cursor.fetchall()
+            return True
+        except Exception:
+            logger.warning("Upstream Databricks readiness check failed", exc_info=True)
+            return False
+        finally:
+            if cursor is not None:
+                try:
+                    cursor.close()
+                except Exception:
+                    logger.warning("Upstream readiness cursor close failed", exc_info=True)
+            if connection is not None:
+                try:
+                    connection.close()
+                except Exception:
+                    logger.warning("Upstream readiness connection close failed", exc_info=True)
 
     def _default_connection(self) -> _Connection:
         from databricks import sql
@@ -242,7 +616,8 @@ class DatabricksUpstreamResultResolver:
                 access_token=self._token,
             )
 
-        from databricks.sdk.core import Config, oauth_service_principal
+        from databricks.sdk.core import Config
+        from databricks.sdk.credentials_provider import oauth_service_principal
 
         if not self._client_id or not self._client_secret:
             raise RuntimeError("Databricks OAuth configuration is incomplete")
@@ -286,6 +661,16 @@ def _quote_identifier(value: str, label: str) -> str:
     return f"`{normalized}`"
 
 
+def _read_files_response(response: Any, max_bytes: int) -> bytes:
+    stream = response.contents
+    if stream is None:
+        raise ValueError("Databricks Volume download returned no content")
+    try:
+        return stream.read(max_bytes + 1)
+    finally:
+        stream.close()
+
+
 def _find_one(*documents: Any, key: str) -> str | None:
     values: set[str] = set()
 
@@ -302,3 +687,153 @@ def _find_one(*documents: Any, key: str) -> str | None:
     for document in documents:
         visit(document)
     return next(iter(values)) if len(values) == 1 else None
+
+
+def _verify_completion(
+    completion: dict[str, Any], *, role: str, expected: dict[str, Any]
+) -> None:
+    for field, value in expected.items():
+        if completion.get(field) != value:
+            raise UpstreamResolutionError(
+                f"{role} completion {field} does not match the canonical result"
+            )
+
+
+def _producer_integrity(
+    shape: str, result: dict[str, Any]
+) -> tuple[str, int]:
+    if shape == "defense":
+        ordered_fields = (
+            "capability",
+            "contract_id",
+            "request_id",
+            "correlation_id",
+            "run_id",
+            "result_id",
+            "status",
+            "terminal_state",
+            "result_ref",
+            "evidence_refs",
+            "outcome_reason",
+            "primary_candidate",
+            "proof_handoffs",
+            "attempt_history",
+            "prose_summary",
+            "request_digest",
+            "upstream_result_refs",
+            "created_at",
+        )
+        payload = _go_ordered_json(result, ordered_fields)
+    elif shape == "mitigation":
+        ordered_fields = (
+            "capability",
+            "contract_id",
+            "request_id",
+            "run_id",
+            "result_id",
+            "terminal_state",
+            "status",
+            "correlation_id",
+            "result_ref",
+            "evidence_refs",
+            "request_sha256",
+            "upstream_inputs",
+            "input_provenance",
+            "match",
+            "expected",
+            "actual",
+            "substrate",
+            "candidate",
+            "test_basis",
+            "steps",
+            "prose_summary",
+            "limitations",
+            "created_at",
+        )
+        payload = _go_ordered_json(
+            result,
+            ordered_fields,
+            omit_empty={
+                "correlation_id": "string",
+                "result_ref": "pointer",
+                "upstream_inputs": "raw",
+                "input_provenance": "pointer",
+                "candidate": "pointer",
+                "test_basis": "pointer",
+                "limitations": "slice",
+            },
+        )
+    else:
+        payload = json.dumps(
+            result,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    return f"sha256:{sha256(payload).hexdigest()}", len(payload)
+
+
+def _go_ordered_json(
+    result: dict[str, Any],
+    fields: tuple[str, ...],
+    *,
+    omit_empty: dict[str, str] | None = None,
+) -> bytes:
+    omit_empty = omit_empty or {}
+    missing = [
+        field for field in fields
+        if field not in result and field not in omit_empty
+    ]
+    if missing:
+        raise UpstreamResolutionError(
+            "canonical producer result is missing required fields: "
+            + ", ".join(missing)
+        )
+    ordered: dict[str, Any] = {}
+    for field in fields:
+        if field not in result:
+            continue
+        value = result[field]
+        kind = omit_empty.get(field)
+        if kind == "string" and value == "":
+            continue
+        if kind == "pointer" and value is None:
+            continue
+        if kind == "raw" and value is None:
+            continue
+        if kind == "slice" and value in (None, []):
+            continue
+        ordered[field] = value
+    encoded = json.dumps(
+        ordered,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+    )
+    # Match encoding/json's default string escaping while retaining UTF-8.
+    encoded = (
+        encoded.replace("&", r"\u0026")
+        .replace("<", r"\u003c")
+        .replace(">", r"\u003e")
+        .replace("\u2028", r"\u2028")
+        .replace("\u2029", r"\u2029")
+    )
+    return encoded.encode("utf-8")
+
+
+def _parse_datetime(value: Any, role: str) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError as exc:
+            raise UpstreamResolutionError(
+                f"{role} created_at is invalid"
+            ) from exc
+    else:
+        raise UpstreamResolutionError(f"{role} created_at is missing")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
