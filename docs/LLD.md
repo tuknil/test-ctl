@@ -13,8 +13,8 @@ real Pydantic AI agent as the translation doer.
 
 ```text
                  ┌────────────────────┐
-   HTTP client   │   FastAPI api.py    │   static UI (ui/) served at "/"
-  ───────────►   │  /health /schema    │
+   HTTP client   │   FastAPI api.py    │   API only; the demo UI is a
+  ───────────►   │  /health /schema    │   separate service (see §12)
                  │ /invoke /v1/control │
                  │ -translation-runs   │
                  │ /v1/runs /results   │
@@ -85,9 +85,16 @@ as full bypass clearance.
 5. Call `PolicyReader.read_snapshot`;
    miss → `insufficient-context`.
 6. `translation/engine.translate`:
-   a. `adapter.supports_feature(discriminator_description)` mechanical pre-check;
-      fails → `cannot-express`.
-   b. Call the doer (`FixtureTranslationDoer` or `LiveTranslationDoer`) →
+   a. For `akamai-waf`, `_akamai_deterministic_proposal` builds the candidate in
+      code, most authoritative source first: the Mitigation Check JSON field,
+      an anchored literal argument, the proven form body, then
+      `modsec_akamai.compile_akamai_custom_rule`, which compiles the proven
+      ModSecurity `SecRule` itself. The path that ran is reported as
+      `inference.proposal_source`.
+   b. Only if no deterministic path applies:
+      `adapter.supports_feature(discriminator_description)` mechanical
+      pre-check (fails → `cannot-express`), then the doer
+      (`FixtureTranslationDoer` or `LiveTranslationDoer`) →
       `TranslationProposal`; exception → `malfunction` (`provider-failure`).
    c. `syntax_validator.validate` (judge gate 1); fails → `cannot-express`.
    d. `conflict_checker.detect_conflicts` (judge gate 2); non-empty → surfaced
@@ -264,8 +271,13 @@ canonical result, and polling remains the fallback for every failure mode.
 
 ## 11. Agent architecture
 
-- Doer: `agents/translation_agent.py`. `TranslationProposal` is the only
-  trusted output shape from the model.
+- Default doer for `akamai-waf`: **code, not a model.**
+  `translation/modsec_akamai.py` compiles the proven ModSecurity rule into an
+  Akamai custom rule and returns the same `TranslationProposal` shape. It
+  declines (returns `None`) for any construct without a certain Akamai
+  equivalent, which is the only way the model is reached for a WAF candidate.
+- Fallback doer: `agents/translation_agent.py`. `TranslationProposal` is the
+  only trusted output shape from the model.
 - Model/provider config: `config.py::Settings`, sourced from `.env`
   (`RUN_MODE`, `MODEL_PROVIDER`, `MODEL_NAME`, `OPENAI_API_KEY` or Azure
   OpenAI equivalents). `RUN_MODE=fixture` is the default and requires no key.
@@ -275,12 +287,28 @@ canonical result, and polling remains the fallback for every failure mode.
 
 ## 12. Deployment architecture summary
 
-Container needs: Python 3.11+ runtime, `uvicorn control_translation.api:app`
-entrypoint, port 8000, static `ui/` directory alongside `src/`, `.env`
-variables injected as container secrets (never baked into the image). Full
-DevOps handoff spec: `deploy/DEVOPS-HANDOFF.html`. A working `Dockerfile`,
-`.dockerignore`, and `docker-compose.yml` are included in this repo as a
-starting point for DevOps to adapt.
+Two deployables are built from this repository.
+
+**Capability API** (`Dockerfile`): Python 3.11+ runtime,
+`uvicorn control_translation.api:app` entrypoint, port 8000, `.env` variables
+injected as container secrets (never baked into the image), durable volume at
+`/app/data`, exactly one replica while lifecycle state uses SQLite.
+
+**Demo UI** (`Dockerfile.ui`): `uvicorn control_translation_ui.app:app`
+entrypoint, port 8080, the static `ui/` directory, and a single setting,
+`API_ENDPOINT`. It installs only `deploy/ui-requirements.txt`, so the UI image
+carries no model client and no Databricks driver. It is stateless, needs no
+volume, and scales horizontally. It must never receive the API's secrets.
+
+The browser loads the page from the UI service and calls the API directly, so
+the API's `CORS_ALLOWED_ORIGINS` must name the UI's public origin. That setting
+is empty by default, which closes browser access entirely. Alternatively, front
+both with one gateway hostname and set `API_ENDPOINT=""` to keep the browser
+same-origin.
+
+Full DevOps handoff spec: `deploy/DEVOPS-HANDOFF.html`. Working `Dockerfile`,
+`Dockerfile.ui`, `.dockerignore`, and a two-service `docker-compose.yml` are
+included in this repo as a starting point for DevOps to adapt.
 
 Callback deployment additionally requires a secret reference for
 `CAPABILITY_CALLBACK_TOKEN`. Configure
