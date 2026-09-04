@@ -44,6 +44,197 @@ _MAX_UPSTREAM_RESULT_BYTES = 200 * 1024 * 1024
 _PAYLOAD_MANIFEST_TYPE = "janus-volume-payload-manifest"
 _PAYLOAD_REFERENCE = re.compile(r"^payload://sha256/([a-f0-9]{64})$")
 
+_GoField = tuple[str, "_GoSchema | None", str | None]
+_GoSchema = tuple[_GoField, ...]
+
+
+def _field(
+    name: str,
+    schema: _GoSchema | None = None,
+    omit_empty: str | None = None,
+) -> _GoField:
+    return name, schema, omit_empty
+
+
+_RESULT_REF_SCHEMA: _GoSchema = (
+    _field("system"),
+    _field("catalog", omit_empty="string"),
+    _field("schema", omit_empty="string"),
+    _field("table"),
+    _field("key"),
+)
+
+_DEFENSE_OUTCOME_REASON_SCHEMA: _GoSchema = (
+    _field("code"),
+    _field("detail"),
+    _field("unresolved_payload", omit_empty="string"),
+    _field("encoding_kind", omit_empty="string"),
+    _field("uncovered_required_form", omit_empty="string"),
+    _field("rejection_reason", omit_empty="string"),
+    _field("repeated_functional_fingerprint", omit_empty="string"),
+)
+_DEFENSE_COLLATERAL_PRIOR_SCHEMA: _GoSchema = (
+    _field("verdict"),
+    _field("confidence"),
+    _field("basis"),
+    _field("gaps"),
+    _field("measured"),
+)
+_DEFENSE_CANDIDATE_SCHEMA: _GoSchema = (
+    _field("candidate_id"),
+    _field("selected_control_class"),
+    _field("candidate_kind"),
+    _field("mitigation_intent"),
+    _field("discriminator"),
+    _field("expected_block_behavior"),
+    _field("expected_allow_behavior"),
+    _field("artifact_type"),
+    _field("artifact_content"),
+    _field("artifact_hash"),
+    _field("collateral_impact_prior", _DEFENSE_COLLATERAL_PRIOR_SCHEMA),
+    _field("assumptions"),
+    _field("limitations"),
+    _field("evidence_refs"),
+)
+_DEFENSE_PROOF_HANDOFF_SCHEMA: _GoSchema = (
+    _field("capability"),
+    _field("contract_id"),
+    _field("substrate"),
+    _field("candidate_ref", _RESULT_REF_SCHEMA),
+    _field("evidence_refs", omit_empty="slice"),
+)
+_DEFENSE_ATTEMPT_SCHEMA: _GoSchema = (
+    _field("candidate_id"),
+    _field("outcome"),
+    _field("feedback_refs"),
+    _field("do_not_repeat_constraints"),
+)
+_DEFENSE_UPSTREAM_REF_SCHEMA: _GoSchema = (
+    _field("capability"),
+    _field("contract_id"),
+    _field("request_id", omit_empty="string"),
+    _field("correlation_id", omit_empty="string"),
+    _field("run_id", omit_empty="string"),
+    _field("result_id"),
+    _field("terminal_state", omit_empty="string"),
+    _field("status", omit_empty="string"),
+    _field("result_ref", _RESULT_REF_SCHEMA),
+    _field("evidence_refs", omit_empty="slice"),
+    _field("content_sha256", omit_empty="string"),
+    _field("size_bytes", omit_empty="number"),
+    _field("created_at", omit_empty="time"),
+)
+_DEFENSE_RESULT_SCHEMA: _GoSchema = (
+    _field("capability"),
+    _field("contract_id"),
+    _field("request_id"),
+    _field("correlation_id"),
+    _field("run_id"),
+    _field("result_id"),
+    _field("status"),
+    _field("terminal_state"),
+    _field("result_ref", _RESULT_REF_SCHEMA, "pointer"),
+    _field("evidence_refs"),
+    _field("outcome_reason", _DEFENSE_OUTCOME_REASON_SCHEMA),
+    _field("primary_candidate", _DEFENSE_CANDIDATE_SCHEMA, "pointer"),
+    _field("proof_handoffs", _DEFENSE_PROOF_HANDOFF_SCHEMA, "slice"),
+    _field("attempt_history", _DEFENSE_ATTEMPT_SCHEMA),
+    _field("prose_summary"),
+    _field("request_digest"),
+    _field("upstream_result_refs", _DEFENSE_UPSTREAM_REF_SCHEMA),
+    _field("content_sha256", omit_empty="string"),
+    _field("size_bytes", omit_empty="number"),
+    _field("created_at"),
+)
+
+_MITIGATION_LOCATOR_SCHEMA: _GoSchema = (
+    _field("capability"),
+    _field("contract_id"),
+    _field("request_id"),
+    _field("correlation_id"),
+    _field("run_id"),
+    _field("result_id"),
+    _field("status"),
+    _field("terminal_state"),
+    _field("result_ref", _RESULT_REF_SCHEMA),
+    _field("content_sha256"),
+    _field("size_bytes"),
+    _field("created_at"),
+)
+_MITIGATION_PROVENANCE_SCHEMA: _GoSchema = (
+    _field("route_policy"),
+    _field("defense_result", _MITIGATION_LOCATOR_SCHEMA),
+    _field("check_result", _MITIGATION_LOCATOR_SCHEMA),
+    _field("selected_test_basis_id"),
+    _field("verification"),
+)
+_MITIGATION_EXPECTED_SCHEMA: _GoSchema = (
+    _field("classification"),
+    _field("blocked"),
+    _field("status_code"),
+)
+_MITIGATION_ACTUAL_SCHEMA: _GoSchema = (
+    _field("blocked"),
+    _field("status_code"),
+    _field("reached_app"),
+    _field("matched_rule_id", omit_empty="string"),
+    _field("detail"),
+)
+_MITIGATION_SUBSTRATE_SCHEMA: _GoSchema = (
+    _field("image"),
+    _field("runner", omit_empty="string"),
+    _field("container_id", omit_empty="string"),
+    _field("host_port", omit_empty="number"),
+    _field("fqdn", omit_empty="string"),
+    _field("ready"),
+)
+_MITIGATION_CANDIDATE_SCHEMA: _GoSchema = (
+    _field("kind"),
+    _field("engine"),
+    _field("rule_id"),
+    _field("rule"),
+    _field("action"),
+)
+_MITIGATION_REQUEST_SCHEMA: _GoSchema = (
+    _field("method"),
+    _field("path"),
+    _field("headers"),
+    _field("body"),
+)
+_MITIGATION_TEST_BASIS_SCHEMA: _GoSchema = (
+    _field("kind"),
+    _field("proof_basis"),
+    _field("request", _MITIGATION_REQUEST_SCHEMA),
+    _field("expected", _MITIGATION_EXPECTED_SCHEMA),
+)
+_MITIGATION_RESULT_SCHEMA: _GoSchema = (
+    _field("capability"),
+    _field("contract_id"),
+    _field("request_id"),
+    _field("run_id"),
+    _field("result_id"),
+    _field("terminal_state"),
+    _field("status"),
+    _field("correlation_id", omit_empty="string"),
+    _field("result_ref", _RESULT_REF_SCHEMA, "pointer"),
+    _field("evidence_refs"),
+    _field("request_sha256"),
+    _field("upstream_inputs", omit_empty="raw"),
+    _field("input_provenance", _MITIGATION_PROVENANCE_SCHEMA, "pointer"),
+    _field("match"),
+    _field("expected", _MITIGATION_EXPECTED_SCHEMA),
+    _field("actual", _MITIGATION_ACTUAL_SCHEMA),
+    _field("substrate", _MITIGATION_SUBSTRATE_SCHEMA),
+    _field("candidate", _MITIGATION_CANDIDATE_SCHEMA, "pointer"),
+    _field("test_basis", _MITIGATION_TEST_BASIS_SCHEMA, "pointer"),
+    _field("steps"),
+    _field("prose_summary"),
+    _field("limitations", omit_empty="slice"),
+    _field("content_sha256", omit_empty="string"),
+    _field("size_bytes", omit_empty="number"),
+    _field("created_at"),
+)
+
 
 class DatabricksUpstreamResultResolver:
     """Read exactly one record from each caller-authorized Databricks reference."""
@@ -703,66 +894,11 @@ def _producer_integrity(
     shape: str, result: dict[str, Any]
 ) -> tuple[str, int]:
     if shape == "defense":
-        ordered_fields = (
-            "capability",
-            "contract_id",
-            "request_id",
-            "correlation_id",
-            "run_id",
-            "result_id",
-            "status",
-            "terminal_state",
-            "result_ref",
-            "evidence_refs",
-            "outcome_reason",
-            "primary_candidate",
-            "proof_handoffs",
-            "attempt_history",
-            "prose_summary",
-            "request_digest",
-            "upstream_result_refs",
-            "created_at",
-        )
-        payload = _go_ordered_json(result, ordered_fields)
+        unsigned = {**result, "content_sha256": "", "size_bytes": 0}
+        payload = _go_ordered_json(unsigned, _DEFENSE_RESULT_SCHEMA)
     elif shape == "mitigation":
-        ordered_fields = (
-            "capability",
-            "contract_id",
-            "request_id",
-            "run_id",
-            "result_id",
-            "terminal_state",
-            "status",
-            "correlation_id",
-            "result_ref",
-            "evidence_refs",
-            "request_sha256",
-            "upstream_inputs",
-            "input_provenance",
-            "match",
-            "expected",
-            "actual",
-            "substrate",
-            "candidate",
-            "test_basis",
-            "steps",
-            "prose_summary",
-            "limitations",
-            "created_at",
-        )
-        payload = _go_ordered_json(
-            result,
-            ordered_fields,
-            omit_empty={
-                "correlation_id": "string",
-                "result_ref": "pointer",
-                "upstream_inputs": "raw",
-                "input_provenance": "pointer",
-                "candidate": "pointer",
-                "test_basis": "pointer",
-                "limitations": "slice",
-            },
-        )
+        unsigned = {**result, "content_sha256": "", "size_bytes": 0}
+        payload = _go_ordered_json(unsigned, _MITIGATION_RESULT_SCHEMA)
     else:
         payload = json.dumps(
             result,
@@ -776,35 +912,20 @@ def _producer_integrity(
 
 def _go_ordered_json(
     result: dict[str, Any],
-    fields: tuple[str, ...],
-    *,
-    omit_empty: dict[str, str] | None = None,
+    schema: _GoSchema,
 ) -> bytes:
-    omit_empty = omit_empty or {}
+    fields = tuple(field[0] for field in schema)
+    optional = {field[0] for field in schema if field[2] is not None}
     missing = [
         field for field in fields
-        if field not in result and field not in omit_empty
+        if field not in result and field not in optional
     ]
     if missing:
         raise UpstreamResolutionError(
             "canonical producer result is missing required fields: "
             + ", ".join(missing)
         )
-    ordered: dict[str, Any] = {}
-    for field in fields:
-        if field not in result:
-            continue
-        value = result[field]
-        kind = omit_empty.get(field)
-        if kind == "string" and value == "":
-            continue
-        if kind == "pointer" and value is None:
-            continue
-        if kind == "raw" and value is None:
-            continue
-        if kind == "slice" and value in (None, []):
-            continue
-        ordered[field] = value
+    ordered = _go_struct_value(result, schema)
     encoded = json.dumps(
         ordered,
         ensure_ascii=False,
@@ -820,6 +941,47 @@ def _go_ordered_json(
         .replace("\u2029", r"\u2029")
     )
     return encoded.encode("utf-8")
+
+
+def _go_struct_value(value: dict[str, Any], schema: _GoSchema) -> dict[str, Any]:
+    ordered: dict[str, Any] = {}
+    for field, child_schema, omit_kind in schema:
+        if field not in value:
+            continue
+        child = value[field]
+        if _go_omit_empty(child, omit_kind):
+            continue
+        ordered[field] = (
+            child
+            if omit_kind == "raw"
+            else _go_nested_value(child, child_schema)
+        )
+    return ordered
+
+
+def _go_nested_value(value: Any, schema: _GoSchema | None) -> Any:
+    if isinstance(value, list):
+        return [_go_nested_value(item, schema) for item in value]
+    if isinstance(value, dict):
+        if schema is not None:
+            return _go_struct_value(value, schema)
+        return {
+            key: _go_nested_value(value[key], None)
+            for key in sorted(value)
+        }
+    return value
+
+
+def _go_omit_empty(value: Any, kind: str | None) -> bool:
+    if kind in {"pointer", "raw"}:
+        return value is None
+    if kind == "string":
+        return value == ""
+    if kind == "slice":
+        return value is None or value == []
+    if kind == "number":
+        return value == 0
+    return False
 
 
 def _parse_datetime(value: Any, role: str) -> datetime:
