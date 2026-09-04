@@ -46,16 +46,14 @@ var shapes = map[string]shapeSpec{
 }
 
 // NewResolver returns a Databricks-backed resolver over an existing client.
+//
 // It returns nil when Databricks is not configured, which makes referenced
 // invocations produce a typed insufficient-context result rather than a guess.
-func NewResolver(settings config.Settings, client *databricks.Client) Resolver {
-	if strings.TrimSpace(settings.DatabricksServerHostname) == "" ||
-		strings.TrimSpace(settings.DatabricksHTTPPath) == "" {
-		return nil
-	}
-	auth := settings.NormalizedDatabricksAuthType()
-	if auth != "oauth-m2m" && auth != "pat" {
-		slog.Error("invalid Databricks authentication type", "auth_type", auth)
+// The connection has one source, so that is the only thing to check: the
+// client cannot exist without it, and its shape was already validated when the
+// DSN was parsed.
+func NewResolver(settings config.Settings, client databricks.Querier) Resolver {
+	if strings.TrimSpace(settings.DatabricksDSN) == "" || client == nil {
 		return nil
 	}
 	return &DatabricksResolver{client: client}
@@ -63,7 +61,7 @@ func NewResolver(settings config.Settings, client *databricks.Client) Resolver {
 
 // DatabricksResolver reads exactly one row per caller-authorized reference.
 type DatabricksResolver struct {
-	client *databricks.Client
+	client databricks.Querier
 }
 
 // Fetch implements Resolver.
@@ -92,7 +90,7 @@ func (d *DatabricksResolver) Fetch(reference contracts.DatabricksResultReference
 	started := time.Now()
 	slog.Info("upstream Databricks read started",
 		"shape", spec.name, "table", tableName, "result_id", reference.Key)
-	rows, err := d.client.Query(statement, databricks.String("1", reference.Key))
+	rows, err := d.client.Query(statement, reference.Key)
 	if err != nil {
 		slog.Error("upstream Databricks read failed",
 			"shape", spec.name, "table", tableName, "result_id", reference.Key,

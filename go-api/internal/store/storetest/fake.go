@@ -1,12 +1,15 @@
-// Package storetest provides a fake Databricks workspace so the store and the
-// HTTP surface can be exercised without a live warehouse.
+// Package storetest provides a fake warehouse so the store, the upstream
+// reader and the HTTP surface can be exercised without a live Databricks.
+//
+// It implements databricks.Querier, so tests sit at the SQL boundary and can
+// assert the statement text and the bound arguments -- the same place
+// tests/test_upstream_databricks.py and tests/test_databricks_persistence.py
+// assert in the Python service.
 package storetest
 
 import (
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
-	"regexp"
+	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,31 +18,33 @@ import (
 	"github.com/ATT-CSO/control-translation/go-api/internal/config"
 )
 
-// FakeWorkspace is a minimal stand-in for the Databricks Statement Execution
-// API. It understands only the handful of statements this service issues,
-// which is enough to exercise the client, the row mapping, and the
-// read-back verification without a live warehouse.
+// FakeWorkspace understands only the handful of statements this service
+// issues, which is enough to exercise the client, the row mapping, and the
+// read-back verification.
 type FakeWorkspace struct {
-	Server *httptest.Server
-
 	mu   sync.Mutex
 	rows []map[string]string
 	// upstream holds the proof-loop rows a referenced request reads, keyed by
-	// result_id.
-	upstream map[string][]*string
-	// upstreamMulti returns several rows for one key, for the ambiguity case.
-	upstreamMulti map[string][][]*string
-	// Fail makes the next statement return a workspace error.
+	// result_id. A key may map to several rows so ambiguity can be exercised.
+	upstream map[string][][]*string
+	// Fail makes every statement return a workspace error.
 	Fail bool
-	// statements records what was sent, so tests can assert that caller input
-	// is bound as a parameter rather than concatenated into SQL.
+	// Unreachable makes Ping fail while statements still work.
+	Unreachable bool
+
 	statements []Statement
 }
 
-// Statement is one executed statement and the parameters bound to it.
+// Statement is one executed statement and the arguments bound to it.
 type Statement struct {
-	SQL        string
-	Parameters map[string]string
+	SQL  string
+	Args []string
+}
+
+// NewFakeWorkspace returns an empty warehouse.
+func NewFakeWorkspace(t *testing.T) *FakeWorkspace {
+	t.Helper()
+	return &FakeWorkspace{}
 }
 
 // Statements returns everything executed so far, in order.
@@ -61,19 +66,17 @@ func (f *FakeWorkspace) LastStatementMatching(needle string) (Statement, bool) {
 	return Statement{}, false
 }
 
-// UpstreamRow registers one proof-loop row for the resolver to read. The
-// column order matches the SELECT the resolver issues for that role.
-func (f *FakeWorkspace) UpstreamRow(resultID string, columns ...string) {
+// Rows returns a copy of the stored result rows.
+func (f *FakeWorkspace) Rows() []map[string]string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.upstream == nil {
-		f.upstream = map[string][]*string{}
-	}
-	values := make([]*string, 0, len(columns))
-	for index := range columns {
-		values = append(values, ptr(columns[index]))
-	}
-	f.upstream[resultID] = values
+	return append([]map[string]string{}, f.rows...)
+}
+
+// UpstreamRow registers one proof-loop row. The column order matches the
+// SELECT the resolver issues for that role.
+func (f *FakeWorkspace) UpstreamRow(resultID string, columns ...string) {
+	f.UpstreamRowsFor(resultID, columns)
 }
 
 // UpstreamRowsFor registers several rows for one result_id, so an ambiguous
@@ -81,8 +84,8 @@ func (f *FakeWorkspace) UpstreamRow(resultID string, columns ...string) {
 func (f *FakeWorkspace) UpstreamRowsFor(resultID string, rows ...[]string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.upstreamMulti == nil {
-		f.upstreamMulti = map[string][][]*string{}
+	if f.upstream == nil {
+		f.upstream = map[string][][]*string{}
 	}
 	converted := make([][]*string, 0, len(rows))
 	for _, row := range rows {
@@ -92,11 +95,19 @@ func (f *FakeWorkspace) UpstreamRowsFor(resultID string, rows ...[]string) {
 		}
 		converted = append(converted, values)
 	}
-	f.upstreamMulti[resultID] = converted
+	f.upstream[resultID] = converted
 }
 
-// OverwriteRow replaces fields on a stored result row, so a read-back
-// mismatch can be exercised.
+// DropUpstreamRow removes a registered row, so a missing reference can be
+// exercised.
+func (f *FakeWorkspace) DropUpstreamRow(resultID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.upstream, resultID)
+}
+
+// OverwriteRow replaces fields on a stored result row, so a read-back mismatch
+// can be exercised.
 func (f *FakeWorkspace) OverwriteRow(resultID string, fields map[string]string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -110,152 +121,119 @@ func (f *FakeWorkspace) OverwriteRow(resultID string, fields map[string]string) 
 	}
 }
 
-// DropUpstreamRow removes a registered row, so a missing reference can be
-// exercised.
-func (f *FakeWorkspace) DropUpstreamRow(resultID string) {
+// Ping implements databricks.Querier.
+func (f *FakeWorkspace) Ping() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	delete(f.upstream, resultID)
-}
-
-var mergeValues = regexp.MustCompile(`(?s)MERGE INTO`)
-
-// NewFakeWorkspace starts the fake and returns it with the test's cleanup
-// already registered.
-func NewFakeWorkspace(t *testing.T) *FakeWorkspace {
-	t.Helper()
-	fake := &FakeWorkspace{}
-	fake.Server = httptest.NewServer(http.HandlerFunc(fake.handle))
-	t.Cleanup(fake.Server.Close)
-	return fake
-}
-
-// Rows returns a copy of the stored rows.
-func (f *FakeWorkspace) Rows() []map[string]string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return append([]map[string]string{}, f.rows...)
-}
-
-func (f *FakeWorkspace) handle(w http.ResponseWriter, r *http.Request) {
-	if strings.HasSuffix(r.URL.Path, "/oidc/v1/token") {
-		writeJSON(w, map[string]any{"access_token": "fake-token", "expires_in": 3600})
-		return
+	if f.Fail || f.Unreachable {
+		return errors.New("the Databricks warehouse is unreachable")
 	}
-	var request struct {
-		Statement  string `json:"statement"`
-		Parameters []struct {
-			Name  string `json:"name"`
-			Value string `json:"value"`
-		} `json:"parameters"`
-	}
-	_ = json.NewDecoder(r.Body).Decode(&request)
+	return nil
+}
 
+// Exec implements databricks.Querier.
+func (f *FakeWorkspace) Exec(statement string, args ...any) error {
+	_, err := f.Query(statement, args...)
+	return err
+}
+
+// Query implements databricks.Querier.
+func (f *FakeWorkspace) Query(statement string, args ...any) ([][]*string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	bound := make([]string, 0, len(args))
+	for _, arg := range args {
+		bound = append(bound, argText(arg))
+	}
+	f.statements = append(f.statements, Statement{SQL: statement, Args: bound})
 	if f.Fail {
-		writeJSON(w, map[string]any{"status": map[string]any{
-			"state": "FAILED",
-			"error": map[string]any{"error_code": "TEST_FAILURE", "message": "injected"},
-		}})
-		return
+		return nil, errors.New("the Databricks statement failed")
 	}
-	values := map[string]string{}
-	for _, item := range request.Parameters {
-		values[item.Name] = item.Value
-	}
-	statement := request.Statement
-	f.statements = append(f.statements, Statement{SQL: statement, Parameters: values})
-	var data [][]*string
+
 	switch {
-	case mergeValues.MatchString(statement):
-		// Positional MERGE parameters, in the order the store binds them.
-		row := map[string]string{
-			"result_id": values["2"], "run_id": values["3"], "request_id": values["4"],
-			"correlation_id": values["5"], "capability": values["6"], "contract_id": values["7"],
-			"terminal_state": values["8"], "status": values["9"],
-			"request_json": values["11"], "result_json": values["12"],
-			"completion_json": values["13"], "result_sha256": values["14"],
-			"result_size_bytes": values["15"], "created_at": values["18"],
-		}
-		// WHEN NOT MATCHED: an existing result_id is never overwritten.
-		for _, existing := range f.rows {
-			if existing["result_id"] == row["result_id"] {
-				writeJSON(w, succeeded(nil))
-				return
-			}
-		}
-		f.rows = append(f.rows, row)
+	case strings.Contains(statement, "MERGE INTO"):
+		f.merge(bound)
+		return nil, nil
+
 	case strings.Contains(statement, "SELECT run_id, result_sha256, result_size_bytes"):
-		if row := f.findBy("result_id", values["1"]); row != nil {
-			data = [][]*string{{ptr(row["run_id"]), ptr(row["result_sha256"]), ptr(row["result_size_bytes"])}}
+		if row := f.findBy("result_id", bound[0]); row != nil {
+			return [][]*string{{ptr(row["run_id"]), ptr(row["result_sha256"]), ptr(row["result_size_bytes"])}}, nil
 		}
+
 	case strings.Contains(statement, "SELECT TO_JSON(completion_json), TO_JSON(request_json)"):
-		if row := f.findBy("request_id", values["1"]); row != nil {
-			data = [][]*string{{ptr(row["completion_json"]), ptr(row["request_json"])}}
+		if row := f.findBy("request_id", bound[0]); row != nil {
+			return [][]*string{{ptr(row["completion_json"]), ptr(row["request_json"])}}, nil
 		}
+
 	case strings.Contains(statement, "SELECT TO_JSON(completion_json) FROM"):
 		column := "run_id"
 		if strings.Contains(statement, "WHERE result_id = ?") {
 			column = "result_id"
 		}
-		if row := f.findBy(column, values["1"]); row != nil {
-			data = [][]*string{{ptr(row["completion_json"])}}
+		if row := f.findBy(column, bound[0]); row != nil {
+			return [][]*string{{ptr(row["completion_json"])}}, nil
 		}
+
 	case strings.Contains(statement, "SELECT COUNT(*)"):
-		data = [][]*string{{ptr(itoa(len(f.rows)))}}
+		return [][]*string{{ptr(strconv.Itoa(len(f.rows)))}}, nil
+
 	case strings.Contains(statement, "GROUP BY terminal_state"):
 		counts := map[string]int{}
 		for _, row := range f.rows {
 			counts[row["terminal_state"]]++
 		}
+		var data [][]*string
 		for state, count := range counts {
-			data = append(data, []*string{ptr(state), ptr(itoa(count))})
+			data = append(data, []*string{ptr(state), ptr(strconv.Itoa(count))})
 		}
-	case strings.Contains(statement, "SELECT\n\t\t\trun_id,"), strings.Contains(statement, "ORDER BY created_at DESC"):
-		for _, row := range f.rows {
-			var envelope struct {
-				StructuredResult struct {
-					OutcomeReason struct{ Code string } `json:"outcome_reason"`
-					Subject       struct {
-						VulnerabilityID string `json:"vulnerability_id"`
-					} `json:"subject"`
-					InputBindings struct {
-						TargetTechnology string `json:"target_technology"`
-					} `json:"input_bindings"`
-					PrimaryCandidate *struct {
-						CandidateArtifact struct {
-							ArtifactType string `json:"artifact_type"`
-						} `json:"candidate_artifact"`
-					} `json:"primary_candidate"`
-					ProducedAt string `json:"produced_at"`
-				} `json:"structured_result"`
-			}
-			_ = json.Unmarshal([]byte(row["completion_json"]), &envelope)
-			artifact := (*string)(nil)
-			if envelope.StructuredResult.PrimaryCandidate != nil {
-				artifact = ptr(envelope.StructuredResult.PrimaryCandidate.CandidateArtifact.ArtifactType)
-			}
-			data = append(data, []*string{
-				ptr(row["run_id"]), ptr(row["result_id"]), ptr(row["correlation_id"]),
-				ptr(row["status"]), ptr(row["terminal_state"]),
-				ptr(envelope.StructuredResult.OutcomeReason.Code),
-				ptr(envelope.StructuredResult.Subject.VulnerabilityID),
-				ptr(envelope.StructuredResult.InputBindings.TargetTechnology),
-				artifact, ptr(row["created_at"]), ptr(envelope.StructuredResult.ProducedAt),
-			})
-		}
-	case strings.Contains(statement, "SELECT 1 FROM"):
-		data = [][]*string{{ptr("1")}}
+		return data, nil
+
+	case strings.Contains(statement, "ORDER BY created_at DESC"):
+		return f.listRows(), nil
+
 	case strings.Contains(statement, "WHERE result_id = ? LIMIT 2"):
-		// The resolver's read of one proof-loop row.
-		if rows, ok := f.upstreamMulti[values["1"]]; ok {
-			data = rows
-		} else if row, ok := f.upstream[values["1"]]; ok {
-			data = [][]*string{row}
+		return f.upstream[bound[0]], nil
+
+	case strings.Contains(statement, "SELECT 1 FROM"):
+		return [][]*string{{ptr("1")}}, nil
+	}
+	return nil, nil
+}
+
+// merge applies WHEN NOT MATCHED semantics: an existing result_id is never
+// overwritten, which is what makes a retry safe.
+func (f *FakeWorkspace) merge(args []string) {
+	row := map[string]string{
+		"result_id": args[1], "run_id": args[2], "request_id": args[3],
+		"correlation_id": args[4], "capability": args[5], "contract_id": args[6],
+		"terminal_state": args[7], "status": args[8],
+		"request_json": args[10], "result_json": args[11], "completion_json": args[12],
+		"result_sha256": args[13], "result_size_bytes": args[14], "created_at": args[17],
+	}
+	for _, existing := range f.rows {
+		if existing["result_id"] == row["result_id"] {
+			return
 		}
 	}
-	writeJSON(w, succeeded(data))
+	f.rows = append(f.rows, row)
+}
+
+func (f *FakeWorkspace) listRows() [][]*string {
+	var data [][]*string
+	for _, row := range f.rows {
+		data = append(data, []*string{
+			ptr(row["run_id"]), ptr(row["result_id"]), ptr(row["correlation_id"]),
+			ptr(row["status"]), ptr(row["terminal_state"]),
+			ptr(jsonPath(row["completion_json"], "outcome_reason", "code")),
+			ptr(jsonPath(row["completion_json"], "subject", "vulnerability_id")),
+			ptr(jsonPath(row["completion_json"], "input_bindings", "target_technology")),
+			ptr(artifactType(row["completion_json"])),
+			ptr(row["created_at"]),
+			ptr(jsonPath(row["result_json"], "produced_at")),
+		})
+	}
+	return data
 }
 
 func (f *FakeWorkspace) findBy(column, value string) map[string]string {
@@ -267,34 +245,27 @@ func (f *FakeWorkspace) findBy(column, value string) map[string]string {
 	return nil
 }
 
-func succeeded(data [][]*string) map[string]any {
-	return map[string]any{
-		"status": map[string]any{"state": "SUCCEEDED"},
-		"result": map[string]any{"data_array": data},
+func ptr(value string) *string { return &value }
+
+func argText(arg any) string {
+	switch typed := arg.(type) {
+	case nil:
+		return ""
+	case string:
+		return typed
+	case int:
+		return strconv.Itoa(typed)
+	default:
+		return fmt.Sprintf("%v", typed)
 	}
 }
 
-func writeJSON(w http.ResponseWriter, payload any) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(payload)
-}
-
-func ptr(value string) *string { return &value }
-
-func itoa(value int) string { return strconv.Itoa(value) }
-
-// FakeSettings returns settings pointed at a fake workspace.
+// FakeSettings returns settings pointed at a fake warehouse.
 func FakeSettings() config.Settings {
 	return config.Settings{
 		RunMode: "fixture", ModelProvider: "none", ModelName: "not-configured",
 		EnableDocs: true, Host: "127.0.0.1", Port: 8000,
-		// The connection comes from a DSN, and the derived fields are what the
-		// client actually reads.
 		DatabricksDSN:              "token:fake-pat@fake.databricks.example:443/sql/1.0/warehouses/abc",
-		DatabricksServerHostname:   "fake.databricks.example",
-		DatabricksHTTPPath:         "/sql/1.0/warehouses/abc",
-		DatabricksAuthType:         "pat",
-		DatabricksToken:            "fake-pat",
 		DatabricksCatalog:          "test_catalog",
 		DatabricksSchema:           "control_translation",
 		DatabricksResultsTable:     "control_translation_results",

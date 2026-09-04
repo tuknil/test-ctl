@@ -53,18 +53,22 @@ type RunSummaryPage struct {
 
 // Repository is the Databricks-backed durable store.
 type Repository struct {
-	client    *databricks.Client
+	client    databricks.Querier
 	tableName string
 }
 
 // Open validates the configured coordinates and returns the repository.
 func Open(settings config.Settings) (*Repository, error) {
-	return New(settings, databricks.New(settings))
+	client, err := databricks.New(settings)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrPersistence, err)
+	}
+	return New(settings, client)
 }
 
 // New builds a repository over an existing client, so the reader and the store
 // share one authenticated connection.
-func New(settings config.Settings, client *databricks.Client) (*Repository, error) {
+func New(settings config.Settings, client databricks.Querier) (*Repository, error) {
 	tableName, err := databricks.QuoteTable(
 		settings.DatabricksCatalog, settings.DatabricksSchema, settings.DatabricksResultsTable)
 	if err != nil {
@@ -145,33 +149,33 @@ func (r *Repository) SaveCompletedRun(
 			PARSE_JSON(?), PARSE_JSON(?), ?
 		)`, r.tableName)
 
-	parameters := []databricks.Parameter{
-		databricks.String("1", result.ResultID),
-		databricks.String("2", result.ResultID),
-		databricks.String("3", result.RunID),
-		databricks.String("4", derefString(request.RequestID)),
-		databricks.String("5", result.CorrelationID),
-		databricks.String("6", result.Capability),
-		databricks.String("7", result.ContractID),
-		databricks.String("8", string(result.TerminalState)),
-		databricks.String("9", result.Status),
-		databricks.String("10", ""), // subject_record_revision_id: not carried by this build
-		databricks.String("11", string(requestJSON)),
-		databricks.String("12", string(structuredJSON)),
-		databricks.String("13", string(envelopeJSON)),
-		databricks.String("14", resultDigest),
-		databricks.Int("15", len(canonical)),
-		databricks.String("16", string(evidenceJSON)),
-		databricks.String("17", string(upstreamJSON)),
-		databricks.Timestamp("18", startedAt.UTC().Format("2006-01-02T15:04:05.000000Z")),
+	parameters := []any{
+		result.ResultID,
+		result.ResultID,
+		result.RunID,
+		derefString(request.RequestID),
+		result.CorrelationID,
+		result.Capability,
+		result.ContractID,
+		string(result.TerminalState),
+		result.Status,
+		nil, // subject_record_revision_id: not carried by this build
+		string(requestJSON),
+		string(structuredJSON),
+		string(envelopeJSON),
+		resultDigest,
+		len(canonical),
+		string(evidenceJSON),
+		string(upstreamJSON),
+		startedAt.UTC().Format("2006-01-02T15:04:05.000000Z"),
 	}
-	if _, err := r.client.Query(statement, parameters...); err != nil {
+	if err := r.client.Exec(statement, parameters...); err != nil {
 		return persistenceError("insert-result", err)
 	}
 
 	rows, err := r.client.Query(fmt.Sprintf(
 		"SELECT run_id, result_sha256, result_size_bytes FROM %s WHERE result_id = ? LIMIT 1", r.tableName),
-		databricks.String("1", result.ResultID))
+		result.ResultID)
 	if err != nil {
 		return persistenceError("verify-result", err)
 	}
@@ -217,7 +221,7 @@ func canonicalResultBytes(result contracts.ResultEnvelope) ([]byte, error) {
 func (r *Repository) GetByIdempotencyKey(key string) (*IdempotencyRecord, error) {
 	rows, err := r.client.Query(fmt.Sprintf(
 		"SELECT TO_JSON(completion_json), TO_JSON(request_json) FROM %s WHERE request_id = ? LIMIT 1",
-		r.tableName), databricks.String("1", key))
+		r.tableName), key)
 	if err != nil {
 		return nil, persistenceError("get-by-idempotency-key", err)
 	}
@@ -251,7 +255,7 @@ func (r *Repository) GetResult(resultID string) (*contracts.ResultEnvelope, erro
 func (r *Repository) envelopeBy(column, value string) (*contracts.ResultEnvelope, error) {
 	rows, err := r.client.Query(fmt.Sprintf(
 		"SELECT TO_JSON(completion_json) FROM %s WHERE %s = ? LIMIT 1", r.tableName, column),
-		databricks.String("1", value))
+		value)
 	if err != nil {
 		return nil, persistenceError("read-envelope", err)
 	}
@@ -286,8 +290,7 @@ func (r *Repository) ListRuns(limit, offset int) (RunSummaryPage, error) {
 			result_json:produced_at::STRING
 		FROM %s
 		ORDER BY created_at DESC, run_id DESC
-		LIMIT ? OFFSET ?`, r.tableName),
-		databricks.Int("1", limit), databricks.Int("2", offset))
+		LIMIT ? OFFSET ?`, r.tableName), limit, offset)
 	if err != nil {
 		return page, persistenceError("list-runs", err)
 	}

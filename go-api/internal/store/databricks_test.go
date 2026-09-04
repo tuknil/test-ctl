@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/ATT-CSO/control-translation/go-api/internal/contracts"
-	"github.com/ATT-CSO/control-translation/go-api/internal/databricks"
 	"github.com/ATT-CSO/control-translation/go-api/internal/store"
 	"github.com/ATT-CSO/control-translation/go-api/internal/store/storetest"
 	"github.com/ATT-CSO/control-translation/go-api/internal/terminal"
@@ -21,7 +20,7 @@ func newRepository(t *testing.T) (*store.Repository, *storetest.FakeWorkspace) {
 	t.Helper()
 	fake := storetest.NewFakeWorkspace(t)
 	settings := storetest.FakeSettings()
-	repository, err := store.New(settings, databricks.NewWithBaseURL(settings, fake.Server.URL))
+	repository, err := store.New(settings, fake)
 	if err != nil {
 		t.Fatalf("unable to open the store: %v", err)
 	}
@@ -70,8 +69,8 @@ func TestSaveInsertsOnlyWhenAbsentAndVerifiesTheStoredRow(t *testing.T) {
 	if !strings.Contains(statement.SQL, "WHEN NOT MATCHED THEN INSERT") {
 		t.Errorf("the write must be insert-if-absent: %s", statement.SQL)
 	}
-	if statement.Parameters["1"] != result.ResultID {
-		t.Errorf("the result id was not bound: %v", statement.Parameters)
+	if statement.Args[0] != result.ResultID {
+		t.Errorf("the result id was not bound: %v", statement.Args)
 	}
 	if strings.Contains(statement.SQL, result.ResultID) {
 		t.Errorf("the result id was concatenated into the statement: %s", statement.SQL)
@@ -142,7 +141,7 @@ func TestIdentifiersAreValidatedWhenTheRepositoryIsBuilt(t *testing.T) {
 			settings := storetest.FakeSettings()
 			mutate(fake, &settings.DatabricksCatalog)
 
-			if _, err := store.New(settings, databricks.NewWithBaseURL(settings, fake.Server.URL)); err == nil {
+			if _, err := store.New(settings, fake); err == nil {
 				t.Fatal("a non-word identifier must be refused")
 			}
 		})
@@ -207,7 +206,7 @@ func TestReadsBindTheirKey(t *testing.T) {
 	if strings.Contains(statement.SQL, "OR '1'='1") {
 		t.Fatalf("a hostile key reached the statement text: %s", statement.SQL)
 	}
-	if statement.Parameters["1"] != hostile {
-		t.Errorf("the key should be bound verbatim: %v", statement.Parameters)
+	if statement.Args[0] != hostile {
+		t.Errorf("the key should be bound verbatim: %v", statement.Args)
 	}
 }

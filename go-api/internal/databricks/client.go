@@ -1,223 +1,153 @@
-// Package databricks talks to Unity Catalog through the SQL Statement
-// Execution REST API.
+// Package databricks talks to Unity Catalog through the vendor SQL driver.
 //
-// The REST API is used rather than a JDBC/Thrift driver so the service stays
-// a static binary with no native dependencies. Both the upstream reader and
-// the result store share this one client, so authentication, error handling,
-// and parameter binding are implemented once.
+// This mirrors the mitigation-check service (claude_mitigate/api/databricks.go),
+// which opens database/sql with github.com/databricks/databricks-sql-go and a
+// DSN. Using the same driver as the sibling service means protocol, auth and
+// result decoding are code that already runs against a real workspace, rather
+// than a bespoke client of ours that does not.
+//
+// Both the upstream reader and the result store share one client, so
+// connection handling and parameter binding are implemented once.
 package databricks
 
 import (
-	"bytes"
-	"encoding/json"
+	"context"
+	"database/sql"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
-	"net/url"
 	"regexp"
-	"strconv"
 	"strings"
-	"sync"
 	"time"
+
+	_ "github.com/databricks/databricks-sql-go"
 
 	"github.com/ATT-CSO/control-translation/go-api/internal/config"
 )
 
+// Querier is the SQL boundary. The driver-backed client satisfies it, and
+// tests substitute a recorder so they can assert the statement and the bound
+// arguments rather than only the behavior.
+type Querier interface {
+	// Query runs a statement and returns its rows. A NULL column is a nil
+	// element, so callers can tell it from an empty string.
+	Query(statement string, args ...any) ([][]*string, error)
+	// Exec runs a statement that returns no rows.
+	Exec(statement string, args ...any) error
+	// Ping reports whether the warehouse is reachable.
+	Ping() error
+}
+
+const (
+	queryTimeout = 120 * time.Second
+	pingTimeout  = 30 * time.Second
+)
+
+// Client is a driver-backed Querier.
+type Client struct {
+	db *sql.DB
+}
+
+// New opens the warehouse named by the DSN.
+func New(settings config.Settings) (*Client, error) {
+	dsn := strings.TrimSpace(settings.DatabricksDSN)
+	if dsn == "" {
+		return nil, errors.New("DATABRICKS_DSN is not set")
+	}
+	db, err := sql.Open("databricks", NormalizeDSN(dsn))
+	if err != nil {
+		// The driver echoes the DSN in its errors, and the DSN carries a
+		// credential, so the cause is not propagated.
+		return nil, errors.New("the Databricks connection could not be opened")
+	}
+	db.SetMaxOpenConns(4)
+	return &Client{db: db}, nil
+}
+
+// Close releases the pool.
+func (c *Client) Close() error {
+	if c == nil || c.db == nil {
+		return nil
+	}
+	return c.db.Close()
+}
+
+// Ping implements Querier.
+func (c *Client) Ping() error {
+	ctx, cancel := context.WithTimeout(context.Background(), pingTimeout)
+	defer cancel()
+	if err := c.db.PingContext(ctx); err != nil {
+		return errors.New("the Databricks warehouse is unreachable")
+	}
+	return nil
+}
+
+// Exec implements Querier.
+func (c *Client) Exec(statement string, args ...any) error {
+	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout)
+	defer cancel()
+	if _, err := c.db.ExecContext(ctx, statement, args...); err != nil {
+		return sanitize(err)
+	}
+	return nil
+}
+
+// Query implements Querier.
+func (c *Client) Query(statement string, args ...any) ([][]*string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout)
+	defer cancel()
+	rows, err := c.db.QueryContext(ctx, statement, args...)
+	if err != nil {
+		return nil, sanitize(err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	columns, err := rows.Columns()
+	if err != nil {
+		return nil, sanitize(err)
+	}
+	var out [][]*string
+	for rows.Next() {
+		cells := make([]sql.NullString, len(columns))
+		targets := make([]any, len(columns))
+		for index := range cells {
+			targets[index] = &cells[index]
+		}
+		if err := rows.Scan(targets...); err != nil {
+			return nil, sanitize(err)
+		}
+		row := make([]*string, len(cells))
+		for index, cell := range cells {
+			if cell.Valid {
+				value := cell.String
+				row[index] = &value
+			}
+		}
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, sanitize(err)
+	}
+	return out, nil
+}
+
+// sanitize keeps the driver's message out of anything that surfaces over HTTP.
+// Driver errors quote the statement, which quotes the candidate artifact, and
+// connection errors can quote the DSN, which carries the credential.
+func sanitize(err error) error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return errors.New("the Databricks statement timed out")
+	}
+	return errors.New("the Databricks statement failed")
+}
+
 var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
-// Parameter is one named statement parameter. Values are always sent out of
-// band; no caller input is ever concatenated into SQL text.
-type Parameter struct {
-	Name  string
-	Value string
-	Kind  string
-}
-
-// String builds a STRING parameter.
-func String(name, value string) Parameter {
-	return Parameter{Name: name, Value: value, Kind: "STRING"}
-}
-
-// Int builds an INT parameter.
-func Int(name string, value int) Parameter {
-	return Parameter{Name: name, Value: strconv.Itoa(value), Kind: "INT"}
-}
-
-// Timestamp builds a TIMESTAMP parameter from an already-formatted value.
-func Timestamp(name, value string) Parameter {
-	return Parameter{Name: name, Value: value, Kind: "TIMESTAMP"}
-}
-
-// Client executes statements against one warehouse.
-type Client struct {
-	settings config.Settings
-	http     *http.Client
-	// baseOverride replaces the workspace origin in tests only.
-	baseOverride string
-
-	tokenMu     sync.Mutex
-	token       string
-	tokenExpiry time.Time
-}
-
-// New builds a client for the configured workspace.
-func New(settings config.Settings) *Client {
-	return &Client{settings: settings, http: &http.Client{Timeout: 60 * time.Second}}
-}
-
-// NewWithBaseURL is New against an explicit workspace origin, for tests.
-func NewWithBaseURL(settings config.Settings, baseURL string) *Client {
-	client := New(settings)
-	client.baseOverride = baseURL
-	return client
-}
-
-// BaseURL is the workspace origin. Production always derives it from
-// DATABRICKS_SERVER_HOSTNAME over TLS.
-func (c *Client) BaseURL() string {
-	if c.baseOverride != "" {
-		return c.baseOverride
-	}
-	return "https://" + c.settings.DatabricksServerHostname
-}
-
-type statementResponse struct {
-	Status struct {
-		State string `json:"state"`
-		Error *struct {
-			ErrorCode string `json:"error_code"`
-			Message   string `json:"message"`
-		} `json:"error"`
-	} `json:"status"`
-	Result *struct {
-		DataArray [][]*string `json:"data_array"`
-	} `json:"result"`
-}
-
-// Query executes one statement and returns its rows.
-func (c *Client) Query(statement string, parameters ...Parameter) ([][]*string, error) {
-	token, err := c.accessToken()
-	if err != nil {
-		return nil, err
-	}
-	encoded := make([]map[string]any, 0, len(parameters))
-	for _, item := range parameters {
-		entry := map[string]any{"name": item.Name, "type": item.Kind}
-		// An empty string for a nullable column is sent as SQL NULL, which is
-		// what the column means when the value was never supplied.
-		if item.Value != "" {
-			entry["value"] = item.Value
-		}
-		encoded = append(encoded, entry)
-	}
-	body, err := json.Marshal(map[string]any{
-		"warehouse_id":    strings.TrimPrefix(c.settings.DatabricksHTTPPath, "/sql/1.0/warehouses/"),
-		"statement":       statement,
-		"wait_timeout":    "30s",
-		"on_wait_timeout": "CANCEL",
-		"format":          "JSON_ARRAY",
-		"disposition":     "INLINE",
-		"parameters":      encoded,
-	})
-	if err != nil {
-		return nil, errors.New("unable to encode the Databricks statement")
-	}
-
-	request, err := http.NewRequest(http.MethodPost,
-		c.BaseURL()+"/api/2.0/sql/statements", bytes.NewReader(body))
-	if err != nil {
-		return nil, errors.New("unable to build the Databricks request")
-	}
-	request.Header.Set("Authorization", "Bearer "+token)
-	request.Header.Set("Content-Type", "application/json")
-
-	response, err := c.http.Do(request)
-	if err != nil {
-		return nil, errors.New("Databricks statement execution failed")
-	}
-	defer func() { _ = response.Body.Close() }()
-	payload, err := io.ReadAll(io.LimitReader(response.Body, 32<<20))
-	if err != nil {
-		return nil, errors.New("Databricks response could not be read")
-	}
-	if response.StatusCode != http.StatusOK {
-		// The response body may echo the statement; never surface it.
-		return nil, fmt.Errorf("Databricks returned HTTP %d", response.StatusCode)
-	}
-	var decoded statementResponse
-	if err := json.Unmarshal(payload, &decoded); err != nil {
-		return nil, errors.New("Databricks response was not valid JSON")
-	}
-	if decoded.Status.State != "SUCCEEDED" {
-		code := "-"
-		if decoded.Status.Error != nil {
-			code = decoded.Status.Error.ErrorCode
-		}
-		return nil, fmt.Errorf("Databricks statement did not succeed (state=%s code=%s)",
-			decoded.Status.State, code)
-	}
-	if decoded.Result == nil {
-		return nil, nil
-	}
-	return decoded.Result.DataArray, nil
-}
-
-// accessToken returns a bearer token, minting and caching an OAuth M2M token
-// when the deployment uses a service principal.
-func (c *Client) accessToken() (string, error) {
-	if c.settings.NormalizedDatabricksAuthType() == "pat" {
-		if strings.TrimSpace(c.settings.DatabricksToken) == "" {
-			return "", errors.New("Databricks PAT configuration is incomplete")
-		}
-		return c.settings.DatabricksToken, nil
-	}
-
-	c.tokenMu.Lock()
-	defer c.tokenMu.Unlock()
-	if c.token != "" && time.Now().Before(c.tokenExpiry) {
-		return c.token, nil
-	}
-	if c.settings.DatabricksClientID == "" || c.settings.DatabricksClientSecret == "" {
-		return "", errors.New("Databricks OAuth configuration is incomplete")
-	}
-	form := url.Values{"grant_type": {"client_credentials"}, "scope": {"all-apis"}}
-	request, err := http.NewRequest(http.MethodPost,
-		c.BaseURL()+"/oidc/v1/token", strings.NewReader(form.Encode()))
-	if err != nil {
-		return "", errors.New("unable to build the Databricks token request")
-	}
-	request.SetBasicAuth(c.settings.DatabricksClientID, c.settings.DatabricksClientSecret)
-	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	response, err := c.http.Do(request)
-	if err != nil {
-		return "", errors.New("Databricks token request failed")
-	}
-	defer func() { _ = response.Body.Close() }()
-	payload, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-	if err != nil || response.StatusCode != http.StatusOK {
-		return "", errors.New("Databricks token request was rejected")
-	}
-	var token struct {
-		AccessToken string `json:"access_token"`
-		ExpiresIn   int    `json:"expires_in"`
-	}
-	if err := json.Unmarshal(payload, &token); err != nil || token.AccessToken == "" {
-		return "", errors.New("Databricks token response was invalid")
-	}
-	c.token = token.AccessToken
-	lifetime := time.Duration(token.ExpiresIn) * time.Second
-	if lifetime <= 0 {
-		lifetime = 10 * time.Minute
-	}
-	// Refresh early so an in-flight read never races the expiry.
-	c.tokenExpiry = time.Now().Add(lifetime - 60*time.Second)
-	return c.token, nil
-}
-
-// QuoteTable renders a fully qualified table name, rejecting any identifier
-// that is not a plain word so a reference can never inject SQL.
+// QuoteTable renders a fully qualified table name.
+//
+// mitigation-check backticks whatever it is given. This service also validates,
+// because here a catalog, schema and table can arrive from a request -- the
+// upstream references -- and not only from configuration, so an identifier that
+// is not a plain word is refused rather than escaped into the statement.
 func QuoteTable(catalog, schema, table string) (string, error) {
 	parts := []struct{ value, label string }{
 		{catalog, "catalog"}, {schema, "schema"}, {table, "table"},
@@ -227,9 +157,36 @@ func QuoteTable(catalog, schema, table string) (string, error) {
 		if !identifierPattern.MatchString(part.value) {
 			return "", fmt.Errorf("%s is not a valid Databricks identifier", part.label)
 		}
-		quoted = append(quoted, "`"+part.value+"`")
+		quoted = append(quoted, backtick(part.value))
 	}
 	return strings.Join(quoted, "."), nil
+}
+
+// backtick quotes an identifier, doubling any backtick inside it. Validation
+// already rejects those, so this is the second of two guards rather than the
+// only one.
+func backtick(identifier string) string {
+	return "`" + strings.ReplaceAll(identifier, "`", "``") + "`"
+}
+
+// NormalizeDSN inserts :443 when the host carries no explicit port, which the
+// driver requires. Taken from the mitigation-check service so one
+// operator-written DSN works for both.
+func NormalizeDSN(dsn string) string {
+	dsn = strings.TrimPrefix(strings.TrimSpace(dsn), "databricks://")
+	at := strings.Index(dsn, "@")
+	if at < 0 {
+		return dsn
+	}
+	credentials, rest := dsn[:at+1], dsn[at+1:]
+	host, path := rest, ""
+	if slash := strings.Index(rest, "/"); slash >= 0 {
+		host, path = rest[:slash], rest[slash:]
+	}
+	if !strings.Contains(host, ":") {
+		host += ":443"
+	}
+	return credentials + host + path
 }
 
 // Text safely dereferences a nullable column value.

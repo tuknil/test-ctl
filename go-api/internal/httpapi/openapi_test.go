@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ATT-CSO/control-translation/go-api/internal/databricks"
 	"github.com/ATT-CSO/control-translation/go-api/internal/store"
 	"github.com/ATT-CSO/control-translation/go-api/internal/store/storetest"
 )
@@ -126,7 +125,7 @@ func TestDocumentationIsAbsentWhenDisabled(t *testing.T) {
 	fake := storetest.NewFakeWorkspace(t)
 	settings := storetest.FakeSettings()
 	settings.EnableDocs = false
-	repository, err := store.New(settings, databricks.NewWithBaseURL(settings, fake.Server.URL))
+	repository, err := store.New(settings, fake)
 	if err != nil {
 		t.Fatalf("unable to open the store: %v", err)
 	}

@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/ATT-CSO/control-translation/go-api/internal/contracts"
-	"github.com/ATT-CSO/control-translation/go-api/internal/databricks"
 	"github.com/ATT-CSO/control-translation/go-api/internal/store/storetest"
 	"github.com/ATT-CSO/control-translation/go-api/internal/upstream"
 )
@@ -30,7 +29,7 @@ func newResolver(t *testing.T) (upstream.Resolver, *storetest.FakeWorkspace) {
 	t.Helper()
 	fake := storetest.NewFakeWorkspace(t)
 	settings := storetest.FakeSettings()
-	return upstream.NewResolver(settings, databricks.NewWithBaseURL(settings, fake.Server.URL)), fake
+	return upstream.NewResolver(settings, fake), fake
 }
 
 // The row key is bound out of band. If it were concatenated into the statement
@@ -52,8 +51,8 @@ func TestResolverBindsTheRowKeyRatherThanConcatenatingIt(t *testing.T) {
 	if !found {
 		t.Fatal("the resolver sent no statement for the bypass table")
 	}
-	if statement.Parameters["1"] != key {
-		t.Errorf("the row key was not bound as a parameter: %v", statement.Parameters)
+	if statement.Args[0] != key {
+		t.Errorf("the row key was not bound as a parameter: %v", statement.Args)
 	}
 	if strings.Contains(statement.SQL, key) {
 		t.Errorf("the row key was concatenated into the statement: %s", statement.SQL)
@@ -77,8 +76,8 @@ func TestResolverIsUnaffectedByMetacharactersInTheRowKey(t *testing.T) {
 	if strings.Contains(statement.SQL, "OR '1'='1") {
 		t.Fatalf("a hostile key reached the statement text: %s", statement.SQL)
 	}
-	if statement.Parameters["1"] != hostile {
-		t.Errorf("the key should be bound verbatim as data: %v", statement.Parameters)
+	if statement.Args[0] != hostile {
+		t.Errorf("the key should be bound verbatim as data: %v", statement.Args)
 	}
 }
 

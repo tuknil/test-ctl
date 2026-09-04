@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ATT-CSO/control-translation/go-api/internal/databricks"
 	"github.com/ATT-CSO/control-translation/go-api/internal/lifecycle"
 	"github.com/ATT-CSO/control-translation/go-api/internal/store"
 	"github.com/ATT-CSO/control-translation/go-api/internal/store/storetest"
@@ -31,12 +30,11 @@ func newTestServerAndFake(t *testing.T) (*Server, *storetest.FakeWorkspace) {
 	t.Helper()
 	fake := storetest.NewFakeWorkspace(t)
 	settings := storetest.FakeSettings()
-	client := databricks.NewWithBaseURL(settings, fake.Server.URL)
-	repository, err := store.New(settings, client)
+	repository, err := store.New(settings, fake)
 	if err != nil {
 		t.Fatalf("unable to open the store: %v", err)
 	}
-	server := New(settings, repository, upstream.NewResolver(settings, client), newQueue(t))
+	server := New(settings, repository, upstream.NewResolver(settings, fake), newQueue(t))
 	server.Start()
 	t.Cleanup(server.Stop)
 	return server, fake
@@ -58,7 +56,7 @@ func newServerWithoutResolver(t *testing.T) http.Handler {
 	t.Helper()
 	fake := storetest.NewFakeWorkspace(t)
 	settings := storetest.FakeSettings()
-	repository, err := store.New(settings, databricks.NewWithBaseURL(settings, fake.Server.URL))
+	repository, err := store.New(settings, fake)
 	if err != nil {
 		t.Fatalf("unable to open the store: %v", err)
 	}
@@ -159,7 +157,7 @@ func TestReadinessFailsWhenDatabricksIsNotConfigured(t *testing.T) {
 	fake := storetest.NewFakeWorkspace(t)
 	settings := storetest.FakeSettings()
 	settings.DatabricksDSN = "" // the connection has no other source
-	repository, err := store.New(settings, databricks.NewWithBaseURL(settings, fake.Server.URL))
+	repository, err := store.New(settings, fake)
 	if err != nil {
 		t.Fatalf("unable to open the store: %v", err)
 	}
@@ -202,7 +200,7 @@ func TestStatusEndpointsNeverReturnSecrets(t *testing.T) {
 		"token:super-secret-pat@fake.databricks.example:443/sql/1.0/warehouses/abc"
 	settings.DatabricksToken = "super-secret-pat"
 	settings.DatabricksClientSecret = "super-secret-oauth"
-	repository, _ := store.New(settings, databricks.NewWithBaseURL(settings, fake.Server.URL))
+	repository, _ := store.New(settings, fake)
 	handler := New(settings, repository, nil, newQueue(t)).Handler()
 
 	for _, path := range []string{"/", "/inference", "/schema", "/ready"} {
@@ -484,7 +482,7 @@ func TestCORSIsClosedWhenNoOriginIsConfigured(t *testing.T) {
 	fake := storetest.NewFakeWorkspace(t)
 	settings := storetest.FakeSettings()
 	settings.CORSAllowedOrigins = nil
-	repository, _ := store.New(settings, databricks.NewWithBaseURL(settings, fake.Server.URL))
+	repository, _ := store.New(settings, fake)
 	handler := New(settings, repository, nil, newQueue(t)).Handler()
 
 	request := httptest.NewRequest(http.MethodGet, "/health", nil)

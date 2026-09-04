@@ -213,10 +213,16 @@ The table shape matches the one the Python service writes
 (`src/control_translation/persistence/databricks.py`), so rows written by
 either are readable by the other.
 
-Access is over the SQL Statement Execution REST API, not a JDBC driver, which
-is why the binary stays static and the image needs no libc. Caller input is
-always sent as an out-of-band statement parameter; nothing is concatenated
-into SQL text.
+Access is through `github.com/databricks/databricks-sql-go` over
+`database/sql`, the same driver the mitigation-check service uses. That matters
+more than it sounds: protocol, auth and result decoding are code that already
+runs against a real workspace, rather than a bespoke client of ours that never
+has. The driver is pure Go, so the binary is still static and the image still
+needs no libc; it costs about 5 MB of image.
+
+Caller input is always a bound argument. Nothing is concatenated into statement
+text, and tests assert that at the SQL boundary for both reads and writes,
+including keys carrying SQL metacharacters.
 
 ## Encoding ladders
 
@@ -337,9 +343,11 @@ committed, so that archive is the only copy.
   workspace (`internal/store/storetest`) and a real temporary SQLite queue —
   including six lineage-failure cases, the approved-table check, idempotency
   and conflict, cancellation, and the attempt-exhaustion path.
-- **Neither the store nor the client has been run against a live Databricks
-  workspace.** The SQL and the table shape are taken from the Python service,
-  but that is a code reading, not a test. Validate before deployment.
+- **Nothing here has been run against a live Databricks workspace.** The SQL
+  and the table shape are taken from the Python service, which is a code
+  reading rather than a test. The transport is now the vendor driver the
+  mitigation-check service already runs, which removes the largest unknown, but
+  the statements themselves still need validating before deployment.
 
 ## Layout
 
@@ -352,7 +360,7 @@ internal/adapters     Akamai shape validation and conflict detection
 internal/policy       fixture policy snapshots
 internal/translation  the ModSecurity compiler and the judge gates
 internal/capability   gate order and result assembly
-internal/databricks   the shared SQL Statement Execution REST client
+internal/databricks   the shared SQL client and its Querier seam
 internal/upstream     proof-loop lineage validation and the three-table read
 internal/store        Databricks persistence for immutable results
 internal/lifecycle    the SQLite queue behind the asynchronous routes
