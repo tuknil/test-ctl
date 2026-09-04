@@ -1,15 +1,14 @@
 // Package storetest provides a fake warehouse so the store, the upstream
 // reader and the HTTP surface can be exercised without a live Databricks.
 //
-// It implements databricks.Querier, so tests sit at the SQL boundary and can
-// assert the statement text and the bound arguments -- the same place
+// It is registered as a database/sql driver, so tests sit at the SQL boundary
+// and can assert the statement text and the bound arguments -- the same place
 // tests/test_upstream_databricks.py and tests/test_databricks_persistence.py
 // assert in the Python service.
 package storetest
 
 import (
 	"errors"
-	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -33,6 +32,8 @@ type FakeWorkspace struct {
 	Unreachable bool
 
 	statements []Statement
+	// name is this workspace's key in the driver registry.
+	name string
 }
 
 // Statement is one executed statement and the arguments bound to it.
@@ -41,10 +42,12 @@ type Statement struct {
 	Args []string
 }
 
-// NewFakeWorkspace returns an empty warehouse.
+// NewFakeWorkspace returns an empty warehouse registered with the fake driver.
 func NewFakeWorkspace(t *testing.T) *FakeWorkspace {
 	t.Helper()
-	return &FakeWorkspace{}
+	workspace := &FakeWorkspace{}
+	workspace.name = register(workspace)
+	return workspace
 }
 
 // Statements returns everything executed so far, in order.
@@ -121,8 +124,7 @@ func (f *FakeWorkspace) OverwriteRow(resultID string, fields map[string]string) 
 	}
 }
 
-// Ping implements databricks.Querier.
-func (f *FakeWorkspace) Ping() error {
+func (f *FakeWorkspace) ping() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.Fail || f.Unreachable {
@@ -131,21 +133,11 @@ func (f *FakeWorkspace) Ping() error {
 	return nil
 }
 
-// Exec implements databricks.Querier.
-func (f *FakeWorkspace) Exec(statement string, args ...any) error {
-	_, err := f.Query(statement, args...)
-	return err
-}
-
-// Query implements databricks.Querier.
-func (f *FakeWorkspace) Query(statement string, args ...any) ([][]*string, error) {
+// execute answers one statement, recording it and its bound arguments.
+func (f *FakeWorkspace) execute(statement string, bound []string) ([][]*string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	bound := make([]string, 0, len(args))
-	for _, arg := range args {
-		bound = append(bound, argText(arg))
-	}
 	f.statements = append(f.statements, Statement{SQL: statement, Args: bound})
 	if f.Fail {
 		return nil, errors.New("the Databricks statement failed")
@@ -246,19 +238,6 @@ func (f *FakeWorkspace) findBy(column, value string) map[string]string {
 }
 
 func ptr(value string) *string { return &value }
-
-func argText(arg any) string {
-	switch typed := arg.(type) {
-	case nil:
-		return ""
-	case string:
-		return typed
-	case int:
-		return strconv.Itoa(typed)
-	default:
-		return fmt.Sprintf("%v", typed)
-	}
-}
 
 // FakeSettings returns settings pointed at a fake warehouse.
 func FakeSettings() config.Settings {

@@ -29,7 +29,7 @@ func newResolver(t *testing.T) (upstream.Resolver, *storetest.FakeWorkspace) {
 	t.Helper()
 	fake := storetest.NewFakeWorkspace(t)
 	settings := storetest.FakeSettings()
-	return upstream.NewResolver(settings, fake), fake
+	return upstream.NewResolver(settings, fake.DB(t)), fake
 }
 
 // The row key is bound out of band. If it were concatenated into the statement

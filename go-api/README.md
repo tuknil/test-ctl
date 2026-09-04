@@ -360,7 +360,7 @@ internal/adapters     Akamai shape validation and conflict detection
 internal/policy       fixture policy snapshots
 internal/translation  the ModSecurity compiler and the judge gates
 internal/capability   gate order and result assembly
-internal/databricks   the shared SQL client and its Querier seam
+internal/databricks   DSN handling and the shared *sql.DB helpers
 internal/upstream     proof-loop lineage validation and the three-table read
 internal/store        Databricks persistence for immutable results
 internal/lifecycle    the SQLite queue behind the asynchronous routes

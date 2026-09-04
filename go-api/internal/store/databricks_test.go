@@ -20,7 +20,7 @@ func newRepository(t *testing.T) (*store.Repository, *storetest.FakeWorkspace) {
 	t.Helper()
 	fake := storetest.NewFakeWorkspace(t)
 	settings := storetest.FakeSettings()
-	repository, err := store.New(settings, fake)
+	repository, err := store.New(settings, fake.DB(t))
 	if err != nil {
 		t.Fatalf("unable to open the store: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestIdentifiersAreValidatedWhenTheRepositoryIsBuilt(t *testing.T) {
 			settings := storetest.FakeSettings()
 			mutate(fake, &settings.DatabricksCatalog)
 
-			if _, err := store.New(settings, fake); err == nil {
+			if _, err := store.New(settings, fake.DB(t)); err == nil {
 				t.Fatal("a non-word identifier must be refused")
 			}
 		})

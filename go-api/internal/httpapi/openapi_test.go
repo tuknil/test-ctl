@@ -125,7 +125,7 @@ func TestDocumentationIsAbsentWhenDisabled(t *testing.T) {
 	fake := storetest.NewFakeWorkspace(t)
 	settings := storetest.FakeSettings()
 	settings.EnableDocs = false
-	repository, err := store.New(settings, fake)
+	repository, err := store.New(settings, fake.DB(t))
 	if err != nil {
 		t.Fatalf("unable to open the store: %v", err)
 	}

@@ -13,6 +13,7 @@ package store
 import (
 	"bytes"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -53,33 +54,33 @@ type RunSummaryPage struct {
 
 // Repository is the Databricks-backed durable store.
 type Repository struct {
-	client    databricks.Querier
+	db        *sql.DB
 	tableName string
 }
 
 // Open validates the configured coordinates and returns the repository.
 func Open(settings config.Settings) (*Repository, error) {
-	client, err := databricks.New(settings)
+	db, err := databricks.Open(settings)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrPersistence, err)
 	}
-	return New(settings, client)
+	return New(settings, db)
 }
 
 // New builds a repository over an existing client, so the reader and the store
 // share one authenticated connection.
-func New(settings config.Settings, client databricks.Querier) (*Repository, error) {
+func New(settings config.Settings, db *sql.DB) (*Repository, error) {
 	tableName, err := databricks.QuoteTable(
 		settings.DatabricksCatalog, settings.DatabricksSchema, settings.DatabricksResultsTable)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrPersistence, err)
 	}
-	return &Repository{client: client, tableName: tableName}, nil
+	return &Repository{db: db, tableName: tableName}, nil
 }
 
 // Healthcheck reports whether the results table is reachable, for GET /ready.
 func (r *Repository) Healthcheck() bool {
-	if _, err := r.client.Query("SELECT 1 FROM " + r.tableName + " LIMIT 1"); err != nil {
+	if _, err := databricks.Query(r.db, "SELECT 1 FROM "+r.tableName+" LIMIT 1"); err != nil {
 		slog.Error("Databricks healthcheck failed", "error", err)
 		return false
 	}
@@ -169,11 +170,11 @@ func (r *Repository) SaveCompletedRun(
 		string(upstreamJSON),
 		startedAt.UTC().Format("2006-01-02T15:04:05.000000Z"),
 	}
-	if err := r.client.Exec(statement, parameters...); err != nil {
+	if err := databricks.Exec(r.db, statement, parameters...); err != nil {
 		return persistenceError("insert-result", err)
 	}
 
-	rows, err := r.client.Query(fmt.Sprintf(
+	rows, err := databricks.Query(r.db, fmt.Sprintf(
 		"SELECT run_id, result_sha256, result_size_bytes FROM %s WHERE result_id = ? LIMIT 1", r.tableName),
 		result.ResultID)
 	if err != nil {
@@ -219,7 +220,7 @@ func canonicalResultBytes(result contracts.ResultEnvelope) ([]byte, error) {
 // The key is the caller's request_id, which is stored on the row, so a retry
 // resolves to the row it originally wrote.
 func (r *Repository) GetByIdempotencyKey(key string) (*IdempotencyRecord, error) {
-	rows, err := r.client.Query(fmt.Sprintf(
+	rows, err := databricks.Query(r.db, fmt.Sprintf(
 		"SELECT TO_JSON(completion_json), TO_JSON(request_json) FROM %s WHERE request_id = ? LIMIT 1",
 		r.tableName), key)
 	if err != nil {
@@ -253,7 +254,7 @@ func (r *Repository) GetResult(resultID string) (*contracts.ResultEnvelope, erro
 }
 
 func (r *Repository) envelopeBy(column, value string) (*contracts.ResultEnvelope, error) {
-	rows, err := r.client.Query(fmt.Sprintf(
+	rows, err := databricks.Query(r.db, fmt.Sprintf(
 		"SELECT TO_JSON(completion_json) FROM %s WHERE %s = ? LIMIT 1", r.tableName, column),
 		value)
 	if err != nil {
@@ -275,7 +276,7 @@ func (r *Repository) envelopeBy(column, value string) (*contracts.ResultEnvelope
 func (r *Repository) ListRuns(limit, offset int) (RunSummaryPage, error) {
 	page := RunSummaryPage{Items: []contracts.RunSummary{}, TerminalStateCounts: map[string]int{}}
 
-	rows, err := r.client.Query(fmt.Sprintf(`
+	rows, err := databricks.Query(r.db, fmt.Sprintf(`
 		SELECT
 			run_id,
 			result_id,
@@ -314,15 +315,15 @@ func (r *Repository) ListRuns(limit, offset int) (RunSummaryPage, error) {
 		page.Items = append(page.Items, summary)
 	}
 
-	totals, err := r.client.Query("SELECT COUNT(*) FROM " + r.tableName)
+	totals, err := databricks.Query(r.db, "SELECT COUNT(*) FROM "+r.tableName)
 	if err != nil {
 		return page, persistenceError("count-runs", err)
 	}
 	if len(totals) > 0 {
 		page.Total, _ = strconv.Atoi(databricks.Text(totals[0][0]))
 	}
-	counts, err := r.client.Query(
-		"SELECT terminal_state, COUNT(*) FROM " + r.tableName + " GROUP BY terminal_state")
+	counts, err := databricks.Query(r.db,
+		"SELECT terminal_state, COUNT(*) FROM "+r.tableName+" GROUP BY terminal_state")
 	if err != nil {
 		return page, persistenceError("count-terminal-states", err)
 	}

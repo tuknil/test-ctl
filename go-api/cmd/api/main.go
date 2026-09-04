@@ -39,21 +39,21 @@ func main() {
 	}
 
 	// One connection pool serves both the upstream reader and the store.
-	client, err := databricks.New(settings)
+	db, err := databricks.Open(settings)
 	if err != nil {
 		// Readiness reports the same thing, but an operator should see the
 		// cause at boot rather than only on the first probe.
 		slog.Error("unable to open the Databricks connection", "error", err)
 		os.Exit(1)
 	}
-	defer func() { _ = client.Close() }()
+	defer func() { _ = db.Close() }()
 
-	repository, err := store.New(settings, client)
+	repository, err := store.New(settings, db)
 	if err != nil {
 		slog.Error("unable to initialize durable result storage", "error", err)
 		os.Exit(1)
 	}
-	resolver := upstream.NewResolver(settings, client)
+	resolver := upstream.NewResolver(settings, db)
 	if resolver == nil {
 		slog.Warn("Databricks is not configured; referenced invocations will decline")
 	}

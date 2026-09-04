@@ -1,6 +1,7 @@
 package upstream
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -52,16 +53,16 @@ var shapes = map[string]shapeSpec{
 // The connection has one source, so that is the only thing to check: the
 // client cannot exist without it, and its shape was already validated when the
 // DSN was parsed.
-func NewResolver(settings config.Settings, client databricks.Querier) Resolver {
-	if strings.TrimSpace(settings.DatabricksDSN) == "" || client == nil {
+func NewResolver(settings config.Settings, db *sql.DB) Resolver {
+	if strings.TrimSpace(settings.DatabricksDSN) == "" || db == nil {
 		return nil
 	}
-	return &DatabricksResolver{client: client}
+	return &DatabricksResolver{db: db}
 }
 
 // DatabricksResolver reads exactly one row per caller-authorized reference.
 type DatabricksResolver struct {
-	client databricks.Querier
+	db *sql.DB
 }
 
 // Fetch implements Resolver.
@@ -90,7 +91,7 @@ func (d *DatabricksResolver) Fetch(reference contracts.DatabricksResultReference
 	started := time.Now()
 	slog.Info("upstream Databricks read started",
 		"shape", spec.name, "table", tableName, "result_id", reference.Key)
-	rows, err := d.client.Query(statement, reference.Key)
+	rows, err := databricks.Query(d.db, statement, reference.Key)
 	if err != nil {
 		slog.Error("upstream Databricks read failed",
 			"shape", spec.name, "table", tableName, "result_id", reference.Key,

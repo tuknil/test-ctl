@@ -1,4 +1,5 @@
-// Package databricks talks to Unity Catalog through the vendor SQL driver.
+// Package databricks holds the helpers for talking to Unity Catalog through
+// the vendor SQL driver.
 //
 // This mirrors the mitigation-check service (claude_mitigate/api/databricks.go),
 // which opens database/sql with github.com/databricks/databricks-sql-go and a
@@ -6,8 +7,9 @@
 // result decoding are code that already runs against a real workspace, rather
 // than a bespoke client of ours that does not.
 //
-// Both the upstream reader and the result store share one client, so
-// connection handling and parameter binding are implemented once.
+// Callers hold a *sql.DB. There is no wrapper type: the reader and the store
+// share one pool, and these are the few operations they both need spelled the
+// same way.
 package databricks
 
 import (
@@ -24,31 +26,19 @@ import (
 	"github.com/ATT-CSO/control-translation/go-api/internal/config"
 )
 
-// Querier is the SQL boundary. The driver-backed client satisfies it, and
-// tests substitute a recorder so they can assert the statement and the bound
-// arguments rather than only the behavior.
-type Querier interface {
-	// Query runs a statement and returns its rows. A NULL column is a nil
-	// element, so callers can tell it from an empty string.
-	Query(statement string, args ...any) ([][]*string, error)
-	// Exec runs a statement that returns no rows.
-	Exec(statement string, args ...any) error
-	// Ping reports whether the warehouse is reachable.
-	Ping() error
-}
-
 const (
-	queryTimeout = 120 * time.Second
-	pingTimeout  = 30 * time.Second
+	// QueryTimeout bounds one statement. Reads are small and writes are a
+	// single row, so a statement outliving this is a stuck warehouse.
+	QueryTimeout = 120 * time.Second
+	// PingTimeout bounds the readiness probe.
+	PingTimeout = 30 * time.Second
 )
 
-// Client is a driver-backed Querier.
-type Client struct {
-	db *sql.DB
-}
-
-// New opens the warehouse named by the DSN.
-func New(settings config.Settings) (*Client, error) {
+// Open returns the warehouse named by the DSN as a standard *sql.DB, the way
+// the mitigation-check service does. Callers hold the *sql.DB directly rather
+// than an abstraction of ours, so the code reads like any other database/sql
+// code and tests substitute a driver rather than an interface.
+func Open(settings config.Settings) (*sql.DB, error) {
 	dsn := strings.TrimSpace(settings.DatabricksDSN)
 	if dsn == "" {
 		return nil, errors.New("DATABRICKS_DSN is not set")
@@ -60,50 +50,23 @@ func New(settings config.Settings) (*Client, error) {
 		return nil, errors.New("the Databricks connection could not be opened")
 	}
 	db.SetMaxOpenConns(4)
-	return &Client{db: db}, nil
+	return db, nil
 }
 
-// Close releases the pool.
-func (c *Client) Close() error {
-	if c == nil || c.db == nil {
-		return nil
-	}
-	return c.db.Close()
-}
-
-// Ping implements Querier.
-func (c *Client) Ping() error {
-	ctx, cancel := context.WithTimeout(context.Background(), pingTimeout)
+// Query runs a statement and returns its rows as strings. A NULL column is a
+// nil element, so callers can tell it from an empty string.
+func Query(db *sql.DB, statement string, args ...any) ([][]*string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), QueryTimeout)
 	defer cancel()
-	if err := c.db.PingContext(ctx); err != nil {
-		return errors.New("the Databricks warehouse is unreachable")
-	}
-	return nil
-}
-
-// Exec implements Querier.
-func (c *Client) Exec(statement string, args ...any) error {
-	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout)
-	defer cancel()
-	if _, err := c.db.ExecContext(ctx, statement, args...); err != nil {
-		return sanitize(err)
-	}
-	return nil
-}
-
-// Query implements Querier.
-func (c *Client) Query(statement string, args ...any) ([][]*string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout)
-	defer cancel()
-	rows, err := c.db.QueryContext(ctx, statement, args...)
+	rows, err := db.QueryContext(ctx, statement, args...)
 	if err != nil {
-		return nil, sanitize(err)
+		return nil, Sanitize(err)
 	}
 	defer func() { _ = rows.Close() }()
 
 	columns, err := rows.Columns()
 	if err != nil {
-		return nil, sanitize(err)
+		return nil, Sanitize(err)
 	}
 	var out [][]*string
 	for rows.Next() {
@@ -113,7 +76,7 @@ func (c *Client) Query(statement string, args ...any) ([][]*string, error) {
 			targets[index] = &cells[index]
 		}
 		if err := rows.Scan(targets...); err != nil {
-			return nil, sanitize(err)
+			return nil, Sanitize(err)
 		}
 		row := make([]*string, len(cells))
 		for index, cell := range cells {
@@ -125,15 +88,35 @@ func (c *Client) Query(statement string, args ...any) ([][]*string, error) {
 		out = append(out, row)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, sanitize(err)
+		return nil, Sanitize(err)
 	}
 	return out, nil
 }
 
-// sanitize keeps the driver's message out of anything that surfaces over HTTP.
+// Exec runs a statement that returns no rows.
+func Exec(db *sql.DB, statement string, args ...any) error {
+	ctx, cancel := context.WithTimeout(context.Background(), QueryTimeout)
+	defer cancel()
+	if _, err := db.ExecContext(ctx, statement, args...); err != nil {
+		return Sanitize(err)
+	}
+	return nil
+}
+
+// Ping reports whether the warehouse is reachable.
+func Ping(db *sql.DB) error {
+	ctx, cancel := context.WithTimeout(context.Background(), PingTimeout)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
+		return errors.New("the Databricks warehouse is unreachable")
+	}
+	return nil
+}
+
+// Sanitize keeps the driver's message out of anything that surfaces over HTTP.
 // Driver errors quote the statement, which quotes the candidate artifact, and
 // connection errors can quote the DSN, which carries the credential.
-func sanitize(err error) error {
+func Sanitize(err error) error {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return errors.New("the Databricks statement timed out")
 	}
