@@ -12,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from control_translation import api as api_module
+from control_translation.agents.translation_agent import TranslationProposal
 from control_translation.api import app
 from control_translation.cancellation import check_cancelled
 from control_translation.config import Settings
@@ -311,6 +312,62 @@ def test_failed_run_result_returns_terminal_status_envelope(tmp_path, monkeypatc
     assert response.json()["contract_id"] == "capability-run-status@1.0"
     assert response.json()["status"] == "failed"
     assert response.json()["failure"]["code"] == "provider_failed"
+
+
+def test_published_malfunction_is_completed_canonical_outcome(monkeypatch):
+    class InvalidAkamaiDoer:
+        @staticmethod
+        def _proposal() -> TranslationProposal:
+            return TranslationProposal(
+                candidate_content=json.dumps(
+                    {
+                        "name": "invalid-provider-candidate",
+                        "operation": "AND",
+                        "conditions": [
+                            {
+                                "type": "rx",
+                                "positiveMatch": True,
+                                "value": ["payload"],
+                            }
+                        ],
+                    }
+                ),
+                translation_label="narrower",
+                justification="Exercise exhausted target syntax repair.",
+            )
+
+        def propose(self, **kwargs):
+            del kwargs
+            return self._proposal()
+
+        def repair(self, **kwargs):
+            del kwargs
+            return self._proposal()
+
+    monkeypatch.setattr(
+        "control_translation.capability.build_translation_doer",
+        lambda settings: InvalidAkamaiDoer(),
+    )
+    response = client.post(
+        "/v1/control-translation-runs",
+        json=_body('SecRule ARGS:address "@rx ^test\\s{2,}$" "id:1,deny"'),
+        headers=_headers(),
+    )
+    assert response.status_code == 202
+
+    terminal = _wait_for_terminal(response.json()["run_id"])
+
+    assert terminal["status"] == "completed"
+    assert terminal["terminal_state"] == "malfunction"
+    assert terminal["failure"] is None
+    assert terminal["result_id"] == terminal["completion"]["result_id"]
+    assert terminal["completion"]["status"] == "completed"
+    assert terminal["completion"]["terminal_state"] == "malfunction"
+    result = client.get(response.json()["result_url"])
+    assert result.status_code == 200
+    assert result.json()["status"] == "completed"
+    assert result.json()["terminal_state"] == "malfunction"
+    assert result.json()["primary_candidate"] is None
 
 
 def test_status_survives_repository_restart(isolated_api_repository):

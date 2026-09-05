@@ -339,19 +339,6 @@ class LifecycleWorker:
                 started_at=prepared.started_at,
                 canonical_result=prepared.canonical_result,
             )
-            if prepared.terminal_state == "malfunction":
-                repository.fail_lifecycle_run(
-                    run.status.run_id,
-                    worker_id=self._worker_id,
-                    attempt_number=run.attempt_number,
-                    failure=RunFailure(
-                        code="control_translation_malfunction",
-                        detail=prepared.result_envelope.structured_result.outcome_reason.detail,
-                        retryable=True,
-                    ),
-                    result=prepared.canonical_result,
-                )
-                return
             completed = repository.complete_lifecycle_run(
                 run.status.run_id,
                 worker_id=self._worker_id,

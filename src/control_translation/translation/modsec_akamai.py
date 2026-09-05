@@ -555,7 +555,7 @@ def _render(parts: list[tuple], depth: int = 0) -> tuple[str, bool]:
 
 
 def _as_encoding_ladder(alternatives: list[list[tuple]]) -> tuple[str, ...] | None:
-    """Return a group's branches in depth order when it is an encoding ladder.
+    r"""Return a group's branches in depth order when it is an encoding ladder.
 
     Defense generation enumerates recursive URL-encodings of one character per
     group, e.g. ``(?:\[|%5B|%255B|%25255B)``. Expanding several such groups
@@ -944,16 +944,24 @@ def _compile(
 
     label = "narrower" if lossy or narrowed else "equivalent"
     assumptions = [
-        "The proven ModSecurity rule in the upstream defense-generation "
-        "artifact is the authoritative source of the match semantics.",
-        "Akamai evaluates the mapped condition types against the same request "
-        "components ModSecurity inspected.",
-        "The custom-rule action is assigned at the security-policy binding; "
-        "recommended action: deny.",
+        (
+            "The proven ModSecurity rule in the upstream defense-generation "
+            "artifact is the authoritative source of the match semantics."
+        ),
+        (
+            "Akamai evaluates the mapped condition types against the same request "
+            "components ModSecurity inspected."
+        ),
+        (
+            "The custom-rule action is assigned at the security-policy binding; "
+            "recommended action: deny."
+        ),
     ]
     limitations = [
-        "The candidate is shape-validated only and has not been executed in an "
-        "Akamai tenant.",
+        (
+            "The candidate is shape-validated only and has not been executed in an "
+            "Akamai tenant."
+        ),
         *_unique(notes),
     ]
     if lossy:

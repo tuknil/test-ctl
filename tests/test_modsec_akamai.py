@@ -41,6 +41,13 @@ PROVEN_SECRULE = (
     "tag:'janus-candidate'\""
 )
 
+LOG4SHELL_SECRULE = (
+    'SecRule ARGS:address "@rx \\$\\{jndi:ldap://example\\.invalid/a'
+    '(?:\\}|%7[dD])" "id:150386,phase:2,deny,status:403,log,'
+    "msg:'JANUS candidate for CVE-2021-44228',tag:'janus-candidate',"
+    "tag:'CVE-2021-44228'" + '"\n'
+)
+
 
 def _pattern(pattern_summary: str, **overrides) -> ProvenMitigationPattern:
     fields = {
@@ -132,6 +139,31 @@ def test_header_rule_maps_to_a_named_header_value_condition():
     condition = _condition(rule, "requestHeaderValueMatch")
     assert condition["header"] == "User-Agent"
     assert condition["value"] == ["*${jndi:*"]
+
+
+def test_live_log4shell_rule_maps_rx_operator_to_akamai_argument_values():
+    proposal = compile_akamai_custom_rule(_pattern(
+        LOG4SHELL_SECRULE,
+        vulnerability_id="CVE-2021-44228",
+        proven_pattern_id="proven-pattern:candidate:CVE-2021-44228:waf:c1eebce95ddd6bf8",
+        discriminator_id="discriminator:candidate:CVE-2021-44228:waf:c1eebce95ddd6bf8",
+    ))
+    assert proposal is not None
+    assert isinstance(proposal.candidate_content, dict)
+    rule = proposal.candidate_content
+    validation = AkamaiWafAdapter().validate_syntax(json.dumps(rule))
+    assert validation.valid, validation.errors
+
+    condition = _condition(rule, "argsPostMatch")
+    assert condition["parameter"] == "address"
+    assert condition["positiveMatch"] is True
+    assert condition["valueWildcard"] is True
+    assert condition["value"] == [
+        "*${jndi:ldap://example.invalid/a}*",
+        "*${jndi:ldap://example.invalid/a%7d*",
+        "*${jndi:ldap://example.invalid/a%7D*",
+    ]
+    assert all(item["type"] != "rx" for item in rule["conditions"])
 
 
 def test_headerless_collection_uses_the_any_header_condition():
@@ -404,7 +436,8 @@ class FakeResolver:
     def __init__(self, records: dict[str, UpstreamRecord]) -> None:
         self.records = records
 
-    def fetch(self, reference, *, cancellation_signal=None):
+    def fetch(self, reference, *, immutable_locator=None, cancellation_signal=None):
+        del immutable_locator, cancellation_signal
         return self.records.get(reference.key)
 
 
@@ -503,8 +536,10 @@ def test_encoding_ladders_align_by_depth_instead_of_exploding():
         "*person%25255B0%25255D%25255B%25255D%25253Dmalicious*",
         "*person%2525255B0%2525255D%2525255B%2525255D%2525253Dmalicious*",
         "*person%252525255B0%252525255D%252525255B%252525255D%252525253Dmalicious*",
-        "*person%25252525255B0%25252525255D%25252525255B%25252525255D"
-        "%25252525253Dmalicious*",
+        (
+            "*person%25252525255B0%25252525255D%25252525255B%25252525255D"
+            "%25252525253Dmalicious*"
+        ),
     ]
 
 
