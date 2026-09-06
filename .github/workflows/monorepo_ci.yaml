@@ -32,31 +32,31 @@ on:
 
       enable_sonar:
         description: 'Enable Sonar'
-        default: false
+        default: true
         required: true
         type: boolean
 
       enable_veracode_sast:
         description: 'Enable VeraCode SAST'
-        default: false
+        default: true
         required: true
         type: boolean
 
       enable_veracode_sca:
         description: 'Enable VeraCode SCA'
-        default: false
+        default: true
         required: true
         type: boolean
 
       enable_veracode_pipeline_scan:
         description: 'Enable VeraCode Pipeline Scan'
-        default: false
+        default: true
         required: false
         type: boolean
 
       enable_deployment:
         description: 'Enable Deployment'
-        default: false
+        default: true
         required: true
         type: boolean
 
