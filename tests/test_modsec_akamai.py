@@ -582,6 +582,29 @@ ENCODING_LADDER_RULE = (
     "tag:'janus-candidate'\""
 )
 
+FORM_SPACE_LADDER = r"(?: |\+|%20|%2520|%252520|%25252520|%2525252520|%252525252520)"
+CMS_TRANSPORT_LADDER_RULE = (
+    'SecRule REQUEST_BODY "@rx (?:'
+    r"MIIB...crafted CMS AuthEnvelopedData with oversized AEAD IV field\.\.\."
+    "|MIIB...crafted"
+    + FORM_SPACE_LADDER
+    + "CMS"
+    + FORM_SPACE_LADDER
+    + "AuthEnvelopedData"
+    + FORM_SPACE_LADDER
+    + "with"
+    + FORM_SPACE_LADDER
+    + "oversized"
+    + FORM_SPACE_LADDER
+    + "AEAD"
+    + FORM_SPACE_LADDER
+    + r"IV"
+    + FORM_SPACE_LADDER
+    + r"field\.\.\."
+    + "|4d4949422e2e2e6372616674656420434d532041757468456e76656c6f706564446174612077697468206f76657273697a65642041454144204956206669656c642e2e2e)\" "
+    + '"id:107017,phase:2,deny,status:403,log,msg:\'JANUS candidate\',tag:\'janus-candidate\'"'
+)
+
 
 def test_encoding_ladders_align_by_depth_instead_of_exploding():
     rule = _compile(ENCODING_LADDER_RULE)
@@ -598,6 +621,26 @@ def test_encoding_ladders_align_by_depth_instead_of_exploding():
             "%25252525253Dmalicious*"
         ),
     ]
+
+
+def test_form_space_and_recursive_percent_ladders_compile_without_cartesian_expansion():
+    proposal = compile_akamai_custom_rule(_pattern(CMS_TRANSPORT_LADDER_RULE))
+
+    assert proposal is not None
+    assert proposal.translation_label == "narrower"
+    assert isinstance(proposal.candidate_content, dict)
+    validation = AkamaiWafAdapter().validate_syntax(
+        json.dumps(proposal.candidate_content)
+    )
+    assert validation.valid, validation.errors
+    values = _condition(proposal.candidate_content, "argsPostMatch")["value"]
+    assert len(values) == 9
+    assert any("crafted CMS AuthEnvelopedData with oversized AEAD IV field" in value for value in values)
+    assert any("crafted+CMS+AuthEnvelopedData+with+oversized+AEAD+IV+field" in value for value in values)
+    assert any("crafted%20CMS%20AuthEnvelopedData%20with%20oversized%20AEAD%20IV%20field" in value for value in values)
+    assert any("crafted%252525252520CMS" in value for value in values)
+    assert any("4d4949422e2e2e" in value for value in values)
+    assert any("differing depths" in item for item in proposal.limitations)
 
 
 def test_aligned_ladder_values_are_a_subset_of_the_source_rule():

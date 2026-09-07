@@ -590,12 +590,21 @@ def _as_encoding_ladder(alternatives: list[list[tuple]]) -> tuple[str, ...] | No
         if not parts or any(part[0] != "lit" for part in parts):
             return None
         branches.append("".join(part[1] for part in parts))
-    if any(
-        branches[index] != quote(branches[index - 1], safe="")
+    recursively_encoded = all(
+        branches[index] == quote(branches[index - 1], safe="")
         for index in range(1, len(branches))
-    ):
-        return None
-    return tuple(branches)
+    )
+    form_space_ladder = (
+        len(branches) >= 3
+        and branches[:3] == [" ", "+", "%20"]
+        and all(
+            branches[index] == quote(branches[index - 1], safe="")
+            for index in range(3, len(branches))
+        )
+    )
+    if recursively_encoded or form_space_ladder:
+        return tuple(branches)
+    return None
 
 
 def _ladder_depth(alternatives: list[list[tuple]]) -> int | None:
