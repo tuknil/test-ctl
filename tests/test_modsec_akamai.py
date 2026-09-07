@@ -18,7 +18,11 @@ from control_translation.contracts import (
     TargetContext,
 )
 from control_translation.terminal import TerminalState
-from control_translation.translation.modsec_akamai import compile_akamai_custom_rule
+from control_translation.translation.modsec_akamai import (
+    _generalize_wildcard_transport_forms,
+    _remove_subsumed_literal_wildcards,
+    compile_akamai_custom_rule,
+)
 from control_translation.upstream import UpstreamRecord
 
 # The orchestration envelope the deployed Temporal caller sends.
@@ -182,9 +186,41 @@ def test_bounded_structured_log4shell_rule_compiles_deterministically():
     assert condition["valueWildcard"] is True
     assert any("${jndi:ldap://" in value for value in condition["value"])
     assert any("${jndi:rmi://" in value for value in condition["value"])
+    assert "*${jndi:ldap://example.invalid/a}*" not in condition["value"]
+    assert (
+        "*${jndi:rmi://janus-alternate.invalid/janus-bypass-probe}*"
+        not in condition["value"]
+    )
     assert all(item["type"] != "REQUEST_BODY" for item in proposal.candidate_content["conditions"])
     assert proposal.translation_label == "narrower"
     assert any("broader set of requests" in item for item in proposal.limitations)
+
+
+def test_structured_transport_forms_remove_all_sentinel_authorities():
+    exact_hex = b'{"message":"${jndi:ldap://example.invalid/a}"}'.hex()
+    values = [
+        "*${jndi:ldap://?/*}*",
+        "*${jndi:ldap://?*?/*}*",
+        "*${jndi:rmi://?/*}*",
+        "*${jndi:rmi://?*?/*}*",
+        "*${jndi:ldap://example.invalid/a}*",
+        "*${jndi:rmi://janus-alternate.invalid/janus-bypass-probe}*",
+        "*%24%7Bjndi%3Aldap%3A%2F%2Fexample.invalid%2Fa%7D*",
+        "*%2524%257Bjndi%253Armi%253A%252F%252Fjanus-alternate.invalid%252Fjanus-bypass-probe%257D*",
+        f"*{exact_hex}*",
+    ]
+
+    generalized = _remove_subsumed_literal_wildcards(
+        _generalize_wildcard_transport_forms(values)
+    )
+
+    assert not any(
+        "example.invalid" in value or "janus-alternate.invalid" in value
+        for value in generalized
+    )
+    assert f"*{exact_hex}*" not in generalized
+    assert any("%24%7Bjndi%3Aldap%3A%2F%2F?*?%2F" in value for value in generalized)
+    assert any("247b6a6e64693a6c6461703a2f2f??" in value for value in generalized)
 
 
 def test_headerless_collection_uses_the_any_header_condition():

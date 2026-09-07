@@ -22,6 +22,7 @@ source `SecRule` does.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from urllib.parse import quote, quote_plus
 
@@ -702,6 +703,119 @@ def _encoding_variants(values: list[str]) -> list[str]:
     return _unique(variants)
 
 
+def _remove_subsumed_literal_wildcards(values: list[str]) -> list[str]:
+    """Drop exact sample globs already covered by a generic wildcard value.
+
+    CG positive samples remain mandatory compiler inputs, but they need not be
+    repeated in the target artifact when a generated wildcard already matches
+    their complete literal core. Encoded and otherwise distinct forms remain.
+    """
+
+    def matches(pattern: str, value: str) -> bool:
+        expression = re.escape(pattern).replace(r"\*", ".*").replace(r"\?", ".")
+        return re.fullmatch(expression, value, flags=re.DOTALL) is not None
+
+    result: list[str] = []
+    for value in values:
+        core = value.removeprefix("*").removesuffix("*")
+        if "*" in core or "?" in core:
+            result.append(value)
+            continue
+        if any(
+            other != value
+            and ("*" in other.removeprefix("*").removesuffix("*") or "?" in other)
+            and matches(other, core)
+            for other in values
+        ):
+            continue
+        result.append(value)
+    return _unique(result)
+
+
+def _generalize_wildcard_transport_forms(values: list[str]) -> list[str]:
+    """Derive evidenced transport forms without retaining sentinel literals."""
+
+    def matches(pattern: str, value: str) -> bool:
+        expression = re.escape(pattern).replace(r"\*", ".*").replace(r"\?", ".")
+        return re.fullmatch(expression, value, flags=re.DOTALL) is not None
+
+    generic = [
+        value
+        for value in values
+        if "%" not in value
+        and not re.fullmatch(r"[0-9A-Fa-f]+", value.removeprefix("*").removesuffix("*"))
+        and ("*" in value.removeprefix("*").removesuffix("*") or "?" in value)
+    ]
+    literal_cores = [
+        core
+        for value in values
+        if "%" not in value
+        and not re.fullmatch(
+            r"[0-9A-Fa-f]+", core := value.removeprefix("*").removesuffix("*")
+        )
+        and "*" not in core
+        and "?" not in core
+    ]
+    if not any(matches(pattern, core) for pattern in generic for core in literal_cores):
+        return values
+    percent_depths = {
+        len(match.group(1)) // 2 + 1
+        for value in values
+        for match in re.finditer(r"%((?:25)*)[0-9A-Fa-f]{2}", value)
+    }
+    has_hex = any(
+        len(core := value.removeprefix("*").removesuffix("*")) % 2 == 0
+        and len(core) >= 8
+        and re.fullmatch(r"[0-9A-Fa-f]+", core) is not None
+        for value in values
+    )
+
+    def transform_literals(
+        value: str,
+        transform: Callable[[str], str],
+        *,
+        one_wildcard: str = "?",
+    ) -> str:
+        transformed: list[str] = []
+        literal: list[str] = []
+        for character in value:
+            if character in "*?":
+                if literal:
+                    transformed.append(transform("".join(literal)))
+                    literal = []
+                transformed.append(one_wildcard if character == "?" else character)
+            else:
+                literal.append(character)
+        if literal:
+            transformed.append(transform("".join(literal)))
+        return "".join(transformed)
+
+    generalized = list(values)
+    for value in generic:
+        for depth in sorted(percent_depths):
+            generalized.append(
+                transform_literals(
+                    value,
+                    lambda literal, depth=depth: _quote_depth(literal, depth),
+                )
+            )
+        if has_hex:
+            generalized.append(
+                transform_literals(
+                    value,
+                    lambda literal: literal.encode().hex(),
+                    one_wildcard="??",
+                )
+            )
+    return _unique(generalized)
+
+
+def _quote_depth(value: str, depth: int) -> str:
+    for _ in range(depth):
+        value = quote(value, safe="")
+    return value
+
+
 # ---------------------------------------------------------------------------
 # Condition assembly
 # ---------------------------------------------------------------------------
@@ -756,6 +870,12 @@ def _build_condition(
             f"Only the decoded {component.label} form is matched; transport "
             "encodings are not enumerated because the match uses wildcards."
         )
+
+    if match.wildcard:
+        values = _generalize_wildcard_transport_forms(values)
+        values = _remove_subsumed_literal_wildcards(values)
+        if len(values) > _MAX_VALUES:
+            raise _Unsupported("generalized wildcard transport forms exceed value limit")
 
     condition: dict = {
         "type": condition_type,
