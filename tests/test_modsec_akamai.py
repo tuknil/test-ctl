@@ -166,6 +166,27 @@ def test_live_log4shell_rule_maps_rx_operator_to_akamai_argument_values():
     assert all(item["type"] != "rx" for item in rule["conditions"])
 
 
+def test_bounded_structured_log4shell_rule_compiles_deterministically():
+    proposal = compile_akamai_custom_rule(_pattern(
+        r'''SecRule REQUEST_BODY "@rx (?:\$\{jndi:(?:ldap|rmi)://[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?/[^\s\"'<>}]{0,512}\})" "id:109348,phase:2,deny,status:403,log,tag:'janus-candidate'"''',
+        vulnerability_id="CVE-2021-44228",
+    ))
+
+    assert proposal is not None
+    assert isinstance(proposal.candidate_content, dict)
+    validation = AkamaiWafAdapter().validate_syntax(
+        json.dumps(proposal.candidate_content)
+    )
+    assert validation.valid, validation.errors
+    condition = _condition(proposal.candidate_content, "argsPostMatch")
+    assert condition["valueWildcard"] is True
+    assert any("${jndi:ldap://" in value for value in condition["value"])
+    assert any("${jndi:rmi://" in value for value in condition["value"])
+    assert all(item["type"] != "REQUEST_BODY" for item in proposal.candidate_content["conditions"])
+    assert proposal.translation_label == "narrower"
+    assert any("broader set of requests" in item for item in proposal.limitations)
+
+
 def test_headerless_collection_uses_the_any_header_condition():
     rule = _compile('SecRule REQUEST_HEADERS "@contains ${jndi:" "id:3,deny"')
 

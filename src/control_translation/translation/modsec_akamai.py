@@ -412,12 +412,30 @@ class _RegexTranslator:
 
     def _parse_term(self, depth: int) -> list[list[tuple]]:
         alternatives, single_char = self._parse_atom(depth)
-        if self.index >= len(self.source) or self.source[self.index] not in "*+?":
+        if self.index >= len(self.source):
+            return alternatives
+        if self.source[self.index] == "{":
+            if not single_char:
+                raise _Unsupported("counted repetition of a group is not expressible")
+            match = re.match(r"\{(\d+),(\d+)\}", self.source[self.index :])
+            if match is None:
+                raise _Unsupported("unbounded or malformed counted repetition")
+            minimum, maximum = (int(value) for value in match.groups())
+            if minimum != 0 or maximum < 1 or maximum > 4096:
+                raise _Unsupported("counted repetition bounds are not expressible")
+            self.index += match.end()
+            self.lossy = True
+            return [[_ANY]]
+        if self.source[self.index] not in "*+?":
             return alternatives
         quantifier = self.source[self.index]
         self.index += 1
         if self.index < len(self.source) and self.source[self.index] in "?+":
             self.index += 1  # lazy / possessive marker
+        if quantifier == "?" and not single_char:
+            if len(alternatives) + 1 > _MAX_VALUES:
+                raise _Unsupported("optional group expands to too many values")
+            return [[]] + alternatives
         if not single_char:
             raise _Unsupported("quantified groups are not expressible")
         if quantifier == "+":

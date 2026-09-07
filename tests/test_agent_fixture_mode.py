@@ -186,6 +186,67 @@ def test_att_inference_preserves_structured_regex_candidate(monkeypatch) -> None
     assert "JSON object, not a JSON-encoded string" in system_prompt
 
 
+def test_att_inference_repair_restates_valid_akamai_condition_types(monkeypatch) -> None:
+    from control_translation.agents.translation_agent import AttInferenceTranslationDoer
+
+    settings = Settings(
+        run_mode="live",
+        model_provider="att-inference",
+        model_name="att-approved-model",
+        att_inference_base_url="https://inference.example.att.com/v1",
+        att_inference_api_key="test-key",
+    )
+    doer = AttInferenceTranslationDoer(settings)
+    pattern = get_fixture_pattern("proven-pattern:CVE-EXAMPLE:waf:3")
+    assert pattern is not None
+    previous = TranslationProposal(
+        candidate_content={
+            "operation": "AND",
+            "conditions": [
+                {
+                    "type": "REQUEST_BODY",
+                    "positiveMatch": True,
+                    "value": ["attack"],
+                }
+            ],
+        },
+        translation_label="equivalent",
+        justification="initial proposal",
+    )
+    captured: dict[str, str] = {}
+
+    def fake_request_translation(
+        system_prompt,
+        user_prompt,
+        target_technology,
+        *,
+        cancellation_signal=None,
+    ):
+        captured["system_prompt"] = system_prompt
+        captured["user_prompt"] = user_prompt
+        captured["target_technology"] = target_technology
+        return previous
+
+    monkeypatch.setattr(doer, "_request_translation", fake_request_translation)
+
+    doer.repair(
+        pattern=pattern,
+        target_technology="akamai-waf",
+        artifact_type="akamai-waf-rule",
+        snapshot=None,
+        translation_requirements=None,
+        previous_proposal=previous,
+        validation_errors=[
+            "conditions[0].type 'REQUEST_BODY' is not a recognized Akamai condition type."
+        ],
+    )
+
+    assert "REQUEST_BODY are never Akamai condition types" in captured["system_prompt"]
+    assert "argsPostMatch" in captured["system_prompt"]
+    assert "argsPostJSONMatch" in captured["system_prompt"]
+    assert captured["target_technology"] == "akamai-waf"
+
+
 def test_att_inference_normalizes_unmistakable_flattened_akamai_response() -> None:
     from control_translation.agents.translation_agent import (
         _normalize_att_proposal_data,

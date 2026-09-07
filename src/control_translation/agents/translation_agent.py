@@ -481,7 +481,13 @@ class AttInferenceTranslationDoer:
             "target syntax validation. Return the same structured proposal fields. "
             "For akamai-waf and edr-s1, candidate_content must be a JSON object or "
             "array, not a JSON-encoded string. For firewall-generic it must remain "
-            "a text string. Do not claim testing or production safety."
+            "a text string. For akamai-waf, every condition type must be one of "
+            "requestHeaderMatch, requestHeaderValueMatch, argsPostMatch, "
+            "argsPostJSONMatch, argsPostXMLMatch, pathMatch, uriQueryMatch, ipMatch, "
+            "requestMethodMatch, or cookieMatch. ModSecurity collection names such "
+            "as REQUEST_BODY are never Akamai condition types; map request bodies to "
+            "argsPostMatch, argsPostJSONMatch, or argsPostXMLMatch. Do not claim "
+            "testing or production safety."
         )
         user_prompt = _proposal_prompt(
             pattern,
