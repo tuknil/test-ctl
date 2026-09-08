@@ -349,15 +349,20 @@ class _RegexTranslator:
         values: list[str] = []
         # One value per encoding depth, with every ladder rendered at that same
         # depth: the combinations a uniformly encoded value actually produces.
+        # A semantic depth may have aliases, notably quote_plus and percent
+        # encoding for spaces at depth one. Alias indices are aligned globally
+        # rather than multiplied positionally.
         for depth in range(depths):
-            for parts in alternatives:
-                rendered, used_wildcard = _render(parts, depth)
-                wildcard = wildcard or used_wildcard
-                if not anchored_start:
-                    rendered = "*" + rendered
-                if not anchored_end:
-                    rendered = rendered + "*"
-                values.append(rendered)
+            variants = _ladder_variants(alternatives, depth)
+            for variant in range(variants):
+                for parts in alternatives:
+                    rendered, used_wildcard = _render(parts, depth, variant)
+                    wildcard = wildcard or used_wildcard
+                    if not anchored_start:
+                        rendered = "*" + rendered
+                    if not anchored_end:
+                        rendered = rendered + "*"
+                    values.append(rendered)
         values = _unique(values)
         if len(values) > _MAX_VALUES:
             raise _Unsupported("regex expands to too many values")
@@ -554,12 +559,21 @@ def _enumerate_class(body: str) -> list[str] | None:
     return _unique(members) if members else None
 
 
-def _render(parts: list[tuple], depth: int = 0) -> tuple[str, bool]:
+def _render(
+    parts: list[tuple],
+    depth: int = 0,
+    variant: int = 0,
+) -> tuple[str, bool]:
     rendered: list[str] = []
     used_wildcard = False
     for part in parts:
         if part[0] == "ladder":
-            rendered.append(part[1][depth])
+            depth_variants = part[1][depth]
+            rendered.append(
+                depth_variants[variant]
+                if variant < len(depth_variants)
+                else depth_variants[0]
+            )
         elif part == _ANY:
             used_wildcard = True
             if rendered and rendered[-1] == "*":
@@ -573,7 +587,9 @@ def _render(parts: list[tuple], depth: int = 0) -> tuple[str, bool]:
     return "".join(rendered), used_wildcard
 
 
-def _as_encoding_ladder(alternatives: list[list[tuple]]) -> tuple[str, ...] | None:
+def _as_encoding_ladder(
+    alternatives: list[list[tuple]],
+) -> tuple[tuple[str, ...], ...] | None:
     r"""Return a group's branches in depth order when it is an encoding ladder.
 
     Defense generation enumerates recursive URL-encodings of one character per
@@ -602,8 +618,14 @@ def _as_encoding_ladder(alternatives: list[list[tuple]]) -> tuple[str, ...] | No
             for index in range(3, len(branches))
         )
     )
-    if recursively_encoded or form_space_ladder:
-        return tuple(branches)
+    if recursively_encoded:
+        return tuple((branch,) for branch in branches)
+    if form_space_ladder:
+        return (
+            (branches[0],),
+            (branches[1], branches[2]),
+            *((branch,) for branch in branches[3:]),
+        )
     return None
 
 
@@ -624,6 +646,19 @@ def _ladder_depth(alternatives: list[list[tuple]]) -> int | None:
             elif depth != len(part[1]):
                 return None
     return depth or 1
+
+
+def _ladder_variants(alternatives: list[list[tuple]], depth: int) -> int:
+    """Return aligned alias count at one semantic encoding depth."""
+    return max(
+        (
+            len(part[1][depth])
+            for parts in alternatives
+            for part in parts
+            if part[0] == "ladder"
+        ),
+        default=1,
+    )
 
 
 def _has_literal_wildcard(parts: list[tuple]) -> bool:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import re
+from fnmatch import fnmatchcase
+from urllib.parse import quote, quote_plus
 
 import pytest
 
@@ -605,6 +607,60 @@ CMS_TRANSPORT_LADDER_RULE = (
     + '"id:107017,phase:2,deny,status:403,log,msg:\'JANUS candidate\',tag:\'janus-candidate\'"'
 )
 
+LT_LADDER = r"(?:<|%3C|%253C|%25253C|%2525253C|%252525253C|%25252525253C)"
+SLASH_LADDER = r"(?:/|%2F|%252F|%25252F|%2525252F|%252525252F|%25252525252F)"
+HASH_LADDER = r"(?:#|%23|%2523|%252523|%25252523|%2525252523|%252525252523)"
+GT_LADDER = r"(?:>|%3E|%253E|%25253E|%2525253E|%252525253E|%25252525253E)"
+CMS_EXPECTED_PAYLOAD = (
+    "<crafted CMS/PKCS#7 AuthEnvelopedData or EnvelopedData object with AEAD "
+    "parameters and an oversized ASN.1 IV length>"
+)
+CMS_MIXED_LADDER_RULE = (
+    'SecRule REQUEST_BODY "@rx (?:'
+    + CMS_EXPECTED_PAYLOAD.replace(".", r"\.")
+    + "|"
+    + LT_LADDER
+    + "crafted"
+    + FORM_SPACE_LADDER
+    + "CMS"
+    + SLASH_LADDER
+    + "PKCS"
+    + HASH_LADDER
+    + "7"
+    + FORM_SPACE_LADDER
+    + "AuthEnvelopedData"
+    + FORM_SPACE_LADDER
+    + "or"
+    + FORM_SPACE_LADDER
+    + "EnvelopedData"
+    + FORM_SPACE_LADDER
+    + "object"
+    + FORM_SPACE_LADDER
+    + "with"
+    + FORM_SPACE_LADDER
+    + "AEAD"
+    + FORM_SPACE_LADDER
+    + "parameters"
+    + FORM_SPACE_LADDER
+    + "and"
+    + FORM_SPACE_LADDER
+    + "an"
+    + FORM_SPACE_LADDER
+    + "oversized"
+    + FORM_SPACE_LADDER
+    + r"ASN\.1"
+    + FORM_SPACE_LADDER
+    + "IV"
+    + FORM_SPACE_LADDER
+    + "length"
+    + GT_LADDER
+    + "|"
+    + CMS_EXPECTED_PAYLOAD.encode().hex()
+    + ')" "id:159345,phase:2,deny,status:403,log,'
+    + "msg:'JANUS candidate',tag:'janus-candidate'"
+    + '"'
+)
+
 
 def test_encoding_ladders_align_by_depth_instead_of_exploding():
     rule = _compile(ENCODING_LADDER_RULE)
@@ -641,6 +697,36 @@ def test_form_space_and_recursive_percent_ladders_compile_without_cartesian_expa
     assert any("crafted%252525252520CMS" in value for value in values)
     assert any("4d4949422e2e2e" in value for value in values)
     assert any("differing depths" in item for item in proposal.limitations)
+
+
+def test_form_space_aliases_align_with_punctuation_by_semantic_depth():
+    proposal = compile_akamai_custom_rule(_pattern(CMS_MIXED_LADDER_RULE))
+
+    assert proposal is not None
+    assert isinstance(proposal.candidate_content, dict)
+    validation = AkamaiWafAdapter().validate_syntax(
+        json.dumps(proposal.candidate_content)
+    )
+    assert validation.valid, validation.errors
+    condition = _condition(proposal.candidate_content, "argsPostMatch")
+    values = condition["value"]
+    expected_payloads = [
+        CMS_EXPECTED_PAYLOAD,
+        quote_plus(CMS_EXPECTED_PAYLOAD, safe=""),
+        quote(CMS_EXPECTED_PAYLOAD, safe=""),
+    ]
+    encoded = quote(CMS_EXPECTED_PAYLOAD, safe="")
+    for _ in range(5):
+        encoded = quote(encoded, safe="")
+        expected_payloads.append(encoded)
+    expected_payloads.append(CMS_EXPECTED_PAYLOAD.encode().hex())
+
+    assert len(values) == len(expected_payloads)
+    for payload in expected_payloads:
+        assert any(fnmatchcase(payload, pattern) for pattern in values), payload
+    assert any("crafted+CMS%2FPKCS%237" in value for value in values)
+    assert any("crafted%20CMS%2FPKCS%237" in value for value in values)
+    assert any("crafted%2520CMS%252FPKCS%25237" in value for value in values)
 
 
 def test_aligned_ladder_values_are_a_subset_of_the_source_rule():
