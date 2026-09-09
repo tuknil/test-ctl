@@ -41,6 +41,7 @@ _MAX_REGEX_LENGTH = 4096
 _MAX_ARGUMENT_LENGTH = 4096
 
 _SECRULE_LINE = re.compile(r"^\s*SecRule\b", re.IGNORECASE)
+_HTTP_HEADER_NAME = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
 
 # ---------------------------------------------------------------------------
 # Request-component mapping
@@ -227,6 +228,12 @@ def _parse_variables(token: str) -> tuple[_Variable, ...]:
         selector = selector.strip().strip("'\"")
         if selector.startswith("/") or "*" in selector:
             raise _Unsupported("regex variable selectors are not expressible")
+        if (
+            collection == "REQUEST_HEADERS"
+            and selector
+            and _HTTP_HEADER_NAME.fullmatch(selector) is None
+        ):
+            raise _Unsupported("request header selector is not a valid field name")
         variables.append(_Variable(collection, selector or None))
     if not variables:
         raise _Unsupported("no variables")
