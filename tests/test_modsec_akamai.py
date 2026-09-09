@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import re
+from fnmatch import fnmatchcase
+from urllib.parse import quote, quote_plus
 
 import pytest
 
@@ -18,7 +20,11 @@ from control_translation.contracts import (
     TargetContext,
 )
 from control_translation.terminal import TerminalState
-from control_translation.translation.modsec_akamai import compile_akamai_custom_rule
+from control_translation.translation.modsec_akamai import (
+    _generalize_wildcard_transport_forms,
+    _remove_subsumed_literal_wildcards,
+    compile_akamai_custom_rule,
+)
 from control_translation.upstream import UpstreamRecord
 
 # The orchestration envelope the deployed Temporal caller sends.
@@ -39,6 +45,13 @@ PROVEN_SECRULE = (
     "\"id:152405,phase:2,deny,status:403,log,"
     "msg:'JANUS candidate: block evidenced Researcher SQLi variants',"
     "tag:'janus-candidate'\""
+)
+
+LOG4SHELL_SECRULE = (
+    'SecRule ARGS:address "@rx \\$\\{jndi:ldap://example\\.invalid/a'
+    '(?:\\}|%7[dD])" "id:150386,phase:2,deny,status:403,log,'
+    "msg:'JANUS candidate for CVE-2021-44228',tag:'janus-candidate',"
+    "tag:'CVE-2021-44228'" + '"\n'
 )
 
 
@@ -132,6 +145,84 @@ def test_header_rule_maps_to_a_named_header_value_condition():
     condition = _condition(rule, "requestHeaderValueMatch")
     assert condition["header"] == "User-Agent"
     assert condition["value"] == ["*${jndi:*"]
+
+
+def test_live_log4shell_rule_maps_rx_operator_to_akamai_argument_values():
+    proposal = compile_akamai_custom_rule(_pattern(
+        LOG4SHELL_SECRULE,
+        vulnerability_id="CVE-2021-44228",
+        proven_pattern_id="proven-pattern:candidate:CVE-2021-44228:waf:c1eebce95ddd6bf8",
+        discriminator_id="discriminator:candidate:CVE-2021-44228:waf:c1eebce95ddd6bf8",
+    ))
+    assert proposal is not None
+    assert isinstance(proposal.candidate_content, dict)
+    rule = proposal.candidate_content
+    validation = AkamaiWafAdapter().validate_syntax(json.dumps(rule))
+    assert validation.valid, validation.errors
+
+    condition = _condition(rule, "argsPostMatch")
+    assert condition["parameter"] == "address"
+    assert condition["positiveMatch"] is True
+    assert condition["valueWildcard"] is True
+    assert condition["value"] == [
+        "*${jndi:ldap://example.invalid/a}*",
+        "*${jndi:ldap://example.invalid/a%7d*",
+        "*${jndi:ldap://example.invalid/a%7D*",
+    ]
+    assert all(item["type"] != "rx" for item in rule["conditions"])
+
+
+def test_bounded_structured_log4shell_rule_compiles_deterministically():
+    proposal = compile_akamai_custom_rule(_pattern(
+        r'''SecRule REQUEST_BODY "@rx (?:\$\{jndi:(?:ldap|rmi)://[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?/[^\s\"'<>}]{0,512}\})" "id:109348,phase:2,deny,status:403,log,tag:'janus-candidate'"''',
+        vulnerability_id="CVE-2021-44228",
+    ))
+
+    assert proposal is not None
+    assert isinstance(proposal.candidate_content, dict)
+    validation = AkamaiWafAdapter().validate_syntax(
+        json.dumps(proposal.candidate_content)
+    )
+    assert validation.valid, validation.errors
+    condition = _condition(proposal.candidate_content, "argsPostMatch")
+    assert condition["valueWildcard"] is True
+    assert any("${jndi:ldap://" in value for value in condition["value"])
+    assert any("${jndi:rmi://" in value for value in condition["value"])
+    assert "*${jndi:ldap://example.invalid/a}*" not in condition["value"]
+    assert (
+        "*${jndi:rmi://janus-alternate.invalid/janus-bypass-probe}*"
+        not in condition["value"]
+    )
+    assert all(item["type"] != "REQUEST_BODY" for item in proposal.candidate_content["conditions"])
+    assert proposal.translation_label == "narrower"
+    assert any("broader set of requests" in item for item in proposal.limitations)
+
+
+def test_structured_transport_forms_remove_all_sentinel_authorities():
+    exact_hex = b'{"message":"${jndi:ldap://example.invalid/a}"}'.hex()
+    values = [
+        "*${jndi:ldap://?/*}*",
+        "*${jndi:ldap://?*?/*}*",
+        "*${jndi:rmi://?/*}*",
+        "*${jndi:rmi://?*?/*}*",
+        "*${jndi:ldap://example.invalid/a}*",
+        "*${jndi:rmi://janus-alternate.invalid/janus-bypass-probe}*",
+        "*%24%7Bjndi%3Aldap%3A%2F%2Fexample.invalid%2Fa%7D*",
+        "*%2524%257Bjndi%253Armi%253A%252F%252Fjanus-alternate.invalid%252Fjanus-bypass-probe%257D*",
+        f"*{exact_hex}*",
+    ]
+
+    generalized = _remove_subsumed_literal_wildcards(
+        _generalize_wildcard_transport_forms(values)
+    )
+
+    assert not any(
+        "example.invalid" in value or "janus-alternate.invalid" in value
+        for value in generalized
+    )
+    assert f"*{exact_hex}*" not in generalized
+    assert any("%24%7Bjndi%3Aldap%3A%2F%2F?*?%2F" in value for value in generalized)
+    assert any("247b6a6e64693a6c6461703a2f2f??" in value for value in generalized)
 
 
 def test_headerless_collection_uses_the_any_header_condition():
@@ -404,7 +495,8 @@ class FakeResolver:
     def __init__(self, records: dict[str, UpstreamRecord]) -> None:
         self.records = records
 
-    def fetch(self, reference, *, cancellation_signal=None):
+    def fetch(self, reference, *, immutable_locator=None, cancellation_signal=None):
+        del immutable_locator, cancellation_signal
         return self.records.get(reference.key)
 
 
@@ -492,6 +584,83 @@ ENCODING_LADDER_RULE = (
     "tag:'janus-candidate'\""
 )
 
+FORM_SPACE_LADDER = r"(?: |\+|%20|%2520|%252520|%25252520|%2525252520|%252525252520)"
+CMS_TRANSPORT_LADDER_RULE = (
+    'SecRule REQUEST_BODY "@rx (?:'
+    r"MIIB...crafted CMS AuthEnvelopedData with oversized AEAD IV field\.\.\."
+    "|MIIB...crafted"
+    + FORM_SPACE_LADDER
+    + "CMS"
+    + FORM_SPACE_LADDER
+    + "AuthEnvelopedData"
+    + FORM_SPACE_LADDER
+    + "with"
+    + FORM_SPACE_LADDER
+    + "oversized"
+    + FORM_SPACE_LADDER
+    + "AEAD"
+    + FORM_SPACE_LADDER
+    + r"IV"
+    + FORM_SPACE_LADDER
+    + r"field\.\.\."
+    + "|4d4949422e2e2e6372616674656420434d532041757468456e76656c6f706564446174612077697468206f76657273697a65642041454144204956206669656c642e2e2e)\" "
+    + '"id:107017,phase:2,deny,status:403,log,msg:\'JANUS candidate\',tag:\'janus-candidate\'"'
+)
+
+LT_LADDER = r"(?:<|%3C|%253C|%25253C|%2525253C|%252525253C|%25252525253C)"
+SLASH_LADDER = r"(?:/|%2F|%252F|%25252F|%2525252F|%252525252F|%25252525252F)"
+HASH_LADDER = r"(?:#|%23|%2523|%252523|%25252523|%2525252523|%252525252523)"
+GT_LADDER = r"(?:>|%3E|%253E|%25253E|%2525253E|%252525253E|%25252525253E)"
+CMS_EXPECTED_PAYLOAD = (
+    "<crafted CMS/PKCS#7 AuthEnvelopedData or EnvelopedData object with AEAD "
+    "parameters and an oversized ASN.1 IV length>"
+)
+CMS_MIXED_LADDER_RULE = (
+    'SecRule REQUEST_BODY "@rx (?:'
+    + CMS_EXPECTED_PAYLOAD.replace(".", r"\.")
+    + "|"
+    + LT_LADDER
+    + "crafted"
+    + FORM_SPACE_LADDER
+    + "CMS"
+    + SLASH_LADDER
+    + "PKCS"
+    + HASH_LADDER
+    + "7"
+    + FORM_SPACE_LADDER
+    + "AuthEnvelopedData"
+    + FORM_SPACE_LADDER
+    + "or"
+    + FORM_SPACE_LADDER
+    + "EnvelopedData"
+    + FORM_SPACE_LADDER
+    + "object"
+    + FORM_SPACE_LADDER
+    + "with"
+    + FORM_SPACE_LADDER
+    + "AEAD"
+    + FORM_SPACE_LADDER
+    + "parameters"
+    + FORM_SPACE_LADDER
+    + "and"
+    + FORM_SPACE_LADDER
+    + "an"
+    + FORM_SPACE_LADDER
+    + "oversized"
+    + FORM_SPACE_LADDER
+    + r"ASN\.1"
+    + FORM_SPACE_LADDER
+    + "IV"
+    + FORM_SPACE_LADDER
+    + "length"
+    + GT_LADDER
+    + "|"
+    + CMS_EXPECTED_PAYLOAD.encode().hex()
+    + ')" "id:159345,phase:2,deny,status:403,log,'
+    + "msg:'JANUS candidate',tag:'janus-candidate'"
+    + '"'
+)
+
 
 def test_encoding_ladders_align_by_depth_instead_of_exploding():
     rule = _compile(ENCODING_LADDER_RULE)
@@ -503,9 +672,61 @@ def test_encoding_ladders_align_by_depth_instead_of_exploding():
         "*person%25255B0%25255D%25255B%25255D%25253Dmalicious*",
         "*person%2525255B0%2525255D%2525255B%2525255D%2525253Dmalicious*",
         "*person%252525255B0%252525255D%252525255B%252525255D%252525253Dmalicious*",
-        "*person%25252525255B0%25252525255D%25252525255B%25252525255D"
-        "%25252525253Dmalicious*",
+        (
+            "*person%25252525255B0%25252525255D%25252525255B%25252525255D"
+            "%25252525253Dmalicious*"
+        ),
     ]
+
+
+def test_form_space_and_recursive_percent_ladders_compile_without_cartesian_expansion():
+    proposal = compile_akamai_custom_rule(_pattern(CMS_TRANSPORT_LADDER_RULE))
+
+    assert proposal is not None
+    assert proposal.translation_label == "narrower"
+    assert isinstance(proposal.candidate_content, dict)
+    validation = AkamaiWafAdapter().validate_syntax(
+        json.dumps(proposal.candidate_content)
+    )
+    assert validation.valid, validation.errors
+    values = _condition(proposal.candidate_content, "argsPostMatch")["value"]
+    assert len(values) == 9
+    assert any("crafted CMS AuthEnvelopedData with oversized AEAD IV field" in value for value in values)
+    assert any("crafted+CMS+AuthEnvelopedData+with+oversized+AEAD+IV+field" in value for value in values)
+    assert any("crafted%20CMS%20AuthEnvelopedData%20with%20oversized%20AEAD%20IV%20field" in value for value in values)
+    assert any("crafted%252525252520CMS" in value for value in values)
+    assert any("4d4949422e2e2e" in value for value in values)
+    assert any("differing depths" in item for item in proposal.limitations)
+
+
+def test_form_space_aliases_align_with_punctuation_by_semantic_depth():
+    proposal = compile_akamai_custom_rule(_pattern(CMS_MIXED_LADDER_RULE))
+
+    assert proposal is not None
+    assert isinstance(proposal.candidate_content, dict)
+    validation = AkamaiWafAdapter().validate_syntax(
+        json.dumps(proposal.candidate_content)
+    )
+    assert validation.valid, validation.errors
+    condition = _condition(proposal.candidate_content, "argsPostMatch")
+    values = condition["value"]
+    expected_payloads = [
+        CMS_EXPECTED_PAYLOAD,
+        quote_plus(CMS_EXPECTED_PAYLOAD, safe=""),
+        quote(CMS_EXPECTED_PAYLOAD, safe=""),
+    ]
+    encoded = quote(CMS_EXPECTED_PAYLOAD, safe="")
+    for _ in range(5):
+        encoded = quote(encoded, safe="")
+        expected_payloads.append(encoded)
+    expected_payloads.append(CMS_EXPECTED_PAYLOAD.encode().hex())
+
+    assert len(values) == len(expected_payloads)
+    for payload in expected_payloads:
+        assert any(fnmatchcase(payload, pattern) for pattern in values), payload
+    assert any("crafted+CMS%2FPKCS%237" in value for value in values)
+    assert any("crafted%20CMS%2FPKCS%237" in value for value in values)
+    assert any("crafted%2520CMS%252FPKCS%25237" in value for value in values)
 
 
 def test_aligned_ladder_values_are_a_subset_of_the_source_rule():

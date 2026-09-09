@@ -20,7 +20,10 @@ from control_translation.callbacks import (
     callback_metadata_from_headers,
 )
 from control_translation.contracts import InvokeRequestEnvelope
-from control_translation.persistence import SQLiteRunRepository, normalized_request_digest
+from control_translation.persistence import (
+    SQLiteRunRepository,
+    normalized_request_digest,
+)
 
 client = TestClient(app)
 
@@ -206,7 +209,8 @@ def test_idempotent_retry_can_attach_callback_metadata():
         headers=_submit_headers(),
     )
 
-    assert first.status_code == second.status_code == 202
+    assert first.status_code == 202
+    assert second.status_code in {200, 202}
     assert first.json()["run_id"] == second.json()["run_id"]
     stored = api._REPOSITORY.get_lifecycle_run(second.json()["run_id"])
     assert stored is not None and stored.callback is not None

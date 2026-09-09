@@ -279,6 +279,14 @@ def readiness() -> dict[str, str]:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={"status": "not-ready", "storage": "unavailable"},
         )
+    if settings.require_upstream_reader_ready and (
+        _UPSTREAM_RESOLVER is None or not _UPSTREAM_RESOLVER.healthcheck()
+    ):
+        logger.error("Readiness upstream reader healthcheck failed")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"status": "not-ready", "upstream_reader": "unavailable"},
+        )
     return {"status": "ready"}
 
 

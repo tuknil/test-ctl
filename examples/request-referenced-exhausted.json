@@ -20,6 +20,7 @@
       "result_id": "defense-generation-result:58d33b15d533257dfed59819",
       "terminal_state": "candidate-produced",
       "status": "completed",
+      "request_id": "dg-request:CVE-2026-77392:waf:10",
       "correlation_id": "uat-CVE-2026-77392-dev29-0004",
       "result_ref": {
         "system": "databricks",
@@ -28,7 +29,10 @@
         "table": "defense_generation_results",
         "key": "defense-generation-result:58d33b15d533257dfed59819"
       },
-      "evidence_refs": []
+      "evidence_refs": [],
+      "content_sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "size_bytes": 4096,
+      "created_at": "2026-09-03T12:00:00Z"
     },
     {
       "capability": "mitigation-check",
@@ -37,6 +41,7 @@
       "result_id": "mitigation-check-result:21f3f336083e2c509ac6f55c",
       "terminal_state": "blocked",
       "status": "completed",
+      "request_id": "mc-request:CVE-2026-77392:waf:10",
       "correlation_id": "uat-CVE-2026-77392-dev29-0004",
       "result_ref": {
         "system": "databricks",
@@ -45,7 +50,10 @@
         "table": "mitigation_check",
         "key": "mitigation-check-result:21f3f336083e2c509ac6f55c"
       },
-      "evidence_refs": []
+      "evidence_refs": [],
+      "content_sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "size_bytes": 3072,
+      "created_at": "2026-09-03T12:01:00Z"
     },
     {
       "capability": "bypass-validation",
@@ -54,6 +62,7 @@
       "result_id": "bypass-validation-result:bvrun_c2624b83262547f1a19d62fb",
       "terminal_state": "bypass-found",
       "status": "completed",
+      "request_id": "bv-request:CVE-2026-77392:waf:10",
       "correlation_id": "uat-CVE-2026-77392-dev29-0004",
       "result_ref": {
         "system": "databricks",
@@ -65,7 +74,10 @@
       "evidence_refs": [
         "evidence://control/bvrun_c2624b83262547f1a19d62fb:attempt-2",
         "evidence://target/bvrun_c2624b83262547f1a19d62fb:attempt-2"
-      ]
+      ],
+      "content_sha256": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "size_bytes": 2048,
+      "created_at": "2026-09-03T12:02:00Z"
     }
   ],
   "routing_context": {

@@ -1,8 +1,8 @@
 import json
 from pathlib import Path
 
-from pydantic import ValidationError
 import pytest
+from pydantic import ValidationError
 
 from control_translation.contracts import (
     ControlTranslationRequest,
@@ -72,6 +72,7 @@ def _orchestration_envelope() -> dict:
             "result_id": result_id,
             "terminal_state": state,
             "status": "completed",
+            "request_id": f"request:{capability}:1",
             "correlation_id": "corr-production-1",
             "result_ref": {
                 "system": "databricks",
@@ -81,6 +82,9 @@ def _orchestration_envelope() -> dict:
                 "key": result_id,
             },
             "evidence_refs": [],
+            "content_sha256": "sha256:" + "a" * 64,
+            "size_bytes": 1024,
+            "created_at": "2026-09-03T12:00:00Z",
         }
 
     return {
@@ -137,6 +141,37 @@ def test_orchestration_envelope_does_not_require_input_and_uses_request_id():
     assert envelope.idempotency_key == envelope.request_id
     assert envelope.upstream_result_refs is not None
     assert envelope.routing_metadata is not None
+
+
+def test_legacy_non_bounded_orchestration_inputs_remain_accepted():
+    body = _orchestration_envelope()
+    for upstream in body["upstream_inputs"]:
+        upstream.pop("request_id")
+        upstream.pop("content_sha256")
+        upstream.pop("size_bytes")
+        upstream.pop("created_at")
+
+    envelope = InvokeRequestEnvelope.model_validate(body)
+
+    assert envelope.upstream_inputs is not None
+    assert all(not item.is_strict_locator for item in envelope.upstream_inputs)
+
+
+def test_partial_strict_locator_metadata_is_rejected():
+    body = _orchestration_envelope()
+    body["upstream_inputs"][0].pop("created_at")
+
+    with pytest.raises(ValidationError, match="strict upstream locator"):
+        InvokeRequestEnvelope.model_validate(body)
+
+
+def test_strict_locator_mode_cannot_mix_with_legacy_inputs():
+    body = _orchestration_envelope()
+    for field in ("request_id", "content_sha256", "size_bytes", "created_at"):
+        body["upstream_inputs"][0].pop(field)
+
+    with pytest.raises(ValidationError, match="bounded metadata for all"):
+        InvokeRequestEnvelope.model_validate(body)
 
 
 def test_orchestration_envelope_rejects_wrong_contract_and_unknown_fields():

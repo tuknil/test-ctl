@@ -16,6 +16,7 @@ from control_translation.contracts import (
     BypassCounterexample,
     DatabricksResultReference,
     JsonBodyFieldFeature,
+    OrchestrationUpstreamInput,
     ProofLoopQualification,
     ProofLoopRequestContext,
     ProofLoopRoutingMetadata,
@@ -55,6 +56,7 @@ class UpstreamResultResolver(Protocol):
         self,
         reference: DatabricksResultReference,
         *,
+        immutable_locator: OrchestrationUpstreamInput | None = None,
         cancellation_signal: CancellationSignal | None = None,
     ) -> UpstreamRecord | None: ...
 
@@ -81,6 +83,7 @@ def resolve_proof_loop(
     routing_metadata: ProofLoopRoutingMetadata,
     expected_vulnerability_id: str | None = None,
     expected_candidate_id: str | None = None,
+    immutable_locators: tuple[OrchestrationUpstreamInput, ...] | None = None,
     cancellation_signal: CancellationSignal | None = None,
 ) -> ResolvedProofLoop:
     """Fetch all three records and enforce proof state and cross-record lineage."""
@@ -97,6 +100,9 @@ def resolve_proof_loop(
         )
 
     required_bypass_state = routing_metadata.bypass_validation_terminal_state
+    locators = {
+        item.capability: item for item in immutable_locators or ()
+    }
     role_refs = (
         ("Defense Generation", references.defense_generation, "candidate-produced"),
         ("Mitigation Check", references.mitigation_check, "blocked"),
@@ -105,9 +111,16 @@ def resolve_proof_loop(
     records: dict[str, UpstreamRecord] = {}
     for role, reference, required_state in role_refs:
         check_cancelled(cancellation_signal)
+        capability_name = role.lower().replace(" ", "-")
+        locator = locators.get(capability_name)
+        if immutable_locators is not None and locator is None:
+            raise UpstreamResolutionError(
+                f"{role} immutable locator is missing"
+            )
         try:
             record = resolver.fetch(
                 reference,
+                immutable_locator=locator,
                 cancellation_signal=cancellation_signal,
             )
         except (OperationCancelled, UpstreamResolutionError):
@@ -542,7 +555,11 @@ def decode_json_object(value: Any, label: str) -> dict[str, Any]:
     if value is None:
         return {}
     try:
-        decoded = json.loads(value) if isinstance(value, str) else value
+        decoded = (
+            json.loads(value)
+            if isinstance(value, (str, bytes, bytearray))
+            else value
+        )
     except (TypeError, ValueError) as exc:
         raise UpstreamResolutionError(f"{label} is not valid JSON") from exc
     if not isinstance(decoded, dict):
