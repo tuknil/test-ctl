@@ -157,15 +157,23 @@ def test_anchored_literal_compiles_to_an_exact_match_with_encodings():
     ]
 
 
-def test_header_rule_maps_to_a_named_header_value_condition():
+@pytest.mark.parametrize("header", ["X-Arbitrary-Signal", "Forwarded"])
+def test_header_rule_preserves_an_arbitrary_validated_header_name(header: str):
     rule = _compile(
-        'SecRule REQUEST_HEADERS:User-Agent "@rx \\$\\{jndi:" '
-        "\"id:2,deny,msg:'Log4Shell JNDI in User-Agent'\""
+        f'SecRule REQUEST_HEADERS:{header} "@rx \\$\\{{jndi:" '
+        '"id:2,deny,msg:\'JNDI in named request header\'"'
     )
 
     condition = _condition(rule, "requestHeaderValueMatch")
-    assert condition["header"] == "User-Agent"
+    assert condition["header"] == header
     assert condition["value"] == ["*${jndi:*"]
+
+
+@pytest.mark.parametrize("header", ["Bad,Header", "Header(Name)", "Name:Suffix"])
+def test_invalid_named_header_selector_declines(header: str):
+    rule = f'SecRule REQUEST_HEADERS:{header} "@contains blocked" "id:2,deny"'
+
+    assert compile_akamai_custom_rule(_pattern(rule)) is None
 
 
 def test_live_log4shell_rule_maps_rx_operator_to_akamai_argument_values():
@@ -205,7 +213,8 @@ def test_bounded_structured_log4shell_rule_compiles_deterministically():
         json.dumps(proposal.candidate_content)
     )
     assert validation.valid, validation.errors
-    condition = _condition(proposal.candidate_content, "argsPostMatch")
+    condition = _condition(proposal.candidate_content, "requestHeaderValueMatch")
+    assert condition["header"] == "User-Agent"
     assert condition["valueWildcard"] is True
     assert condition["value"] == DG_LOG4SHELL_EXPECTED_VALUES
     assert any("${jndi:ldap://" in value for value in condition["value"])
@@ -222,7 +231,10 @@ def test_bounded_structured_log4shell_rule_compiles_deterministically():
         "janus-alternate.invalid",
     ):
         assert all(literal not in value for value in condition["value"])
-    assert all(item["type"] != "REQUEST_BODY" for item in proposal.candidate_content["conditions"])
+    assert all(
+        item["type"] not in {"REQUEST_BODY", "requestHeaderMatch"}
+        for item in proposal.candidate_content["conditions"]
+    )
     assert proposal.translation_label == "broader"
     assert any("broader set of requests" in item for item in proposal.limitations)
 
@@ -682,10 +694,15 @@ def test_current_orchestration_shape_translates_broader_dg_log4shell_rule():
     assert candidate.implements_discriminator.translation == "broader"
     assert candidate.candidate_metadata is not None
     assert candidate.candidate_metadata.semantic_relationship == "broader"
-    values = _condition(
-        json.loads(candidate.candidate_artifact.content_ref), "argsPostMatch"
-    )["value"]
-    assert values == list(DG_LOG4SHELL_EXPECTED_VALUES)
+    assert candidate.candidate_metadata.syntax_profile.deployment_ready is False
+    assert (
+        candidate.candidate_metadata.recommended_policy_binding.requires_operator_review
+        is True
+    )
+    rule = json.loads(candidate.candidate_artifact.content_ref)
+    condition = _condition(rule, "requestHeaderValueMatch")
+    assert condition["header"] == "User-Agent"
+    assert condition["value"] == list(DG_LOG4SHELL_EXPECTED_VALUES)
 
 
 # ---------------------------------------------------------------------------
