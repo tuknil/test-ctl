@@ -276,6 +276,7 @@ def invoke(
         request_context=request_context,
         allow_narrower_translation=request.translation_policy.allow_narrower_translation,
         allow_equivalent_translation=request.translation_policy.allow_equivalent_translation,
+        allow_broader_translation=request.translation_policy.allow_broader_translation,
         cancellation_signal=cancellation_signal,
     )
     check_cancelled(cancellation_signal)

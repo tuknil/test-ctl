@@ -9,6 +9,7 @@ from control_translation.contracts import (
     InvokeRequestEnvelope,
     ProvenMitigationPattern,
     TargetContext,
+    TranslationPolicy,
 )
 from control_translation.providers.fixtures import get_fixture_pattern
 
@@ -29,6 +30,15 @@ def test_request_accepts_valid_shape():
     request = _valid_request()
     assert request.proven_pattern.vulnerability_id == "CVE-EXAMPLE"
     assert request.target_context.target_technology == "akamai-waf"
+    assert request.translation_policy.allow_broader_translation is True
+
+
+def test_request_accepts_explicit_broader_translation_deny():
+    request = ControlTranslationRequest(
+        translation_policy=TranslationPolicy(allow_broader_translation=False)
+    )
+
+    assert request.translation_policy.allow_broader_translation is False
 
 
 def test_request_rejects_malformed_input():
@@ -138,6 +148,7 @@ def test_orchestration_envelope_does_not_require_input_and_uses_request_id():
     envelope = InvokeRequestEnvelope.model_validate(_orchestration_envelope())
 
     assert envelope.input.proven_pattern is None
+    assert envelope.input.translation_policy.allow_broader_translation is True
     assert envelope.idempotency_key == envelope.request_id
     assert envelope.upstream_result_refs is not None
     assert envelope.routing_metadata is not None

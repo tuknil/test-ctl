@@ -16,7 +16,7 @@ policy/rule/config language — or a grounded reason it cannot be produced.
 | Proven mitigation pattern | Yes | `ProvenMitigationPattern` (fixture samples in `providers/fixtures.py`; no real `defense-generation`/`mitigation-check`/`bypass-validation` upstream yet) |
 | Target control context | Yes | `TargetContext` |
 | Current policy/config snapshot | Required when translation depends on it | `PolicyReader` seam, fixture-backed only |
-| Translation policy | Yes | `TranslationPolicy` (minimal dials: `allow_narrower_translation`, `allow_equivalent_translation`) |
+| Translation policy | Yes | `TranslationPolicy` (minimal dials: `allow_narrower_translation`, `allow_equivalent_translation`, `allow_broader_translation`) |
 | Reference/proof bundle | Yes | Carried via `proof_record_ids` on the proven pattern |
 
 ## Output

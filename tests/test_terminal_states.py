@@ -420,7 +420,9 @@ def test_typed_json_body_candidate_is_deterministic_and_review_only(run_mode: st
         selected_control_class="waf",
         discriminator_id="discriminator:generic-json",
         discriminator_description="Opaque producer prose without adapter keywords.",
-        pattern_summary='SecRule REQUEST_BODY "@rx node_options.*--require"',
+        pattern_summary=(
+            'SecRule REQUEST_BODY "@rx (?=node_options.*--require)node_options.*--require"'
+        ),
         proof_record_ids=[
             "mitigation-check-result:generic-json",
             "bypass-validation-result:generic-json",

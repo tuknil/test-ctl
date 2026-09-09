@@ -38,7 +38,7 @@
     },
     "CompletionCallback": {
       "additionalProperties": false,
-      "description": "Reserved callback contract; delivery remains deferred until orchestration is ready.",
+      "description": "Legacy body callback shape; async submissions use transport headers.",
       "properties": {
         "url": {
           "format": "uri",
@@ -1036,6 +1036,11 @@
         "allow_equivalent_translation": {
           "default": true,
           "title": "Allow Equivalent Translation",
+          "type": "boolean"
+        },
+        "allow_broader_translation": {
+          "default": true,
+          "title": "Allow Broader Translation",
           "type": "boolean"
         }
       },

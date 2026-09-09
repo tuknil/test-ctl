@@ -72,6 +72,24 @@
         },
         "recommended_policy_binding": {
           "$ref": "#/$defs/RecommendedPolicyBinding"
+        },
+        "semantic_relationship": {
+          "anyOf": [
+            {
+              "enum": [
+                "exact",
+                "equivalent",
+                "narrower",
+                "broader"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Semantic Relationship"
         }
       },
       "required": [
@@ -289,7 +307,7 @@
           "type": "string"
         },
         "translation": {
-          "description": "exact | equivalent | narrower",
+          "description": "exact | equivalent | narrower | broader",
           "title": "Translation",
           "type": "string"
         },

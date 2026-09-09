@@ -136,6 +136,9 @@ def test_submit_is_async_and_result_is_immutable():
         "deployment_ready": False,
     }
     assert metadata["recommended_policy_binding"]["action"] == "deny"
+    assert metadata["recommended_policy_binding"]["requires_operator_review"] is True
+    assert metadata["syntax_profile"]["deployment_ready"] is False
+    assert metadata["semantic_relationship"] == "equivalent"
     assert first.json()["inference"]["proposal_source"]
     assert first.json()["inference"]["llm_invoked"] is False
     assert first.json()["result_ref"]["key"] == first.json()["result_id"]
@@ -147,6 +150,35 @@ def test_submit_is_async_and_result_is_immutable():
     assert size_bytes == len(content)
     assert terminal["completion"]["content_sha256"] == digest
     assert terminal["completion"]["size_bytes"] == size_bytes
+
+
+def test_broader_semantic_metadata_survives_async_lifecycle():
+    body = _body(
+        (
+            Path(__file__).parent
+            / "fixtures"
+            / "dg_log4shell_semantic_generalization.modsec"
+        ).read_text(encoding="utf-8")
+    )
+
+    response = client.post(
+        "/v1/control-translation-runs", json=body, headers=_headers()
+    )
+    assert response.status_code == 202
+    terminal = _wait_for_terminal(response.json()["run_id"])
+    assert terminal["terminal_state"] == "translated"
+
+    result = client.get(response.json()["result_url"])
+    assert result.status_code == 200
+    candidate_metadata = result.json()["primary_candidate"]["candidate_metadata"]
+    artifact_metadata = result.json()["artifacts"]["primary"]["candidate_metadata"]
+    assert candidate_metadata == artifact_metadata
+    assert candidate_metadata["semantic_relationship"] == "broader"
+    assert candidate_metadata["syntax_profile"]["deployment_ready"] is False
+    assert (
+        candidate_metadata["recommended_policy_binding"]["requires_operator_review"]
+        is True
+    )
 
 
 def test_identical_retry_reuses_run_and_conflict_is_structured():

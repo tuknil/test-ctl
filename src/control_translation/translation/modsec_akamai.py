@@ -421,17 +421,34 @@ class _RegexTranslator:
         if self.index >= len(self.source):
             return alternatives
         if self.source[self.index] == "{":
-            if not single_char:
-                raise _Unsupported("counted repetition of a group is not expressible")
-            match = re.match(r"\{(\d+),(\d+)\}", self.source[self.index :])
+            match = re.match(
+                r"\{(\d+)(?:,(\d+))?\}", self.source[self.index :]
+            )
             if match is None:
                 raise _Unsupported("unbounded or malformed counted repetition")
-            minimum, maximum = (int(value) for value in match.groups())
-            if minimum != 0 or maximum < 1 or maximum > 4096:
+            minimum = int(match.group(1))
+            maximum = int(match.group(2) or minimum)
+            if maximum < minimum or maximum < 1 or maximum > 4096:
                 raise _Unsupported("counted repetition bounds are not expressible")
             self.index += match.end()
-            self.lossy = True
-            return [[_ANY]]
+            if minimum == 0:
+                self.lossy = True
+                return [[_ANY]]
+            if minimum > _MAX_VALUES:
+                raise _Unsupported("counted repetition minimum is too large")
+            repeated: list[list[tuple]] = [[]]
+            for _ in range(minimum):
+                repeated = [
+                    prefix + suffix
+                    for prefix in repeated
+                    for suffix in alternatives
+                ]
+                if len(repeated) > _MAX_VALUES:
+                    raise _Unsupported("counted repetition expands to too many values")
+            if maximum > minimum:
+                repeated = [parts + [_ANY] for parts in repeated]
+                self.lossy = True
+            return repeated
         if self.source[self.index] not in "*+?":
             return alternatives
         quantifier = self.source[self.index]
@@ -1124,7 +1141,11 @@ def _compile(
         ),
     }
 
-    label = "narrower" if lossy or narrowed else "equivalent"
+    if lossy and narrowed:
+        raise _Unsupported(
+            "translation both broadens regex constructs and narrows encoding coverage"
+        )
+    label = "broader" if lossy else "narrower" if narrowed else "equivalent"
     assumptions = [
         (
             "The proven ModSecurity rule in the upstream defense-generation "
