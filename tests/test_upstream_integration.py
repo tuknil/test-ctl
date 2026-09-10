@@ -91,7 +91,10 @@ def _records() -> dict[str, UpstreamRecord]:
                     "candidate_id": CANDIDATE_ID,
                     "selected_control_class": "waf",
                     "discriminator": "Block an SQL injection token in the HTTP request body.",
-                    "artifact_content": "SecRule ARGS deny SQL injection",
+                    "artifact_content": (
+                        'SecRule REQUEST_BODY "@contains SQL injection" '
+                        '"id:1,phase:2,deny,status:403,log"'
+                    ),
                 },
             },
         ),

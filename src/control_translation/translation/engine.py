@@ -42,7 +42,10 @@ from control_translation.contracts import (
 )
 from control_translation.policy_reader.base import PolicySnapshot
 from control_translation.translation import conflict_checker, syntax_validator
-from control_translation.translation.modsec_akamai import compile_akamai_custom_rule
+from control_translation.translation.modsec_akamai import (
+    compile_akamai_custom_rule,
+    has_authoritative_secrule,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +105,20 @@ def translate(
         )
 
     if proposal is None:
+        if (
+            target_technology == "akamai-waf"
+            and has_authoritative_secrule(pattern.pattern_summary)
+        ):
+            return EngineFailure(
+                reason="unsupported-feature",
+                detail=(
+                    "The authoritative ModSecurity SecRule could not be compiled "
+                    "deterministically for Akamai; model fallback is disabled for "
+                    "authoritative executable source artifacts."
+                ),
+                proposal_source="deterministic-modsec-rule",
+                llm_invoked=False,
+            )
         # Mechanical gate: can this target technology plausibly express the
         # discriminator at all? Cheap check before spending an agent call. A
         # deterministically compiled rule has already answered this question,

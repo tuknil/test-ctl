@@ -382,7 +382,7 @@ def test_published_malfunction_is_completed_canonical_outcome(monkeypatch):
     )
     response = client.post(
         "/v1/control-translation-runs",
-        json=_body('SecRule ARGS:address "@rx ^test\\s{2,}$" "id:1,deny"'),
+        json=_body("Block repeated whitespace in the address request argument."),
         headers=_headers(),
     )
     assert response.status_code == 202
