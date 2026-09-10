@@ -419,7 +419,13 @@ def _akamai_deterministic_proposal(
         pattern,
         translation_requirements=translation_requirements,
     )
-    if compiled_proposal is not None and pattern.json_body_field_feature is not None:
+    structured_jndi_compaction = compiled_proposal is not None and any(
+        "JNDI branches were compacted" in limitation
+        for limitation in compiled_proposal.limitations
+    )
+    if compiled_proposal is not None and (
+        pattern.json_body_field_feature is not None or structured_jndi_compaction
+    ):
         return compiled_proposal, "deterministic-modsec-rule"
     proposal = _akamai_json_body_field_proposal(pattern)
     if proposal is not None:

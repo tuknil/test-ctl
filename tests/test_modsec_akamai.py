@@ -18,12 +18,14 @@ from control_translation.contracts import (
     ControlTranslationRequest,
     InvokeRequestEnvelope,
     JsonBodyFieldFeature,
+    ProofLoopRequestContext,
     ProofLoopTranslationRequirements,
     ProvenMitigationPattern,
     TargetContext,
     TranslationPolicy,
 )
 from control_translation.terminal import TerminalState
+from control_translation.translation.engine import _akamai_deterministic_proposal
 from control_translation.translation.modsec_akamai import (
     _generalize_wildcard_transport_forms,
     _remove_subsumed_literal_wildcards,
@@ -284,6 +286,37 @@ def test_overflowing_three_representation_jndi_rule_compacts_to_clean_values():
     assert any("UTF-8 hex" in item for item in first.limitations)
     assert any("hostname, IPv4, IPv6, port" in item for item in first.limitations)
     assert not any("Only the decoded" in item for item in first.limitations)
+
+
+def test_carrier_jndi_secrule_precedes_concrete_form_body_fallback():
+    source = DG_LOG4SHELL_THREE_REPRESENTATION_RULE
+    source = source.replace(r"\$\{jndi:", r"message=\$\{jndi:", 1)
+    source = source.replace("%24%7Bjndi%3A", "message=%24%7Bjndi%3A", 1)
+    source = source.replace(
+        "247b6a6e64693a", "6d6573736167653d247b6a6e64693a", 1
+    )
+
+    proposal, proposal_source = _akamai_deterministic_proposal(
+        _pattern(source),
+        translation_requirements=None,
+        request_context=ProofLoopRequestContext(
+            method="POST",
+            path="/",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            body="message=${jndi:ldap://invalid.example/a}",
+        ),
+    )
+
+    assert proposal is not None
+    assert proposal_source == "deterministic-modsec-rule"
+    condition = _condition(proposal.candidate_content, "argsPostMatch")
+    assert condition["value"] == [
+        value.replace("*${jndi:", "*message=${jndi:")
+        .replace("*%24%7Bjndi%3A", "*message=%24%7Bjndi%3A")
+        .replace("*247b6a6e64693a", "*6d6573736167653d247b6a6e64693a")
+        for value in DG_LOG4SHELL_COMPACT_VALUES
+    ]
+    assert "invalid.example" not in json.dumps(proposal.candidate_content)
 
 
 @pytest.mark.parametrize(
