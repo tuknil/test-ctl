@@ -22,7 +22,7 @@ not care which mode produced the proposal.
 from __future__ import annotations
 
 import json
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -48,8 +48,10 @@ class TranslationProposal(BaseModel):
             "text targets use a string."
         )
     )
-    translation_label: str = Field(
-        description="exact | equivalent | narrower"
+    translation_label: Literal[
+        "exact", "equivalent", "narrower", "broader"
+    ] = Field(
+        description="exact | equivalent | narrower | broader"
     )
     justification: str
     translation_assumptions: list[str] = Field(default_factory=list)
@@ -310,7 +312,8 @@ class LiveTranslationDoer:
                 "default treatAsThreat to 'UNDEFINED' (alert-only) and "
                 "networkQuarantine to false unless containment is explicitly "
                 "required.\n"
-                "State whether your translation is exact, equivalent, or narrower "
+                "State whether your translation is exact, equivalent, narrower, or "
+                "broader "
                 "relative to the discriminator, and list any assumptions or "
                 "limitations. Do not claim the candidate has been tested or is "
                 "safe for production -- that is decided elsewhere. Return only the "
@@ -424,7 +427,7 @@ class AttInferenceTranslationDoer:
             "control artifact. Return a JSON object only, with exactly these "
             "fields: candidate_content (object/array for JSON targets, string "
             "for text targets), translation_label (exact, "
-            "equivalent, or narrower), justification (string), "
+            "equivalent, narrower, or broader), justification (string), "
             "translation_assumptions (array of strings), limitations (array of "
             "strings), and answer_kind (construction). Do not claim the "
             "candidate is tested or production-safe. "
@@ -567,10 +570,8 @@ class AttInferenceTranslationDoer:
             # A model may provide explanatory text rather than the constrained
             # label. Preserve the conservative label in that case; downstream
             # policy and syntax judges still decide whether it can be emitted.
-            label = str(proposal_data.get("translation_label", "")).lower()
-            proposal_data["translation_label"] = next(
-                (item for item in ("exact", "equivalent", "narrower") if item in label),
-                "narrower",
+            proposal_data["translation_label"] = _normalize_translation_label(
+                proposal_data.get("translation_label")
             )
             proposal_data["answer_kind"] = "construction"
             proposal = TranslationProposal.model_validate(proposal_data)
@@ -580,6 +581,19 @@ class AttInferenceTranslationDoer:
             raise RuntimeError(
                 "AT&T Inference returned an invalid structured translation response."
             ) from exc
+
+
+def _normalize_translation_label(value: object) -> str:
+    """Preserve recognized semantic depth while retaining the legacy fallback."""
+    label = str(value or "").lower()
+    return next(
+        (
+            item
+            for item in ("exact", "equivalent", "broader", "narrower")
+            if item in label
+        ),
+        "narrower",
+    )
 
 
 _PROPOSAL_METADATA_FIELDS = frozenset(

@@ -41,6 +41,7 @@ _MAX_REGEX_LENGTH = 4096
 _MAX_ARGUMENT_LENGTH = 4096
 
 _SECRULE_LINE = re.compile(r"^\s*SecRule\b", re.IGNORECASE)
+_HTTP_HEADER_NAME = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
 
 # ---------------------------------------------------------------------------
 # Request-component mapping
@@ -227,6 +228,12 @@ def _parse_variables(token: str) -> tuple[_Variable, ...]:
         selector = selector.strip().strip("'\"")
         if selector.startswith("/") or "*" in selector:
             raise _Unsupported("regex variable selectors are not expressible")
+        if (
+            collection == "REQUEST_HEADERS"
+            and selector
+            and _HTTP_HEADER_NAME.fullmatch(selector) is None
+        ):
+            raise _Unsupported("request header selector is not a valid field name")
         variables.append(_Variable(collection, selector or None))
     if not variables:
         raise _Unsupported("no variables")
@@ -421,17 +428,34 @@ class _RegexTranslator:
         if self.index >= len(self.source):
             return alternatives
         if self.source[self.index] == "{":
-            if not single_char:
-                raise _Unsupported("counted repetition of a group is not expressible")
-            match = re.match(r"\{(\d+),(\d+)\}", self.source[self.index :])
+            match = re.match(
+                r"\{(\d+)(?:,(\d+))?\}", self.source[self.index :]
+            )
             if match is None:
                 raise _Unsupported("unbounded or malformed counted repetition")
-            minimum, maximum = (int(value) for value in match.groups())
-            if minimum != 0 or maximum < 1 or maximum > 4096:
+            minimum = int(match.group(1))
+            maximum = int(match.group(2) or minimum)
+            if maximum < minimum or maximum < 1 or maximum > 4096:
                 raise _Unsupported("counted repetition bounds are not expressible")
             self.index += match.end()
-            self.lossy = True
-            return [[_ANY]]
+            if minimum == 0:
+                self.lossy = True
+                return [[_ANY]]
+            if minimum > _MAX_VALUES:
+                raise _Unsupported("counted repetition minimum is too large")
+            repeated: list[list[tuple]] = [[]]
+            for _ in range(minimum):
+                repeated = [
+                    prefix + suffix
+                    for prefix in repeated
+                    for suffix in alternatives
+                ]
+                if len(repeated) > _MAX_VALUES:
+                    raise _Unsupported("counted repetition expands to too many values")
+            if maximum > minimum:
+                repeated = [parts + [_ANY] for parts in repeated]
+                self.lossy = True
+            return repeated
         if self.source[self.index] not in "*+?":
             return alternatives
         quantifier = self.source[self.index]
@@ -681,6 +705,8 @@ class _Match:
     case_insensitive: bool
     lossy: bool
     narrowed: bool = False
+    limitations: tuple[str, ...] = ()
+    transport_forms_explicit: bool = False
 
 
 def _literal(value: str) -> str:
@@ -693,7 +719,12 @@ def _operator_match(rule: _SecRule) -> _Match:
     operator = rule.operator
     argument = rule.argument
     if operator == "rx":
-        result = _RegexTranslator(argument).translate()
+        try:
+            result = _RegexTranslator(argument).translate()
+        except _Unsupported as exc:
+            if str(exc) != "regex expands to too many values":
+                raise
+            return _compact_structured_jndi_regex(argument)
         return _Match(
             values=result.values,
             wildcard=result.wildcard,
@@ -729,6 +760,192 @@ def _operator_match(rule: _SecRule) -> _Match:
             raise _Unsupported("empty @ipMatch list")
         return _Match(members, False, False, False)
     raise _Unsupported(f"unsupported ModSecurity operator: @{operator}")
+
+
+# Exact Defense Generation grammar for the generalized Log4Shell/JNDI family.
+# These are producer grammar fragments, not samples or witness values. Keeping
+# the recognition exact makes the overflow fallback fail closed if DG changes
+# any authority, port, resource, encoding, or framing semantics.
+_JNDI_RAW_AUTHORITY = (
+    r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?){0,10}"
+    r"|(?:[0-9]{1,3}\.){3}[0-9]{1,3}|\[[0-9A-Fa-f:]{2,39}\])"
+)
+_JNDI_URL_AUTHORITY = (
+    r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?){0,10}"
+    r"|(?:[0-9]{1,3}\.){3}[0-9]{1,3}|%5B(?:[0-9A-Fa-f]|%3A){2,39}%5D)"
+)
+_JNDI_HEX_ALNUM = r"(?:3[0-9]|4[1-9A-F]|5[0-9A]|6[1-9A-F]|7[0-9A])"
+_JNDI_HEX_RESOURCE_BYTE = (
+    r"(?:0[0-8EeFf]|1[0-9A-Fa-f]|2[1345689A-Fa-f]|"
+    r"3[0-9A-Ba-bDdFf]|[4-6][0-9A-Fa-f]|7[0-9A-Ca-cE-Ff]|"
+    r"[89A-Fa-f][0-9A-Fa-f])"
+)
+_JNDI_RAW_BRANCH = (
+    r"\$\{jndi:(?:ldap|rmi)://"
+    + _JNDI_RAW_AUTHORITY
+    + r'''(?::[0-9]{1,5})?/[^\s"'<>}]{0,512}\}'''
+)
+_JNDI_URL_BRANCH = (
+    r"%24%7Bjndi%3A(?:ldap|rmi)%3A%2F%2F"
+    + _JNDI_URL_AUTHORITY
+    + r"(?:%3A[0-9]{1,5})?%2F(?:[A-Za-z0-9._~-]|%"
+    + _JNDI_HEX_RESOURCE_BYTE
+    + r"){0,512}%7D"
+)
+_JNDI_HEX_BRANCH = (
+    r"247b6a6e64693a(?:6c646170|726d69)3a2f2f(?:"
+    + _JNDI_HEX_ALNUM
+    + r"(?:(?:"
+    + _JNDI_HEX_ALNUM
+    + r"|2[Dd]){0,61}"
+    + _JNDI_HEX_ALNUM
+    + r")?(?:2[Ee]"
+    + _JNDI_HEX_ALNUM
+    + r"(?:(?:"
+    + _JNDI_HEX_ALNUM
+    + r"|2[Dd]){0,61}"
+    + _JNDI_HEX_ALNUM
+    + r")?){0,10}|(?:3[0-9]){1,3}(?:2[Ee](?:3[0-9]){1,3}){3}"
+    r"|5[Bb](?:(?:3[0-9]|4[1-6]|6[1-6]|3[Aa])){2,39}5[Dd])"
+    r"(?:3[Aa](?:3[0-9]){1,5})?2[Ff](?:"
+    + _JNDI_HEX_RESOURCE_BYTE
+    + r"){0,512}7d"
+)
+_JNDI_LITERAL_CARRIER = re.compile(r"[A-Za-z0-9_.~-]{1,64}(?:=|%3[Dd])")
+_JNDI_HEX_CARRIER = re.compile(r"(?:[0-9A-Fa-f]{2}){2,65}")
+
+
+def _compact_structured_jndi_regex(source: str) -> _Match:
+    """Compact the exact overflowing DG JNDI family into Akamai wildcards."""
+    branches = _top_level_group_branches(source)
+    expected = {
+        "raw": _JNDI_RAW_BRANCH,
+        "url": _JNDI_URL_BRANCH,
+        "hex": _JNDI_HEX_BRANCH,
+    }
+    carriers: dict[str, str] = {}
+    for branch in branches:
+        matches = [
+            (representation, body)
+            for representation, body in expected.items()
+            if branch.endswith(body)
+        ]
+        if len(matches) != 1:
+            raise _Unsupported("unknown or mixed structured JNDI branch")
+        representation, body = matches[0]
+        if representation in carriers:
+            raise _Unsupported("duplicate structured JNDI representation branch")
+        carrier = branch[: -len(body)]
+        _validate_jndi_carrier(carrier, representation)
+        carriers[representation] = carrier
+    if set(carriers) != set(expected):
+        raise _Unsupported("structured JNDI regex requires raw, URL, and hex branches")
+
+    values: list[str] = []
+    for protocol in ("ldap", "rmi"):
+        values.extend(
+            (
+                f"*{carriers['raw']}${{jndi:{protocol}://?*/*}}*",
+                (
+                    f"*{carriers['url']}%24%7Bjndi%3A{protocol}"
+                    "%3A%2F%2F?*%2F*%7D*"
+                ),
+                (
+                    f"*{carriers['hex']}247b6a6e64693a"
+                    f"{protocol.encode('ascii').hex()}3a2f2f??*2f*7d*"
+                ),
+            )
+        )
+    values = _unique(values)
+    if len(values) > _MAX_VALUES:
+        raise _Unsupported("compacted structured JNDI values exceed value limit")
+    return _Match(
+        values=values,
+        wildcard=True,
+        case_insensitive=False,
+        lossy=True,
+        transport_forms_explicit=True,
+        limitations=(
+            "The exact Defense Generation raw, percent-encoded, and UTF-8 hex "
+            "JNDI branches were compacted after bounded regex expansion exceeded "
+            "the Akamai value limit; representation framing, any validated "
+            "carrier prefix, and explicit ldap/rmi alternatives are preserved.",
+            "The compacted Akamai wildcards require a nonempty authority but "
+            "broaden DG's hostname, IPv4, IPv6, port, resource-character, and "
+            "length grammar. Percent and hex wildcards do not enforce byte "
+            "validity. Operator review of collateral impact is required.",
+        ),
+    )
+
+
+def _top_level_group_branches(source: str) -> list[str]:
+    if (
+        len(source) > _MAX_REGEX_LENGTH
+        or not source.startswith("(?:")
+        or not source.endswith(")")
+    ):
+        raise _Unsupported(
+            "structured JNDI regex must be one bounded noncapturing group"
+        )
+    body = source[3:-1]
+    branches: list[str] = []
+    start = 0
+    depth = 0
+    in_class = False
+    escaped = False
+    for index, character in enumerate(body):
+        if escaped:
+            escaped = False
+            continue
+        if character == "\\":
+            escaped = True
+            continue
+        if in_class:
+            if character == "]":
+                in_class = False
+            continue
+        if character == "[":
+            in_class = True
+        elif character == "(":
+            depth += 1
+            if depth > 16:
+                raise _Unsupported("structured JNDI regex nesting is too deep")
+        elif character == ")":
+            depth -= 1
+            if depth < 0:
+                raise _Unsupported("unbalanced structured JNDI regex")
+        elif character == "|" and depth == 0:
+            branches.append(body[start:index])
+            start = index + 1
+            if len(branches) > 3:
+                raise _Unsupported("structured JNDI regex has too many branches")
+    if escaped or in_class or depth != 0:
+        raise _Unsupported("unbalanced structured JNDI regex")
+    branches.append(body[start:])
+    if len(branches) != 3 or any(not branch for branch in branches):
+        raise _Unsupported("structured JNDI regex must have exactly three branches")
+    return branches
+
+
+def _validate_jndi_carrier(carrier: str, representation: str) -> None:
+    if not carrier:
+        return
+    if representation != "hex":
+        if _JNDI_LITERAL_CARRIER.fullmatch(carrier) is None:
+            raise _Unsupported("unsupported structured JNDI carrier")
+        return
+    if _JNDI_HEX_CARRIER.fullmatch(carrier) is None:
+        raise _Unsupported("unsupported hex structured JNDI carrier")
+    try:
+        decoded = bytes.fromhex(carrier).decode("ascii")
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise _Unsupported("invalid hex structured JNDI carrier") from exc
+    if not decoded.endswith("=") or re.fullmatch(
+        r"[A-Za-z0-9_.~-]{1,64}=", decoded
+    ) is None:
+        raise _Unsupported("unsupported decoded hex structured JNDI carrier")
 
 
 def _encoding_variants(values: list[str]) -> list[str]:
@@ -909,7 +1126,7 @@ def _build_condition(
             f"{component.label} encoded uniformly is matched, but one whose "
             "characters were encoded to differing depths is not."
         )
-    elif component.encodable:
+    elif component.encodable and not match.transport_forms_explicit:
         notes.append(
             f"Only the decoded {component.label} form is matched; transport "
             "encodings are not enumerated because the match uses wildcards."
@@ -988,6 +1205,10 @@ def _apply_requirements(
             )
         target = targets[0]
         target["value"] = _unique([*target["value"], *payloads])
+        if len(target["value"]) > _MAX_VALUES:
+            raise _Unsupported(
+                "proof-loop requirements exceed the Akamai condition value limit"
+            )
         notes.append(
             "Proven bypass payload forms from Bypass Validation were added to "
             "the matching condition."
@@ -1057,6 +1278,7 @@ def _compile(
     narrowed = False
     for rule in rules:
         match = _operator_match(rule)
+        notes.extend(match.limitations)
         case_sensitive = not (
             match.case_insensitive or "lowercase" in rule.transformations
         )
@@ -1124,7 +1346,11 @@ def _compile(
         ),
     }
 
-    label = "narrower" if lossy or narrowed else "equivalent"
+    if lossy and narrowed:
+        raise _Unsupported(
+            "translation both broadens regex constructs and narrows encoding coverage"
+        )
+    label = "broader" if lossy else "narrower" if narrowed else "equivalent"
     assumptions = [
         (
             "The proven ModSecurity rule in the upstream defense-generation "
@@ -1203,3 +1429,8 @@ def _rule_name(
 def _slug(text: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9]+", "-", text).strip("-")
     return cleaned or "Rule"
+
+
+def has_authoritative_secrule(text: str) -> bool:
+    """Return whether the upstream artifact contains an executable SecRule."""
+    return re.search(r"(?im)^\s*SecRule\s+", text) is not None
