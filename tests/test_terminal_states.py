@@ -130,17 +130,13 @@ class RepairingAkamaiDoer:
 
 
 def _non_deterministic_akamai_request() -> ControlTranslationRequest:
-    """A proven rule the deterministic Akamai path declines, so the doer runs.
-
-    Counted repetition (`\\s{2,}`) has no Akamai wildcard equivalent, so
-    `modsec_akamai` refuses to guess and the request reaches the doer.
-    """
+    """Non-SecRule prose has no deterministic source, so the doer may run."""
     request = _request("akamai-waf", "akamai-policy:example:rev-17")
     pattern = request.proven_pattern.model_copy(
         update={
             "pattern_summary": (
-                "SecRule ARGS:username \"@rx ^test'\\s{2,}OR"
-                "(?:\\s|\\+)+'1'='1$\""
+                "Block request arguments containing repeated whitespace and "
+                "SQL injection syntax."
             )
         }
     )
