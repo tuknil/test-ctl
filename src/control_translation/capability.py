@@ -33,13 +33,20 @@ from control_translation.contracts import (
     ProofLoopQualification,
     ProofLoopRequestContext,
     ProofLoopTranslationRequirements,
+    ProvenMitigationPattern,
     ResultEnvelope,
     ResultReference,
+    SharedContractV2InvokeRequest,
     Subject,
     TargetContext,
 )
 from control_translation.policy_reader.base import PolicyReader
 from control_translation.policy_reader.fixtures import FixturePolicyReader
+from control_translation.shared_contracts_v2 import (
+    SharedContractV2Error,
+    build_waf_translation_plan,
+    resolve_and_verify_four_result_join,
+)
 from control_translation.terminal import (
     TERMINAL_STATE_TO_STATUS,
     OutcomeReasonCode,
@@ -534,6 +541,189 @@ def invoke_envelope(
             }
         )
     return _bind_request_context(result, envelope)
+
+
+def invoke_shared_contract_v2(
+    request: SharedContractV2InvokeRequest,
+    *,
+    resolver: UpstreamResultResolver | None,
+    settings: Settings | None = None,
+    policy_reader: PolicyReader | None = None,
+    cancellation_signal: CancellationSignal | None = None,
+) -> ResultEnvelope:
+    """Verify the complete four-result join before any translation boundary."""
+
+    check_cancelled(cancellation_signal)
+    if resolver is None:
+        raise SharedContractV2Error(
+            "upstream-resolution-failed",
+            "v2 upstream results cannot be fetched with the current configuration",
+        )
+    verified = resolve_and_verify_four_result_join(
+        request,
+        resolver,
+        cancellation_signal=cancellation_signal,
+    )
+    check_cancelled(cancellation_signal)
+    settings = settings or get_settings()
+    caller_target = request.target_context or TargetContext()
+    target_context = TargetContext(
+        target_technology=(
+            caller_target.target_technology or settings.default_target_technology
+        ),
+        target_policy_context_id=(
+            caller_target.target_policy_context_id
+            or settings.default_target_policy_context_id
+        ),
+    )
+    proof_ids = [item.result_id for item in request.upstream_inputs]
+    pattern_request = ControlTranslationRequest(
+        proven_pattern=ProvenMitigationPattern(
+            proven_pattern_id=verified.semantics["semantics_id"],
+            vulnerability_id=verified.vulnerability_id,
+            selected_control_class="waf",
+            discriminator_id=verified.semantics["semantics_id"],
+            discriminator_description="verified complete WAF carrier semantics",
+            pattern_summary=verified.bundle["primary_candidate"]["intent"],
+            proof_record_ids=proof_ids,
+        ),
+        target_context=target_context,
+    )
+    try:
+        plan = build_waf_translation_plan(
+            verified,
+            target_technology=target_context.target_technology or "",
+        )
+    except SharedContractV2Error as exc:
+        if exc.code != "cannot-express":
+            raise
+        effective_request, configured_defaults = _with_effective_target_context(
+            pattern_request, settings
+        )
+        structured = _build_result(
+            effective_request,
+            TerminalState.CANNOT_EXPRESS,
+            OutcomeReasonCode.UNSUPPORTED_FEATURE,
+            detail=exc.detail,
+            configured_poc_defaults_used=configured_defaults,
+        ).model_copy(
+            update={
+                "contract_id": "control-translation@2.0",
+                "shared_contract_version": request.shared_contract_version,
+                "profile_id": request.profile_id,
+                "pre_translation_verification": verified.verification,
+                "accounting": verified.accounting,
+            }
+        )
+        result = _envelope(
+            structured,
+            settings=settings,
+            llm_invoked=False,
+            proposal_source="deterministic-shared-contract-v2",
+            correlation_id=request.correlation_id,
+        )
+        return _bind_shared_v2_context(
+            _mark_shared_v2_deterministic(result, proof_ids), request
+        )
+
+    proven_pattern = pattern_request.proven_pattern
+    assert proven_pattern is not None
+    pattern_request = pattern_request.model_copy(
+        update={
+            "proven_pattern": proven_pattern.model_copy(
+                update={
+                    "discriminator_description": plan.discriminator_description,
+                    "pattern_summary": plan.pattern_summary,
+                }
+            )
+        }
+    )
+    result = invoke(
+        pattern_request,
+        settings=settings,
+        policy_reader=policy_reader,
+        doer=plan.doer,
+        correlation_id=request.correlation_id,
+        cancellation_signal=cancellation_signal,
+    )
+    update = {
+        "contract_id": "control-translation@2.0",
+        "shared_contract_version": request.shared_contract_version,
+        "profile_id": request.profile_id,
+        "pre_translation_verification": verified.verification,
+        "accounting": verified.accounting,
+    }
+    if result.terminal_state is TerminalState.TRANSLATED:
+        update.update(
+            {
+                "target_artifacts": list(plan.target_artifacts),
+                "translated_directives": list(plan.translated_directives),
+                "translation_mappings": list(plan.translation_mappings),
+            }
+        )
+    structured = result.structured_result.model_copy(update=update)
+    # Revalidate the complete additive result before it can reach persistence.
+    structured = ControlTranslationResult.model_validate(
+        structured.model_dump(mode="json")
+    )
+    result = result.model_copy(
+        update={
+            "contract_id": "control-translation@2.0",
+            "structured_result": structured,
+            "provenance": proof_ids,
+        }
+    )
+    return _bind_shared_v2_context(
+        _mark_shared_v2_deterministic(result, proof_ids), request
+    )
+
+
+def _mark_shared_v2_deterministic(
+    result: ResultEnvelope, proof_ids: list[str]
+) -> ResultEnvelope:
+    """Report the code-owned v2 actor without implying a model proposal."""
+    inference = {
+        **result.inference,
+        "provider": "deterministic-code",
+        "model": None,
+        "llm_invoked": False,
+        "proposal_from_doer": False,
+        "proposal_source": "deterministic-shared-contract-v2",
+        "actor": {
+            "type": "deterministic-code",
+            "identity": "control-translation.shared-contract-v2",
+            "version": "2.0",
+        },
+        "provenance": {
+            "source": "verified-four-result-join",
+            "upstream_result_ids": proof_ids,
+        },
+    }
+    return result.model_copy(update={"inference": inference})
+
+
+def _bind_shared_v2_context(
+    result: ResultEnvelope,
+    request: SharedContractV2InvokeRequest,
+) -> ResultEnvelope:
+    references = {
+        item.capability: item.model_dump(mode="json", by_alias=True)
+        for item in request.upstream_inputs
+    }
+    return ResultEnvelope.model_validate(
+        result.model_copy(
+            update={
+                "contract_id": "control-translation@2.0",
+                "request_id": request.request_id,
+                "reference_bundle": {
+                    "shared_contract_version": request.shared_contract_version,
+                    "profile_id": request.profile_id,
+                    "upstream_inputs": references,
+                },
+                "provenance": [item.result_id for item in request.upstream_inputs],
+            }
+        ).model_dump(mode="json")
+    )
 
 
 def normalize_direct_bypass_request(

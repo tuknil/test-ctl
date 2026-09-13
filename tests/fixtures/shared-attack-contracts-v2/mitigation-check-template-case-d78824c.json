@@ -1,0 +1,35 @@
+{
+  "input_id": "input-header",
+  "disposition": "blocked",
+  "resolution": {
+    "template_id": "input-header",
+    "path_key": "inventory-item-detail",
+    "resolver_id": "mc-approved-route-adapter",
+    "profile_id": "waf-standard@1",
+    "resolver_profile_digest": "sha256:e28f9574b07194222a317dfc4f03293beafb6e3613b87452a4191652fd6b6b1a",
+    "rendered_request": {
+      "modality": "http-request",
+      "method": "GET",
+      "scheme": "https",
+      "authority": "approved-mc-target.internal",
+      "path": "/inventory/items/42",
+      "query": [],
+      "headers": [
+        {
+          "name": "X-Probe",
+          "value": "%2527OR%25201%253D1"
+        }
+      ],
+      "cookies": [],
+      "body": {
+        "state": "absent"
+      }
+    }
+  },
+  "evidence": {
+    "blocked": true,
+    "status_code": 403,
+    "matched_rule_id": "janus-shared-contract-v2",
+    "detail": "complete WAF application unit matched"
+  }
+}

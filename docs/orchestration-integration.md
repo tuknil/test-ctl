@@ -151,6 +151,12 @@ erase the bypass finding or make the candidate production-ready.
 
 ## Complete validated-route request
 
+This section documents the retained exactly-three-result
+`control-translation@1.0` route. Existing histories continue to replay with
+this shape unchanged. New shared-contract workflows use
+`control-translation@2.0` as described in `shared-attack-contracts-v2.md` and
+route exactly four immutable CG, DG, MC, and BV locators.
+
 ```json
 {
   "input": {

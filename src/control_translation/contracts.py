@@ -401,6 +401,75 @@ class InputBindings(BaseModel):
     proof_record_ids: list[str] = Field(default_factory=list)
 
 
+class CoverageAccounting(BaseModel):
+    """Exact required-work accounting shared by the v2 verifier."""
+
+    required_obligation_count: int = Field(ge=0)
+    accounted_obligation_count: int = Field(ge=0)
+    unaccounted_required_obligation_count: int = Field(ge=0)
+    source_member_count: int = Field(ge=0)
+    represented_source_member_count: int = Field(ge=0)
+    unsupported_source_member_count: int = Field(ge=0)
+    unaccounted_source_member_count: int = Field(ge=0)
+    required_work_item_count: int = Field(ge=0)
+    disposed_work_item_count: int = Field(ge=0)
+    unaccounted_required_work_item_count: int = Field(ge=0)
+
+
+class PreTranslationVerification(BaseModel):
+    """Evidence that the complete four-result join passed before translation."""
+
+    all_required_obligations_have_dg_mapping: Literal[True]
+    all_required_obligations_have_mc_disposition: Literal[True]
+    all_required_obligations_have_required_bv_disposition: Literal[True]
+    candidate_attestation_verified: Literal[True]
+    source_member_partition_complete: Literal[True]
+    lineage_verified: Literal[True]
+    required_obligation_count: int = Field(ge=1)
+    dg_mapping_count: int = Field(ge=1)
+    mc_disposition_count: int = Field(ge=1)
+    bv_campaign_count: int = Field(ge=1)
+    unaccounted_required_obligation_count: Literal[0]
+
+
+class TargetTranslationArtifact(BaseModel):
+    """One actual target artifact emitted from one DG cooperating artifact."""
+
+    artifact_id: str = Field(min_length=1)
+    source_artifact_id: str = Field(min_length=1)
+    role: str = Field(min_length=1)
+    kind: str = Field(min_length=1)
+    order: int = Field(ge=0)
+    artifact_type: str = Field(min_length=1)
+    content: str = Field(min_length=1)
+    content_hash: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
+
+
+class TargetTranslationDirective(BaseModel):
+    """A required DG directive bound to its emitted target artifact."""
+
+    directive_id: str = Field(min_length=1)
+    source_directive_id: str = Field(min_length=1)
+    target_artifact_id: str = Field(min_length=1)
+    kind: str = Field(min_length=1)
+    value: str = Field(min_length=1)
+    required: bool
+
+
+class TranslationMapping(BaseModel):
+    """Exact CT disposition for one required CG obligation."""
+
+    obligation_id: str = Field(min_length=1)
+    target_artifact_ids: list[str] = Field(min_length=1)
+
+    @field_validator("target_artifact_ids")
+    @classmethod
+    def validate_target_artifact_ids(cls, value: list[str]) -> list[str]:
+        if any(not item for item in value) or len(value) != len(set(value)):
+            raise ValueError("target_artifact_ids must be nonempty and unique")
+        return value
+
+
 class ControlTranslationResult(BaseModel):
     """Output contract. Field shape mirrors CFS §2 `ControlTranslationResult`."""
 
@@ -418,6 +487,64 @@ class ControlTranslationResult(BaseModel):
     primary_candidate: PrimaryCandidate | None = None
     evidence_bindings: list[EvidenceBinding] = Field(default_factory=list)
     prose_summary: str
+    shared_contract_version: Literal["2.0"] | None = None
+    profile_id: Literal["waf-standard@1"] | None = None
+    pre_translation_verification: PreTranslationVerification | None = None
+    accounting: CoverageAccounting | None = None
+    target_artifacts: list[TargetTranslationArtifact] = Field(default_factory=list)
+    translated_directives: list[TargetTranslationDirective] = Field(default_factory=list)
+    translation_mappings: list[TranslationMapping] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_v2_completeness(self) -> ControlTranslationResult:
+        v2_values = (
+            self.profile_id,
+            self.pre_translation_verification,
+            self.accounting,
+        )
+        if self.shared_contract_version is None:
+            if any(value is not None for value in v2_values) or any(
+                (self.target_artifacts, self.translated_directives, self.translation_mappings)
+            ):
+                raise ValueError("v2 result fields require shared_contract_version")
+            return self
+        if (
+            self.contract_id != "control-translation@2.0"
+            or any(value is None for value in v2_values)
+        ):
+            raise ValueError("v2 result requires contract, profile, verification, and accounting")
+        assert self.pre_translation_verification is not None
+        assert self.accounting is not None
+        count = self.pre_translation_verification.required_obligation_count
+        if (
+            self.accounting.required_obligation_count != count
+            or self.accounting.accounted_obligation_count != count
+            or self.accounting.unaccounted_required_obligation_count != 0
+        ):
+            raise ValueError("v2 verification and accounting counts differ")
+        if self.terminal_state is not TerminalState.TRANSLATED:
+            if any((self.target_artifacts, self.translated_directives, self.translation_mappings)):
+                raise ValueError("non-translated v2 result cannot contain partial output")
+            return self
+        artifact_ids = [item.artifact_id for item in self.target_artifacts]
+        obligation_ids = [item.obligation_id for item in self.translation_mappings]
+        if (
+            not artifact_ids
+            or len(artifact_ids) != len(set(artifact_ids))
+            or len(obligation_ids) != count
+            or len(obligation_ids) != len(set(obligation_ids))
+            or any(
+                artifact_id not in artifact_ids
+                for mapping in self.translation_mappings
+                for artifact_id in mapping.target_artifact_ids
+            )
+            or any(
+                directive.target_artifact_id not in artifact_ids
+                for directive in self.translated_directives
+            )
+        ):
+            raise ValueError("v2 translated output is incomplete or references absent artifacts")
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -639,6 +766,82 @@ class OrchestrationUpstreamInput(StrictRequestModel):
         )
 
 
+class SharedContractV2UpstreamInput(StrictRequestModel):
+    """One authenticated immutable completion in the four-result v2 join."""
+
+    capability: Literal[
+        "check-generation",
+        "defense-generation",
+        "mitigation-check",
+        "bypass-validation",
+    ]
+    contract_id: str = Field(min_length=1, max_length=128)
+    run_id: str = Field(min_length=1, max_length=255)
+    result_id: str = Field(min_length=1, max_length=512)
+    terminal_state: str = Field(min_length=1, max_length=128)
+    status: Literal["completed"]
+    request_id: str = Field(min_length=1, max_length=512)
+    correlation_id: str = Field(min_length=1, max_length=255)
+    result_ref: DatabricksResultReference
+    evidence_refs: list[str] = Field(default_factory=list)
+    content_sha256: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
+    size_bytes: int = Field(ge=1, le=200 * 1024 * 1024)
+    created_at: datetime
+
+    @model_validator(mode="after")
+    def validate_authenticated_locator(self) -> SharedContractV2UpstreamInput:
+        expected = {
+            "check-generation": (
+                "check-generation-result@1.0",
+                "completed",
+                "check-generation-result:",
+                "check_generation",
+                "check_generation_results",
+            ),
+            "defense-generation": (
+                "defense-generation-result@1.0",
+                "candidate-produced",
+                "defense-generation-result:",
+                "defense_generation",
+                "defense_generation_results",
+            ),
+            "mitigation-check": (
+                "mitigation-check@1.0",
+                "blocked",
+                "mitigation-check-result:",
+                "mitigation-check",
+                "mitigation_check",
+            ),
+            "bypass-validation": (
+                "bypass-validation@2.0",
+                "no-bypass-found",
+                "bypass-validation-result:",
+                "bypass_validation",
+                "bypass_validation_results",
+            ),
+        }
+        contract, state, prefix, schema, table = expected[self.capability]
+        if self.contract_id != contract or self.terminal_state != state:
+            raise ValueError(f"unsupported {self.capability} v2 completion")
+        if not self.result_id.startswith(prefix):
+            raise ValueError(f"{self.capability} result_id has an invalid identity")
+        if self.result_ref.key != self.result_id:
+            raise ValueError("result_ref.key must equal result_id")
+        if (
+            self.result_ref.catalog,
+            self.result_ref.schema_name,
+            self.result_ref.table,
+        ) != ("36889_janus_dev", schema, table):
+            raise ValueError(
+                f"{self.capability} result_ref does not identify the approved table"
+            )
+        if any(not item for item in self.evidence_refs):
+            raise ValueError("evidence references cannot be empty")
+        if len(self.evidence_refs) != len(set(self.evidence_refs)):
+            raise ValueError("evidence references must be unique")
+        return self
+
+
 class OrchestrationRoutingContext(StrictRequestModel):
     """Temporal-owned routing decision for the completed proof loop."""
 
@@ -827,9 +1030,6 @@ class ResultEnvelope(BaseModel):
     inference: dict[str, Any] = Field(default_factory=dict)
 
 
-InvokeAPIRequest = InvokeRequestEnvelope | DirectBypassValidationResult
-
-
 class RunSummary(BaseModel):
     """Safe dashboard projection that excludes request and artifact content."""
 
@@ -856,6 +1056,46 @@ class RunListResponse(BaseModel):
     offset: int = Field(ge=0)
     has_more: bool
     terminal_state_counts: dict[str, int] = Field(default_factory=dict)
+
+
+class SharedContractV2InvokeRequest(StrictRequestModel):
+    """Additive stage-1 request for the exact authenticated four-result join."""
+
+    contract_id: Literal["control-translation@2.0"]
+    shared_contract_version: Literal["2.0"]
+    profile_id: Literal["waf-standard@1"]
+    request_id: str = Field(min_length=1, max_length=255)
+    correlation_id: str = Field(min_length=1, max_length=255)
+    upstream_inputs: tuple[
+        SharedContractV2UpstreamInput,
+        SharedContractV2UpstreamInput,
+        SharedContractV2UpstreamInput,
+        SharedContractV2UpstreamInput,
+    ]
+    target_context: TargetContext | None = None
+    provenance: Provenance
+
+    @model_validator(mode="after")
+    def validate_exact_join(self) -> SharedContractV2InvokeRequest:
+        required = {
+            "check-generation",
+            "defense-generation",
+            "mitigation-check",
+            "bypass-validation",
+        }
+        capabilities = {item.capability for item in self.upstream_inputs}
+        if capabilities != required:
+            raise ValueError("v2 requires exactly one CG, DG, MC, and BV locator")
+        if any(
+            item.correlation_id != self.correlation_id
+            for item in self.upstream_inputs
+        ):
+            raise ValueError("upstream correlation_id does not match command")
+        return self
+
+
+InvocationRequest = InvokeRequestEnvelope | SharedContractV2InvokeRequest
+InvokeAPIRequest = InvocationRequest | DirectBypassValidationResult
 
 
 # ---------------------------------------------------------------------------

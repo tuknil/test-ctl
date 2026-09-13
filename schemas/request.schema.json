@@ -986,6 +986,183 @@
       "title": "Provenance",
       "type": "object"
     },
+    "SharedContractV2InvokeRequest": {
+      "additionalProperties": false,
+      "description": "Additive stage-1 request for the exact authenticated four-result join.",
+      "properties": {
+        "contract_id": {
+          "const": "control-translation@2.0",
+          "title": "Contract Id",
+          "type": "string"
+        },
+        "shared_contract_version": {
+          "const": "2.0",
+          "title": "Shared Contract Version",
+          "type": "string"
+        },
+        "profile_id": {
+          "const": "waf-standard@1",
+          "title": "Profile Id",
+          "type": "string"
+        },
+        "request_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "title": "Request Id",
+          "type": "string"
+        },
+        "correlation_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "title": "Correlation Id",
+          "type": "string"
+        },
+        "upstream_inputs": {
+          "maxItems": 4,
+          "minItems": 4,
+          "prefixItems": [
+            {
+              "$ref": "#/$defs/SharedContractV2UpstreamInput"
+            },
+            {
+              "$ref": "#/$defs/SharedContractV2UpstreamInput"
+            },
+            {
+              "$ref": "#/$defs/SharedContractV2UpstreamInput"
+            },
+            {
+              "$ref": "#/$defs/SharedContractV2UpstreamInput"
+            }
+          ],
+          "title": "Upstream Inputs",
+          "type": "array"
+        },
+        "target_context": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TargetContext"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        }
+      },
+      "required": [
+        "contract_id",
+        "shared_contract_version",
+        "profile_id",
+        "request_id",
+        "correlation_id",
+        "upstream_inputs",
+        "provenance"
+      ],
+      "title": "SharedContractV2InvokeRequest",
+      "type": "object"
+    },
+    "SharedContractV2UpstreamInput": {
+      "additionalProperties": false,
+      "description": "One authenticated immutable completion in the four-result v2 join.",
+      "properties": {
+        "capability": {
+          "enum": [
+            "check-generation",
+            "defense-generation",
+            "mitigation-check",
+            "bypass-validation"
+          ],
+          "title": "Capability",
+          "type": "string"
+        },
+        "contract_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Contract Id",
+          "type": "string"
+        },
+        "run_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "title": "Run Id",
+          "type": "string"
+        },
+        "result_id": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Result Id",
+          "type": "string"
+        },
+        "terminal_state": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Terminal State",
+          "type": "string"
+        },
+        "status": {
+          "const": "completed",
+          "title": "Status",
+          "type": "string"
+        },
+        "request_id": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Request Id",
+          "type": "string"
+        },
+        "correlation_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "title": "Correlation Id",
+          "type": "string"
+        },
+        "result_ref": {
+          "$ref": "#/$defs/DatabricksResultReference"
+        },
+        "evidence_refs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence Refs",
+          "type": "array"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Content Sha256",
+          "type": "string"
+        },
+        "size_bytes": {
+          "maximum": 209715200,
+          "minimum": 1,
+          "title": "Size Bytes",
+          "type": "integer"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "capability",
+        "contract_id",
+        "run_id",
+        "result_id",
+        "terminal_state",
+        "status",
+        "request_id",
+        "correlation_id",
+        "result_ref",
+        "content_sha256",
+        "size_bytes",
+        "created_at"
+      ],
+      "title": "SharedContractV2UpstreamInput",
+      "type": "object"
+    },
     "TargetContext": {
       "additionalProperties": false,
       "description": "Identifies the target control technology and policy context.",
@@ -1073,6 +1250,9 @@
   "anyOf": [
     {
       "$ref": "#/$defs/InvokeRequestEnvelope"
+    },
+    {
+      "$ref": "#/$defs/SharedContractV2InvokeRequest"
     },
     {
       "$ref": "#/$defs/DirectBypassValidationResult"

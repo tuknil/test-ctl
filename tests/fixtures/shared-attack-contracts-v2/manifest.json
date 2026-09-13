@@ -1,0 +1,54 @@
+{
+  "manifest_version": 1,
+  "fixture_set": "shared-attack-contracts-v2-ct@2026-09-12",
+  "fixtures": [
+    {
+      "name": "bypass-validation-accounting.json",
+      "source": "architecture/contracts/fixtures/bypass-validation-accounting.json",
+      "sha256": "sha256:7747423c72ee0bfa0ca6f73d445f7d8f71f12ddd95b41cd65f04bee66f6c7fc7",
+      "byte_length": 2597
+    },
+    {
+      "name": "bypass-validation-root-dimensions-ddb49be.json",
+      "source": "bypass-validation producer capture@ddb49be",
+      "sha256": "sha256:e76e23ff745a1f161636c9a8f7336846bd721e71c1ab0f1c89fa47e416e75ed3",
+      "byte_length": 1049
+    },
+    {
+      "name": "candidate-bundle.json",
+      "source": "architecture/contracts/examples/waf-atomic-v2.candidate-bundle.json",
+      "sha256": "sha256:98a3c7868957ac0cd4483e685c4a532e1c833dd61e6eb54512cdded1a1f1a9d5",
+      "byte_length": 11531
+    },
+    {
+      "name": "check-generation-complete-result.json",
+      "source": "architecture/contracts/fixtures/check-generation-complete-result.json",
+      "sha256": "sha256:26e9bf585d55c77b53b2846a0d7246f7dda17297756c9ccfb75a0572792a71dc",
+      "byte_length": 41368
+    },
+    {
+      "name": "mitigation-check-accounting.json",
+      "source": "architecture/contracts/fixtures/mitigation-check-accounting.json",
+      "sha256": "sha256:d4131ad45568e32d16177a70c176fe28b2e750d4c85fc0a2e8059c822f78820d",
+      "byte_length": 2214
+    },
+    {
+      "name": "mitigation-check-template-case-d78824c.json",
+      "source": "mitigation-check producer capture@d78824c",
+      "sha256": "sha256:511980e2d0f93bcb62adbacbeddae509edff1c262b3daf56d90eca0f4b40ceb0",
+      "byte_length": 930
+    },
+    {
+      "name": "waf-rule-carriers.json",
+      "source": "mitigation-check/api/testdata/shared-attack-contracts-v2/waf-rule-carriers.json",
+      "sha256": "sha256:4ceb2071f42b5b7bc4cf449b5929055c9d73b12d9fbda792e9a22a8b9d5c7e64",
+      "byte_length": 577
+    },
+    {
+      "name": "waf-rule-main.json",
+      "source": "mitigation-check/api/testdata/shared-attack-contracts-v2/waf-rule-main.json",
+      "sha256": "sha256:c5278463d9da91304ed51df14bee187662e725b47d4f29a4a9162ddb510e6453",
+      "byte_length": 1333
+    }
+  ]
+}

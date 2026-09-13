@@ -1,0 +1,44 @@
+[
+  {
+    "carrier": "query",
+    "transformation": "bv:query:0:decode",
+    "input_id": "input-query",
+    "component_id": "component-url"
+  },
+  {
+    "carrier": "query",
+    "transformation": "bv:query:1:decode:decode",
+    "input_id": "input-query",
+    "component_id": "component-url"
+  },
+  {
+    "carrier": "query",
+    "transformation": "cg:decode:decode",
+    "input_id": "input-query",
+    "component_id": "component-query"
+  },
+  {
+    "carrier": "query",
+    "transformation": "bv:query:0:decode",
+    "input_id": "input-query",
+    "component_id": "component-query"
+  },
+  {
+    "carrier": "query",
+    "transformation": "bv:query:1:decode:decode",
+    "input_id": "input-query",
+    "component_id": "component-query"
+  },
+  {
+    "carrier": "header",
+    "transformation": "bv:header:0:decode:decode",
+    "input_id": "input-header",
+    "component_id": "component-header"
+  },
+  {
+    "carrier": "cookie",
+    "transformation": "bv:cookie:0:decode:decode",
+    "input_id": "input-cookie",
+    "component_id": "component-cookie"
+  }
+]

@@ -6,7 +6,7 @@ from datetime import datetime
 
 from control_translation.callbacks import CallbackDelivery, CallbackMetadata
 from control_translation.contracts import (
-    InvokeRequestEnvelope,
+    InvocationRequest,
     ResultEnvelope,
     RunFailure,
 )
@@ -44,7 +44,7 @@ class SplitRunRepository:
 
     def save_completed_run(
         self,
-        request: InvokeRequestEnvelope,
+        request: InvocationRequest,
         result: ResultEnvelope,
         *,
         request_hash: str,
@@ -73,7 +73,7 @@ class SplitRunRepository:
 
     def create_lifecycle_run(
         self,
-        request: InvokeRequestEnvelope,
+        request: InvocationRequest,
         *,
         idempotency_key: str,
         request_digest: str,

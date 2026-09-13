@@ -11,10 +11,13 @@ from hashlib import sha256
 from time import perf_counter
 from typing import Any, Protocol
 
+import rfc8785
+
 from control_translation.cancellation import CancellationSignal, check_cancelled
 from control_translation.contracts import (
     DatabricksResultReference,
     OrchestrationUpstreamInput,
+    SharedContractV2UpstreamInput,
 )
 from control_translation.upstream import (
     UpstreamRecord,
@@ -137,6 +140,8 @@ _DEFENSE_RESULT_SCHEMA: _GoSchema = (
     _field("evidence_refs"),
     _field("outcome_reason", _DEFENSE_OUTCOME_REASON_SCHEMA),
     _field("primary_candidate", _DEFENSE_CANDIDATE_SCHEMA, "pointer"),
+    _field("candidate_bundle", omit_empty="raw"),
+    _field("candidate_artifact_contents", omit_empty="raw"),
     _field("proof_handoffs", _DEFENSE_PROOF_HANDOFF_SCHEMA, "slice"),
     _field("attempt_history", _DEFENSE_ATTEMPT_SCHEMA),
     _field("prose_summary"),
@@ -221,6 +226,10 @@ _MITIGATION_RESULT_SCHEMA: _GoSchema = (
     _field("request_sha256"),
     _field("upstream_inputs", omit_empty="raw"),
     _field("input_provenance", _MITIGATION_PROVENANCE_SCHEMA, "pointer"),
+    _field("profile_id", omit_empty="string"),
+    _field("obligation_results", omit_empty="raw"),
+    _field("accounting", omit_empty="raw"),
+    _field("application_unit", omit_empty="raw"),
     _field("match"),
     _field("expected", _MITIGATION_EXPECTED_SCHEMA),
     _field("actual", _MITIGATION_ACTUAL_SCHEMA),
@@ -270,7 +279,9 @@ class DatabricksUpstreamResultResolver:
         self,
         reference: DatabricksResultReference,
         *,
-        immutable_locator: OrchestrationUpstreamInput | None = None,
+        immutable_locator: (
+            OrchestrationUpstreamInput | SharedContractV2UpstreamInput | None
+        ) = None,
         cancellation_signal: CancellationSignal | None = None,
     ) -> UpstreamRecord | None:
         check_cancelled(cancellation_signal)
@@ -287,7 +298,22 @@ class DatabricksUpstreamResultResolver:
                 (reference.table, "table"),
             )
         )
-        if reference.key.startswith("defense-generation-result:"):
+        if reference.key.startswith("check-generation-result:"):
+            expected_coordinates = (
+                "36889_janus_dev",
+                "check_generation",
+                "check_generation_results",
+            )
+            operation = f"""
+                SELECT run_id, result_id, request_id, correlation_id,
+                    terminal_state, status, TO_JSON(result_json),
+                    result_sha256, result_size_bytes, created_at
+                FROM {table_name}
+                WHERE result_id = ?
+                LIMIT 2
+            """
+            shape = "check"
+        elif reference.key.startswith("defense-generation-result:"):
             expected_coordinates = (
                 "36889_janus_dev",
                 "defense_generation",
@@ -406,7 +432,58 @@ class DatabricksUpstreamResultResolver:
                     )
         if row is None:
             return None
-        if shape == "defense":
+        raw_result: bytes | None = None
+        payload_raw_result: bytes | None = None
+        if shape == "check":
+            if not isinstance(immutable_locator, SharedContractV2UpstreamInput):
+                raise UpstreamResolutionError(
+                    "Check Generation requires an authenticated v2 locator"
+                )
+            run_id, result_id = row[0], row[1]
+            transport = decode_json_object(row[6], "Check Generation result_json")
+            transport_bytes = _canonical_json_bytes(transport)
+            if (
+                str(row[7] or "") != f"sha256:{sha256(transport_bytes).hexdigest()}"
+                or int(row[8] or -1) != len(transport_bytes)
+            ):
+                raise UpstreamResolutionError(
+                    "Check Generation persisted digest or size is invalid"
+                )
+            result = self._decode_payload(
+                row[6],
+                "Check Generation result_json",
+                shape=shape,
+                approved_volume=(
+                    reference.catalog,
+                    reference.schema_name,
+                    "payloads",
+                ),
+            )
+            raw_result = _canonical_json_bytes(result)
+            nested = result.get("run_result")
+            payload_raw_result = (
+                rfc8785.dumps(nested) if isinstance(nested, dict) else None
+            )
+            request = {}
+            terminal_state = row[4]
+            correlation_id = row[3]
+            subject_revision = _find_one(result, key="subject_record_revision_id")
+            completion = None
+            row_created_at = row[9]
+            row_digest = row[7]
+            row_size = row[8]
+            if (
+                str(run_id or "") != immutable_locator.run_id
+                or str(result_id or "") != reference.key
+                or str(row[2] or "") != immutable_locator.request_id
+                or str(correlation_id or "") != immutable_locator.correlation_id
+                or str(terminal_state or "") != immutable_locator.terminal_state
+                or str(row[5] or "") != immutable_locator.status
+            ):
+                raise UpstreamResolutionError(
+                    "Check Generation row identity differs from the immutable locator"
+                )
+        elif shape == "defense":
             run_id, result_id, terminal_state = row[0], row[1], row[2]
             request = self._decode_payload(
                 row[3],
@@ -493,19 +570,43 @@ class DatabricksUpstreamResultResolver:
             row_created_at = row[13]
             row_digest = row[11]
             row_size = row[12]
-        self._verify_immutable_result(
-            shape=shape,
-            reference=reference,
-            locator=immutable_locator,
-            run_id=str(run_id or ""),
-            result_id=str(result_id or ""),
-            terminal_state=str(terminal_state or ""),
-            result=result,
-            completion=completion,
-            row_digest=row_digest,
-            row_size=row_size,
-            row_created_at=row_created_at,
-        )
+        if shape != "check":
+            self._verify_immutable_result(
+                shape=shape,
+                reference=reference,
+                locator=immutable_locator,
+                run_id=str(run_id or ""),
+                result_id=str(result_id or ""),
+                terminal_state=str(terminal_state or ""),
+                result=result,
+                completion=completion,
+                row_digest=row_digest,
+                row_size=row_size,
+                row_created_at=row_created_at,
+            )
+        authenticated_content: bytes | None = None
+        authenticated_digest: str | None = None
+        authenticated_size: int | None = None
+        if isinstance(immutable_locator, SharedContractV2UpstreamInput):
+            if shape == "check":
+                authenticated_content = _check_generation_logical_bytes(
+                    result, immutable_locator
+                )
+            else:
+                authenticated_content = _producer_integrity_bytes(shape, result)
+            authenticated_digest = (
+                f"sha256:{sha256(authenticated_content).hexdigest()}"
+            )
+            authenticated_size = len(authenticated_content)
+            if (
+                authenticated_digest != immutable_locator.content_sha256
+                or authenticated_size != immutable_locator.size_bytes
+            ):
+                raise UpstreamResolutionError(
+                    f"{shape} authenticated bytes differ from the immutable locator"
+                )
+        if raw_result is None:
+            raw_result = _canonical_json_bytes(result)
         return UpstreamRecord(
             result_id=str(result_id),
             terminal_state=str(terminal_state or ""),
@@ -515,6 +616,11 @@ class DatabricksUpstreamResultResolver:
             subject_record_revision_id=subject_revision,
             request=request,
             result=result,
+            raw_result=raw_result,
+            payload_raw_result=payload_raw_result,
+            authenticated_content=authenticated_content,
+            authenticated_content_sha256=authenticated_digest,
+            authenticated_content_size=authenticated_size,
         )
 
     def _decode_payload(
@@ -535,6 +641,7 @@ class DatabricksUpstreamResultResolver:
             or (
                 "36889_janus_dev",
                 {
+                    "check": "check_generation",
                     "defense": "defense_generation",
                     "mitigation": "mitigation-check",
                     "bypass": "bypass_validation",
@@ -612,7 +719,7 @@ class DatabricksUpstreamResultResolver:
         *,
         shape: str,
         reference: DatabricksResultReference,
-        locator: OrchestrationUpstreamInput | None,
+        locator: OrchestrationUpstreamInput | SharedContractV2UpstreamInput | None,
         run_id: str,
         result_id: str,
         terminal_state: str,
@@ -639,7 +746,7 @@ class DatabricksUpstreamResultResolver:
         expected_contracts = {
             "defense": {"defense-generation@1.0", "defense-generation-result@1.0"},
             "mitigation": {"mitigation-check@1.0"},
-            "bypass": {"bypass-validation@1.0"},
+            "bypass": {"bypass-validation@1.0", "bypass-validation@2.0"},
         }[shape]
         if result.get("capability") != expected_capability and (
             shape != "bypass" or result.get("capability") is not None
@@ -656,7 +763,10 @@ class DatabricksUpstreamResultResolver:
         }
         if shape != "bypass":
             identities["status"] = "completed"
-        strict_locator = locator is not None and locator.is_strict_locator
+        strict_locator = isinstance(locator, SharedContractV2UpstreamInput) or (
+            isinstance(locator, OrchestrationUpstreamInput)
+            and locator.is_strict_locator
+        )
         for field, expected in identities.items():
             if (strict_locator or field in result) and result.get(field) != expected:
                 raise UpstreamResolutionError(
@@ -737,7 +847,12 @@ class DatabricksUpstreamResultResolver:
         result_created_at = _parse_datetime(
             result.get("created_at") or result.get("produced_at"), role
         )
-        if result_created_at != locator.created_at.astimezone(UTC):
+        locator_created_at = locator.created_at
+        if locator_created_at is None:
+            raise UpstreamResolutionError(
+                f"{role} immutable locator created_at is missing"
+            )
+        if result_created_at != locator_created_at.astimezone(UTC):
             raise UpstreamResolutionError(
                 f"{role} created_at differs from the immutable locator"
             )
@@ -893,6 +1008,11 @@ def _verify_completion(
 def _producer_integrity(
     shape: str, result: dict[str, Any]
 ) -> tuple[str, int]:
+    payload = _producer_integrity_bytes(shape, result)
+    return f"sha256:{sha256(payload).hexdigest()}", len(payload)
+
+
+def _producer_integrity_bytes(shape: str, result: dict[str, Any]) -> bytes:
     if shape == "defense":
         unsigned = {**result, "content_sha256": "", "size_bytes": 0}
         payload = _go_ordered_json(unsigned, _DEFENSE_RESULT_SCHEMA)
@@ -907,7 +1027,63 @@ def _producer_integrity(
             separators=(",", ":"),
             sort_keys=True,
         ).encode("utf-8")
-    return f"sha256:{sha256(payload).hexdigest()}", len(payload)
+    return payload
+
+
+def _check_generation_logical_bytes(
+    wrapper: dict[str, Any], locator: SharedContractV2UpstreamInput
+) -> bytes:
+    context = wrapper.get("temporal_context")
+    run_result = wrapper.get("run_result")
+    if (
+        wrapper.get("contract_type") != "check-generation-persisted-result"
+        or wrapper.get("contract_version") != "1.0"
+        or not isinstance(context, dict)
+        or not isinstance(run_result, dict)
+    ):
+        raise UpstreamResolutionError("Check Generation persisted wrapper is invalid")
+    inherited = context.get("inherited_evidence_refs")
+    new = context.get("new_evidence_refs")
+    upstreams = context.get("upstream_result_refs")
+    if (
+        not isinstance(inherited, list)
+        or not isinstance(new, list)
+        or not isinstance(upstreams, list)
+        or len(upstreams) != 1
+        or not isinstance(upstreams[0], dict)
+    ):
+        raise UpstreamResolutionError("Check Generation temporal context is invalid")
+    upstream = upstreams[0]
+    logical = {
+        "capability": "check-generation",
+        "contract_id": "check-generation-result@1.0",
+        "result_id": locator.result_id,
+        "run_id": locator.run_id,
+        "request_id": locator.request_id,
+        "correlation_id": locator.correlation_id,
+        "terminal_state": locator.terminal_state,
+        "status": locator.status,
+        "upstream_result_refs": upstreams,
+        "evidence_refs": list(dict.fromkeys([*inherited, *new])),
+        "subject_record_revision_id": upstream.get("subject_record_revision_id"),
+        "characterization_revision_id": upstream.get("characterization_revision_id"),
+        "run_result": run_result,
+        "created_at": context.get("result_created_at"),
+    }
+    payload = rfc8785.dumps(logical)
+    if wrapper.get("temporal_result_content_sha256") != locator.content_sha256:
+        raise UpstreamResolutionError("Check Generation wrapper digest differs")
+    return payload
+
+
+def _canonical_json_bytes(value: dict[str, Any]) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
 
 
 def _go_ordered_json(
