@@ -488,7 +488,7 @@ class ControlTranslationResult(BaseModel):
     evidence_bindings: list[EvidenceBinding] = Field(default_factory=list)
     prose_summary: str
     shared_contract_version: Literal["2.0"] | None = None
-    profile_id: Literal["waf-standard@1"] | None = None
+    profile_id: Literal["waf-standard@1", "waf-standard@2"] | None = None
     pre_translation_verification: PreTranslationVerification | None = None
     accounting: CoverageAccounting | None = None
     target_artifacts: list[TargetTranslationArtifact] = Field(default_factory=list)
@@ -1063,7 +1063,7 @@ class SharedContractV2InvokeRequest(StrictRequestModel):
 
     contract_id: Literal["control-translation@2.0"]
     shared_contract_version: Literal["2.0"]
-    profile_id: Literal["waf-standard@1"]
+    profile_id: Literal["waf-standard@1", "waf-standard@2"]
     request_id: str = Field(min_length=1, max_length=255)
     correlation_id: str = Field(min_length=1, max_length=255)
     upstream_inputs: tuple[

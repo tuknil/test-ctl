@@ -248,7 +248,7 @@
         "profile_id": {
           "anyOf": [
             {
-              "const": "waf-standard@1",
+              "enum": ["waf-standard@1", "waf-standard@2"],
               "type": "string"
             },
             {

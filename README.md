@@ -364,7 +364,7 @@ compatibility. Production orchestration should use exact references so Control
 Translation can retrieve and verify the authoritative records itself.
 
 Shared-contract v2 callers submit `control-translation@2.0`,
-`shared_contract_version: 2.0`, `profile_id: waf-standard@1`, and exactly one
+`shared_contract_version: 2.0`, `profile_id: waf-standard@2`, and exactly one
 authenticated immutable locator for CG, DG, MC, and BV. The result adds strict
 `pre_translation_verification`, `accounting`, `target_artifacts`,
 `translated_directives`, and one `translation_mappings` entry for every

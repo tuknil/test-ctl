@@ -122,7 +122,7 @@ def _locator(
     }
 
 
-def _chain() -> tuple[SharedContractV2InvokeRequest, dict[str, UpstreamRecord]]:
+def _chain(*, current_profiles: bool = False) -> tuple[SharedContractV2InvokeRequest, dict[str, UpstreamRecord]]:
     cg_raw = (FIXTURES / "check-generation-complete-result.json").read_bytes()
     cg = strict_json_bytes(cg_raw, context="CG fixture")
     cg_run_id = "check-generation-run:CVE-2026-0042:7"
@@ -239,6 +239,14 @@ def _chain() -> tuple[SharedContractV2InvokeRequest, dict[str, UpstreamRecord]]:
     )
 
     mc_seed = _load("mitigation-check-accounting.json")
+    if current_profiles:
+        mc_seed["profile_id"] = "waf-standard@2"
+        for obligation in mc_seed["obligation_results"]:
+            for case in obligation["case_results"]:
+                resolution = case.get("resolution")
+                if resolution is not None:
+                    resolution["profile_id"] = "waf-standard@2"
+                    resolution["resolver_profile_digest"] = "sha256:01f6033b5b09db48056adc8a0d47083f4020cf18d71913c69e283f644ec41a94"
     mc_result_id = "mitigation-check-result:shared-42"
     mc_document = {
         **mc_seed,
@@ -320,7 +328,11 @@ def _chain() -> tuple[SharedContractV2InvokeRequest, dict[str, UpstreamRecord]]:
         dimensions = []
         attempt_refs = []
         for index, expected in enumerate(
-            _expected_bv_dimensions(obligations[campaign["obligation_id"]], semantics)
+            _expected_bv_dimensions(
+                obligations[campaign["obligation_id"]],
+                semantics,
+                profile_id="waf-bypass@3" if current_profiles else "waf-bypass@2",
+            )
         ):
             if expected.get("supported") is False:
                 dimensions.append(
@@ -353,7 +365,7 @@ def _chain() -> tuple[SharedContractV2InvokeRequest, dict[str, UpstreamRecord]]:
     bv_result_id = "bypass-validation-result:shared-42"
     bv_document = {
         "contract_id": "bypass-validation@2.0",
-        "profile_id": "waf-bypass@2",
+        "profile_id": "waf-bypass@3" if current_profiles else "waf-bypass@2",
         "run_id": "bypass-validation-run:shared-42",
         "result_id": bv_result_id,
         "terminal_state": "no-bypass-found",
@@ -392,7 +404,7 @@ def _chain() -> tuple[SharedContractV2InvokeRequest, dict[str, UpstreamRecord]]:
         },
         "input_bindings": {
             "shared_contract_locators": [cg_locator, dg_locator, mc_locator],
-            "bypass_profile_id": "waf-bypass@2",
+            "bypass_profile_id": "waf-bypass@3" if current_profiles else "waf-bypass@2",
             "validation_substrate_id": "waf-nonprod-default",
         },
         "resolutions": [],
@@ -421,7 +433,7 @@ def _chain() -> tuple[SharedContractV2InvokeRequest, dict[str, UpstreamRecord]]:
         {
             "contract_id": "control-translation@2.0",
             "shared_contract_version": "2.0",
-            "profile_id": "waf-standard@1",
+            "profile_id": "waf-standard@2" if current_profiles else "waf-standard@1",
             "request_id": "control-translation-request:shared-42",
             "correlation_id": CORRELATION_ID,
             "upstream_inputs": [cg_locator, dg_locator, mc_locator, bv_locator],
@@ -638,6 +650,19 @@ def test_valid_four_result_join_is_complete_and_deterministic() -> None:
     assert first.verification.required_obligation_count == 6
     assert first.accounting.unaccounted_required_obligation_count == 0
     assert set(first.artifact_contents) == {"artifact-main", "artifact-carriers"}
+
+
+def test_current_four_result_join_requires_exact_profile_revisions() -> None:
+    request, records = _chain(current_profiles=True)
+    verified = resolve_and_verify_four_result_join(request, FakeResolver(records))
+    assert verified.verification.all_required_obligations_have_required_bv_disposition
+
+    records["bypass-validation"].result["profile_id"] = "waf-bypass@2"
+    records["bypass-validation"].result["input_bindings"]["bypass_profile_id"] = "waf-bypass@2"
+    request = _resign_record(request, records, "bypass-validation")
+    with pytest.raises(SharedContractV2Error) as raised:
+        resolve_and_verify_four_result_join(request, FakeResolver(records))
+    assert raised.value.code == "bv-identity-invalid"
 
 
 def test_outer_join_requires_producer_authenticated_bytes() -> None:

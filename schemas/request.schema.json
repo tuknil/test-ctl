@@ -1001,7 +1001,7 @@
           "type": "string"
         },
         "profile_id": {
-          "const": "waf-standard@1",
+          "enum": ["waf-standard@1", "waf-standard@2"],
           "title": "Profile Id",
           "type": "string"
         },

@@ -9,7 +9,8 @@ unchanged and remain the replay path for existing histories.
 A v2 request contains:
 
 - `shared_contract_version: "2.0"`
-- `profile_id: "waf-standard@1"`
+- `profile_id: "waf-standard@2"` for new joins. Legacy replay may retain
+  `waf-standard@1`, but profile revisions cannot be mixed within one join.
 - stable `request_id` and `correlation_id`
 - exactly four unique authenticated immutable `upstream_inputs`, one each for
   Check Generation, Defense Generation, Mitigation Check, and Bypass

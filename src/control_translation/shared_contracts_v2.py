@@ -49,7 +49,8 @@ BV_PROFILE_ROOT = SCHEMA_ROOT / "profiles"
 AMS_SCHEMA_ID = "https://schemas.janus.internal/contracts/attack-match-semantics/attack-match-semantics-2.0.schema.json"
 BUNDLE_SCHEMA_ID = "https://schemas.janus.internal/contracts/candidate-bundle/candidate-bundle-1.0.schema.json"
 MAX_RESULT_BYTES = 200 * 1024 * 1024
-CT_PROFILE_ID = "waf-standard@1"
+LEGACY_CT_PROFILE_ID = "waf-standard@1"
+CT_PROFILE_ID = "waf-standard@2"
 SHARED_CONTRACT_VERSION = "2.0"
 SCHEMA_BUNDLE_VERSION = "shared-attack-contracts-phase-1-ct@2026-09-12"
 SCHEMA_BUNDLE_DIGEST = (
@@ -57,11 +58,30 @@ SCHEMA_BUNDLE_DIGEST = (
 )
 SCHEMA_IDS = {AMS_SCHEMA_ID, BUNDLE_SCHEMA_ID, "https://schemas.janus.internal/contracts/common/janus-contract-common-1.0.schema.json"}
 MC_RESOLVER_ID = "mc-approved-route-adapter"
-MC_RESOLVER_PROFILE_DIGEST = "sha256:e28f9574b07194222a317dfc4f03293beafb6e3613b87452a4191652fd6b6b1a"
+LEGACY_MC_RESOLVER_PROFILE_DIGEST = "sha256:e28f9574b07194222a317dfc4f03293beafb6e3613b87452a4191652fd6b6b1a"
+MC_PROFILE_FILE_DIGEST = "sha256:a49bc4e962985f5bd6aa117228e44002a1a617e62544fb87757aa261d4a6f404"
+MC_PROFILE_BYTE_LENGTH = 441
+MC_RESOLVER_PROFILE_DIGEST = "sha256:01f6033b5b09db48056adc8a0d47083f4020cf18d71913c69e283f644ec41a94"
 BV_RESOLVER_ID = "bv-approved-route-adapter"
-BV_PROFILE_FILE_DIGEST = "sha256:e32674808bc8691021f26683aaa44bdd313a25875ea57168ddb4e0a2a6c1e2bc"
-BV_PROFILE_BYTE_LENGTH = 3745
-BV_RESOLVER_PROFILE_DIGEST = "sha256:46f4d0dd59e1464acc1ef19ef68d0134a4be554cc203da653192f057aa82e577"
+LEGACY_BV_PROFILE_FILE_DIGEST = "sha256:e32674808bc8691021f26683aaa44bdd313a25875ea57168ddb4e0a2a6c1e2bc"
+LEGACY_BV_PROFILE_BYTE_LENGTH = 3745
+LEGACY_BV_RESOLVER_PROFILE_DIGEST = "sha256:46f4d0dd59e1464acc1ef19ef68d0134a4be554cc203da653192f057aa82e577"
+BV_PROFILE_FILE_DIGEST = "sha256:ca9e037080199f3a58958aa324484953d39e9c73e904c77ea6305692024900cb"
+BV_PROFILE_BYTE_LENGTH = 3861
+BV_RESOLVER_PROFILE_DIGEST = "sha256:eb15d48ba11ecf93d26c8ae1b0f08bb1754edf0afef1c0401f1bf897ac8771af"
+
+
+def _expected_profiles(ct_profile_id: str) -> tuple[str, str, str, str]:
+    if ct_profile_id == LEGACY_CT_PROFILE_ID:
+        return (
+            LEGACY_CT_PROFILE_ID,
+            LEGACY_MC_RESOLVER_PROFILE_DIGEST,
+            "waf-bypass@2",
+            LEGACY_BV_RESOLVER_PROFILE_DIGEST,
+        )
+    if ct_profile_id == CT_PROFILE_ID:
+        return CT_PROFILE_ID, MC_RESOLVER_PROFILE_DIGEST, "waf-bypass@3", BV_RESOLVER_PROFILE_DIGEST
+    raise SharedContractV2Error("ct-profile-invalid", "unapproved Control Translation profile")
 
 
 class SharedContractV2Error(ValueError):
@@ -574,28 +594,48 @@ def _validate_mc_evidence(case: dict[str, Any], *, obligation_id: str) -> None:
         raise SharedContractV2Error("mc-case-evidence-invalid", f"MC evidence contradicts disposition: {obligation_id}")
 
 
-def _validate_mc_resolution(case: dict[str, Any], item: dict[str, Any], *, obligation_id: str) -> None:
+def _validate_mc_resolution(case: dict[str, Any], item: dict[str, Any], *, obligation_id: str, profile_id: str, profile_digest: str) -> None:
     template = item["input"]
     resolution = case.get("resolution")
     if template.get("modality") != "http-request-template":
         if resolution is not None:
             raise SharedContractV2Error("mc-template-resolution-invalid", f"MC invented a template resolution: {obligation_id}")
         return
-    if template.get("path_key") != "inventory-item-detail":
+    routes = {
+        "inventory-item-detail": {"scheme": "https", "authority": "approved-mc-target.internal", "path": "/inventory/items/42"},
+    }
+    if profile_id == CT_PROFILE_ID:
+        raw = (BV_PROFILE_ROOT / "mc-http-route-profile-v2.json").read_bytes()
+        if len(raw) != MC_PROFILE_BYTE_LENGTH or "sha256:" + hashlib_sha256(raw).hexdigest() != MC_PROFILE_FILE_DIGEST:
+            raise SharedContractV2Error("mc-profile-integrity-failed", "embedded waf-standard@2 profile bytes differ")
+        profile = strict_json_bytes(raw, context="waf-standard@2 profile")
+        if profile.get("profile_id") != CT_PROFILE_ID or profile.get("resolver_id") != MC_RESOLVER_ID or digest(profile) != profile_digest:
+            raise SharedContractV2Error("mc-profile-integrity-failed", "embedded waf-standard@2 profile identity differs")
+        routes = profile.get("routes", {})
+    route = routes.get(template.get("path_key"))
+    if route is None:
         raise SharedContractV2Error("mc-template-resolution-invalid", f"MC accepted an unknown path key: {obligation_id}")
     expected = _expected_template_resolution(
         item,
         resolver_id=MC_RESOLVER_ID,
-        profile_id=CT_PROFILE_ID,
-        profile_digest=MC_RESOLVER_PROFILE_DIGEST,
-        route={"scheme": "https", "authority": "approved-mc-target.internal", "path": "/inventory/items/42"},
+        profile_id=profile_id,
+        profile_digest=profile_digest,
+        route=route,
     )
     if resolution != expected:
         raise SharedContractV2Error("mc-template-resolution-invalid", f"MC template resolution differs: {obligation_id}")
 
 
-def _validate_mc(mc: dict[str, Any], semantics: dict[str, Any], bundle: dict[str, Any], locators: Mapping[str, Any]) -> None:
-    if mc.get("capability") != "mitigation-check" or mc.get("contract_id") != "mitigation-check@1.0" or mc.get("terminal_state") != "blocked" or mc.get("status") != "completed" or mc.get("profile_id") != CT_PROFILE_ID:
+def _validate_mc(
+    mc: dict[str, Any],
+    semantics: dict[str, Any],
+    bundle: dict[str, Any],
+    locators: Mapping[str, Any],
+    *,
+    profile_id: str = LEGACY_CT_PROFILE_ID,
+    profile_digest: str = LEGACY_MC_RESOLVER_PROFILE_DIGEST,
+) -> None:
+    if mc.get("capability") != "mitigation-check" or mc.get("contract_id") != "mitigation-check@1.0" or mc.get("terminal_state") != "blocked" or mc.get("status") != "completed" or mc.get("profile_id") != profile_id:
         raise SharedContractV2Error("mc-identity-invalid", "MC identity, state, or profile differs")
     if mc.get("match") is not True:
         raise SharedContractV2Error(
@@ -632,26 +672,33 @@ def _validate_mc(mc: dict[str, Any], semantics: dict[str, Any], bundle: dict[str
             )
         for input_id, case in cases.items():
             _validate_mc_evidence(case, obligation_id=obligation_id)
-            _validate_mc_resolution(case, inputs[input_id], obligation_id=obligation_id)
+            _validate_mc_resolution(case, inputs[input_id], obligation_id=obligation_id, profile_id=profile_id, profile_digest=profile_digest)
         work += len(cases)
     if mc.get("accounting") != _accounting(semantics, work=work).model_dump(mode="json"):
         raise SharedContractV2Error("mc-accounting-invalid", "MC CoverageAccounting differs")
 
 
-@lru_cache(maxsize=1)
-def _bv_profile() -> dict[str, Any]:
-    raw = (BV_PROFILE_ROOT / "bv-http-route-profile.json").read_bytes()
-    if len(raw) != BV_PROFILE_BYTE_LENGTH or "sha256:" + hashlib_sha256(raw).hexdigest() != BV_PROFILE_FILE_DIGEST:
-        raise SharedContractV2Error("bv-profile-integrity-failed", "embedded waf-bypass@2 profile bytes differ")
-    profile = strict_json_bytes(raw, context="waf-bypass@2 profile")
+@lru_cache(maxsize=2)
+def _bv_profile(profile_id: str) -> dict[str, Any]:
+    metadata = {
+        "waf-bypass@2": ("bv-http-route-profile.json", LEGACY_BV_PROFILE_BYTE_LENGTH, LEGACY_BV_PROFILE_FILE_DIGEST, LEGACY_BV_RESOLVER_PROFILE_DIGEST),
+        "waf-bypass@3": ("bv-http-route-profile-v3.json", BV_PROFILE_BYTE_LENGTH, BV_PROFILE_FILE_DIGEST, BV_RESOLVER_PROFILE_DIGEST),
+    }
+    if profile_id not in metadata:
+        raise SharedContractV2Error("bv-profile-integrity-failed", "unapproved embedded BV profile")
+    filename, byte_length, file_digest, profile_digest = metadata[profile_id]
+    raw = (BV_PROFILE_ROOT / filename).read_bytes()
+    if len(raw) != byte_length or "sha256:" + hashlib_sha256(raw).hexdigest() != file_digest:
+        raise SharedContractV2Error("bv-profile-integrity-failed", f"embedded {profile_id} profile bytes differ")
+    profile = strict_json_bytes(raw, context=f"{profile_id} profile")
     if (
-        profile.get("profile_id") != "waf-bypass@2"
+        profile.get("profile_id") != profile_id
         or profile.get("resolver_id") != BV_RESOLVER_ID
-        or digest(profile) != BV_RESOLVER_PROFILE_DIGEST
+        or digest(profile) != profile_digest
         or not isinstance(profile.get("routes"), dict)
         or not isinstance(profile.get("bypass_dimensions"), dict)
     ):
-        raise SharedContractV2Error("bv-profile-integrity-failed", "embedded waf-bypass@2 profile identity differs")
+        raise SharedContractV2Error("bv-profile-integrity-failed", f"embedded {profile_id} profile identity differs")
     return profile
 
 
@@ -689,8 +736,8 @@ def _component_carrier(component: dict[str, Any]) -> str:
     }.get(component["location"].get("kind"), "unsupported")
 
 
-def _expected_bv_dimensions(obligation: dict[str, Any], semantics: dict[str, Any]) -> list[dict[str, Any]]:
-    profile = _bv_profile()
+def _expected_bv_dimensions(obligation: dict[str, Any], semantics: dict[str, Any], *, profile_id: str = "waf-bypass@2") -> list[dict[str, Any]]:
+    profile = _bv_profile(profile_id)
     components = _index(semantics["components"], "component_id", "components-invalid")
     component_ids = _coverage_component_ids(obligation["coverage_ref"], semantics)
     expected: list[dict[str, Any]] = []
@@ -731,8 +778,10 @@ def _validate_bv_resolution(
     item: dict[str, Any],
     component: dict[str, Any],
     obligation_id: str,
+    profile_id: str,
+    profile_digest: str,
 ) -> None:
-    profile = _bv_profile()
+    profile = _bv_profile(profile_id)
     template = item["input"]
     route = profile["routes"].get(template.get("path_key"))
     if not isinstance(route, dict):
@@ -740,8 +789,8 @@ def _validate_bv_resolution(
     base = _expected_template_resolution(
         item,
         resolver_id=BV_RESOLVER_ID,
-        profile_id="waf-bypass@2",
-        profile_digest=BV_RESOLVER_PROFILE_DIGEST,
+        profile_id=profile_id,
+        profile_digest=profile_digest,
         route=route,
     )
     if not isinstance(resolution, dict) or set(resolution) != set(base) or any(
@@ -763,10 +812,10 @@ def _validate_bv_resolution(
         raise SharedContractV2Error("bv-template-resolution-invalid", f"BV changed a nonselected template field: {obligation_id}")
 
 
-def _validate_bv(bv: dict[str, Any], semantics: dict[str, Any], attestation: dict[str, Any], locators: Mapping[str, Any]) -> None:
+def _validate_bv(bv: dict[str, Any], semantics: dict[str, Any], attestation: dict[str, Any], locators: Mapping[str, Any], *, profile_id: str, profile_digest: str) -> None:
     if (
         bv.get("contract_id") != "bypass-validation@2.0"
-        or bv.get("profile_id") != "waf-bypass@2"
+        or bv.get("profile_id") != profile_id
         or bv.get("terminal_state") != "no-bypass-found"
     ):
         raise SharedContractV2Error(
@@ -781,7 +830,7 @@ def _validate_bv(bv: dict[str, Any], semantics: dict[str, Any], attestation: dic
     expected_upstreams = [locators[name].model_dump(mode="json", by_alias=True) for name in ("check-generation", "defense-generation", "mitigation-check")]
     if (
         upstreams != expected_upstreams
-        or bindings.get("bypass_profile_id") != "waf-bypass@2"
+        or bindings.get("bypass_profile_id") != profile_id
         or not isinstance(bindings.get("validation_substrate_id"), str)
         or not bindings["validation_substrate_id"]
     ):
@@ -795,7 +844,7 @@ def _validate_bv(bv: dict[str, Any], semantics: dict[str, Any], attestation: dic
     nested_resolutions: list[dict[str, Any]] = []
     for obligation_id, campaign in campaigns.items():
         dimensions = campaign.get("attempted_dimensions")
-        expected_dimensions = _expected_bv_dimensions(obligations[obligation_id], semantics)
+        expected_dimensions = _expected_bv_dimensions(obligations[obligation_id], semantics, profile_id=profile_id)
         if not isinstance(dimensions, list) or len(dimensions) != len(expected_dimensions):
             raise SharedContractV2Error("bv-empty-campaign", f"BV campaign has no attempted dimensions: {obligation_id}")
         supported_attempt_ids: list[str] = []
@@ -828,7 +877,14 @@ def _validate_bv(bv: dict[str, Any], semantics: dict[str, Any], attestation: dic
         if not isinstance(resolutions, list) or len(resolutions) != len(expected_resolutions):
             raise SharedContractV2Error("bv-template-resolution-invalid", f"BV resolutions do not bind template attempts: {obligation_id}")
         for resolution, (item, component) in zip(resolutions, expected_resolutions, strict=True):
-            _validate_bv_resolution(resolution, item=item, component=component, obligation_id=obligation_id)
+            _validate_bv_resolution(
+                resolution,
+                item=item,
+                component=component,
+                obligation_id=obligation_id,
+                profile_id=profile_id,
+                profile_digest=profile_digest,
+            )
             nested_resolutions.append(resolution)
         if campaign.get("disposition") != "no-bypass":
             raise SharedContractV2Error(
@@ -878,7 +934,13 @@ class VerifiedSharedContractV2:
     vulnerability_id: str
 
 
-def verify_four_result_join(records: Mapping[str, UpstreamRecord], locators: Mapping[str, Any], *, catalog: OfflineSchemaCatalog | None = None) -> VerifiedSharedContractV2:
+def verify_four_result_join(
+    records: Mapping[str, UpstreamRecord],
+    locators: Mapping[str, Any],
+    *,
+    catalog: OfflineSchemaCatalog | None = None,
+    expected_profile_id: str = LEGACY_CT_PROFILE_ID,
+) -> VerifiedSharedContractV2:
     required = {"check-generation", "defense-generation", "mitigation-check", "bypass-validation"}
     if set(records) != required or set(locators) != required:
         raise SharedContractV2Error("upstream-set-invalid", "v2 requires exactly four unique upstream inputs")
@@ -915,10 +977,25 @@ def verify_four_result_join(records: Mapping[str, UpstreamRecord], locators: Map
     present = {value for value in lineage.values() if isinstance(value, str) and value}
     if len(present) > 1:
         raise SharedContractV2Error("vulnerability-lineage-mismatch", "upstream vulnerability lineage differs")
-    _validate_mc(documents["mitigation-check"], semantics, bundle, locators)
+    mc_profile_id, mc_profile_digest, bv_profile_id, bv_profile_digest = _expected_profiles(expected_profile_id)
+    _validate_mc(
+        documents["mitigation-check"],
+        semantics,
+        bundle,
+        locators,
+        profile_id=mc_profile_id,
+        profile_digest=mc_profile_digest,
+    )
     bv_locators = dict(locators)
     bv_locators["candidate_bundle"] = bundle
-    _validate_bv(documents["bypass-validation"], semantics, attestation, bv_locators)
+    _validate_bv(
+        documents["bypass-validation"],
+        semantics,
+        attestation,
+        bv_locators,
+        profile_id=bv_profile_id,
+        profile_digest=bv_profile_digest,
+    )
     count = len(semantics["obligations"])
     accounting = _accounting(semantics, work=count)
     verification = PreTranslationVerification(
@@ -986,7 +1063,12 @@ def resolve_and_verify_four_result_join(
             )
         records[capability] = record
     check_cancelled(cancellation_signal)
-    return verify_four_result_join(records, locators, catalog=catalog)
+    return verify_four_result_join(
+        records,
+        locators,
+        catalog=catalog,
+        expected_profile_id=request.profile_id,
+    )
 
 
 class _FixedTranslationDoer:
