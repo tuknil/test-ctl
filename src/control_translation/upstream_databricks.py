@@ -1014,11 +1014,27 @@ def _producer_integrity(
 
 def _producer_integrity_bytes(shape: str, result: dict[str, Any]) -> bytes:
     if shape == "defense":
-        unsigned = {**result, "content_sha256": "", "size_bytes": 0}
-        payload = _go_ordered_json(unsigned, _DEFENSE_RESULT_SCHEMA)
+        if result.get("candidate_bundle"):
+            unsigned = {
+                key: value
+                for key, value in result.items()
+                if key not in {"content_sha256", "size_bytes"}
+            }
+            payload = rfc8785.dumps(unsigned)
+        else:
+            unsigned = {**result, "content_sha256": "", "size_bytes": 0}
+            payload = _go_ordered_json(unsigned, _DEFENSE_RESULT_SCHEMA)
     elif shape == "mitigation":
-        unsigned = {**result, "content_sha256": "", "size_bytes": 0}
-        payload = _go_ordered_json(unsigned, _MITIGATION_RESULT_SCHEMA)
+        if result.get("profile_id"):
+            unsigned = {
+                key: value
+                for key, value in result.items()
+                if key not in {"content_sha256", "size_bytes"}
+            }
+            payload = rfc8785.dumps(unsigned)
+        else:
+            unsigned = {**result, "content_sha256": "", "size_bytes": 0}
+            payload = _go_ordered_json(unsigned, _MITIGATION_RESULT_SCHEMA)
     else:
         payload = json.dumps(
             result,
