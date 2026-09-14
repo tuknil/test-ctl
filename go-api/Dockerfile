@@ -5,12 +5,11 @@
 #
 # Built from the repository root:
 #   docker build -f go-api/Dockerfile -t control-translation-go:<tag> .
-ARG BUILD_IMAGE=golang:1.25-alpine
-ARG BASE_IMAGE=gcr.io/distroless/static-debian12:nonroot
-
-FROM ${BUILD_IMAGE} AS build
+# Build the Go API binary.
+FROM artifact.it.att.com/astra-secure-container-catalog/go:1.26.5 AS build
+ENV GONOSUMDB=off
+ENV GOPRIVATE=it.att.com
 WORKDIR /src
-
 COPY go-api/go.mod go-api/go.sum ./
 RUN go mod download
 
@@ -24,10 +23,15 @@ RUN go build -trimpath -ldflags="-s -w" -o /out/control-translation-api ./cmd/ap
 # inherits it, so the nonroot user can write the queue.
 RUN mkdir -p /out/data
 
-FROM ${BASE_IMAGE}
+FROM  artifact.it.att.com/docker-hub/debian:bookworm-slim
+ENV GONOSUMDB=off
+ENV GOPRIVATE=it.att.com
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --shell /bin/false app
 WORKDIR /app
 COPY --from=build /out/control-translation-api /app/control-translation-api
-COPY --from=build --chown=nonroot:nonroot /out/data /app/data
 
 ENV HOST=0.0.0.0 \
     PORT=8000 \
@@ -37,7 +41,6 @@ ENV HOST=0.0.0.0 \
 # Mount /app/data on durable storage: losing it forgets in-flight runs, though
 # any result already written to Databricks survives. Run exactly one replica
 # while the queue is a local SQLite file.
-USER nonroot:nonroot
 EXPOSE 8000
 
 # The binary answers /ready itself, so the platform probe is the health check.

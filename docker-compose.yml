@@ -82,7 +82,6 @@ services:
     volumes:
       - control-translation-go-data:/app/data
     restart: unless-stopped
-
 volumes:
   control-translation-data:
   control-translation-go-data:
