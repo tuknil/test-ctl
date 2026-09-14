@@ -1019,6 +1019,15 @@ def test_v2_result_persistence_readback_and_canonical_integrity(tmp_path) -> Non
     assert canonical["profile_id"] == request.profile_id
     assert canonical["shared_contract_version"] == request.shared_contract_version
     assert len(canonical["provenance"]["upstream_inputs"]) == 4
+    assert canonical["primary_candidate"]["artifact_type"] == "akamai-waf-rule-set"
+    primary_id = canonical["primary_candidate"]["artifact_id"]
+    assert canonical["artifacts"][primary_id]["role"] == "primary"
+    assert len(canonical["artifacts"]) == len(result.structured_result.target_artifacts) + 1
+    assert all(
+        artifact["role"] == "supporting"
+        for artifact_id, artifact in canonical["artifacts"].items()
+        if artifact_id != primary_id
+    )
     content = canonical_result_bytes(canonical)
     assert canonical["content_sha256"] == f"sha256:{sha256(content).hexdigest()}"
     assert canonical["size_bytes"] == len(content)

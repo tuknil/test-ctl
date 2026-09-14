@@ -448,12 +448,35 @@ def build_lifecycle_result(
     primary_candidate = None
     artifacts: dict[str, dict[str, object]] = {}
     if structured.shared_contract_version is not None:
+        aggregate_artifact_id = None
+        if candidate is not None:
+            aggregate = candidate.candidate_artifact
+            aggregate_artifact_id = (
+                "akamai-rule-set-" + aggregate.content_hash.removeprefix("sha256:")
+            )
+            artifacts[aggregate_artifact_id] = {
+                "source_artifact_id": structured.subject.proven_pattern_id,
+                "role": "primary",
+                "kind": "policy-fragment",
+                "order": 0,
+                "artifact_type": aggregate.artifact_type,
+                "media_type": _artifact_media_type(aggregate.content_ref),
+                "content": aggregate.content_ref,
+                "content_hash": aggregate.content_hash,
+                "emitted_as": aggregate.emitted_as,
+                "candidate_metadata": (
+                    candidate.candidate_metadata.model_dump(mode="json")
+                    if candidate.candidate_metadata is not None
+                    else None
+                ),
+            }
         for item in structured.target_artifacts:
             artifacts[item.artifact_id] = {
                 "source_artifact_id": item.source_artifact_id,
-                "role": item.role,
+                "source_role": item.role,
+                "role": "supporting",
                 "kind": item.kind,
-                "order": item.order,
+                "order": item.order + (1 if aggregate_artifact_id is not None else 0),
                 "artifact_type": item.artifact_type,
                 "media_type": _artifact_media_type(item.content),
                 "content": item.content,
@@ -461,24 +484,21 @@ def build_lifecycle_result(
                 "emitted_as": "control-specific-mitigation-candidate",
             }
         if candidate is not None:
-            primary = next(
-                (item for item in structured.target_artifacts if item.role == "primary"),
-                None,
-            )
-            if primary is not None:
+            if aggregate_artifact_id is not None:
+                aggregate = candidate.candidate_artifact
                 primary_candidate = {
                     "candidate_id": candidate.candidate_id,
                     "target_control_class": candidate.target_control_class,
                     "target_technology": candidate.target_technology,
                     "target_policy_context_id": candidate.target_policy_context_id,
-                    "artifact_id": primary.artifact_id,
-                    "artifact_type": primary.artifact_type,
+                    "artifact_id": aggregate_artifact_id,
+                    "artifact_type": aggregate.artifact_type,
                     "content_ref": _canonical_artifact_ref(
                         settings=settings,
                         result_id=result.result_id,
-                        artifact_id=primary.artifact_id,
+                        artifact_id=aggregate_artifact_id,
                     ),
-                    "content_hash": primary.content_hash,
+                    "content_hash": aggregate.content_hash,
                     "candidate_metadata": (
                         candidate.candidate_metadata.model_dump(mode="json")
                         if candidate.candidate_metadata is not None
