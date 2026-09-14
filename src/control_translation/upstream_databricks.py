@@ -860,7 +860,7 @@ class DatabricksUpstreamResultResolver:
             raise UpstreamResolutionError(
                 f"{role} immutable locator created_at is missing"
             )
-        if result_created_at != locator_created_at.astimezone(UTC):
+        if result_created_at != _parse_datetime(locator_created_at, role):
             raise UpstreamResolutionError(
                 f"{role} created_at differs from the immutable locator"
             )

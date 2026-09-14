@@ -667,6 +667,18 @@ def test_current_four_result_join_requires_exact_profile_revisions() -> None:
     assert raised.value.code == "bv-identity-invalid"
 
 
+def test_current_bv_optional_dimension_fields_accept_serialized_nulls() -> None:
+    request, records = _chain(current_profiles=True)
+    dimensions = records["bypass-validation"].result["campaign_results"][0]["attempted_dimensions"]
+    supported = next(item for item in dimensions if item["supported"] is True)
+    supported["detail"] = None
+    request = _resign_record(request, records, "bypass-validation")
+
+    verified = resolve_and_verify_four_result_join(request, FakeResolver(records))
+
+    assert verified.verification.all_required_obligations_have_required_bv_disposition
+
+
 def test_outer_join_requires_producer_authenticated_bytes() -> None:
     request, records = _chain()
     records["mitigation-check"] = replace(

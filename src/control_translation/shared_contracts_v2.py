@@ -16,6 +16,7 @@ from functools import lru_cache
 from hashlib import sha256 as hashlib_sha256
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 import rfc8785
 from jsonschema import Draft202012Validator
@@ -169,6 +170,30 @@ def _same_locator_document(actual: Any, locator: Any) -> bool:
     if actual.get("evidence_refs", []) != expected.get("evidence_refs", []):
         return False
     return _same_timestamp(actual.get("created_at"), expected.get("created_at"))
+
+
+def _resolve_result_internal_content(enclosing: dict[str, Any], locator: dict[str, Any]) -> bytes:
+    uri = locator.get("uri")
+    if not isinstance(uri, str) or not uri.startswith("janus-result-internal:"):
+        raise SharedContractV2Error("result-internal-locator-invalid", "CG artifact locator is not result-internal")
+    identity, separator, pointer = uri.removeprefix("janus-result-internal:").partition("#")
+    if not separator or unquote(identity) != enclosing.get("result_id") or not pointer.startswith("/"):
+        raise SharedContractV2Error("result-internal-locator-invalid", "CG artifact locator identity or pointer differs")
+    current: Any = enclosing
+    try:
+        for raw_token in pointer.removeprefix("/").split("/"):
+            token = raw_token.replace("~1", "/").replace("~0", "~")
+            current = current[int(token)] if isinstance(current, list) else current[token]
+    except (IndexError, KeyError, TypeError, ValueError) as exc:
+        raise SharedContractV2Error("result-internal-locator-invalid", "CG artifact locator does not resolve exactly") from exc
+    content = current.encode("utf-8") if isinstance(current, str) else canonical_bytes(current)
+    if (
+        locator.get("immutable") is not True
+        or locator.get("byte_length") != len(content)
+        or locator.get("digest") != "sha256:" + hashlib_sha256(content).hexdigest()
+    ):
+        raise SharedContractV2Error("result-internal-locator-integrity-failed", "CG artifact locator bytes differ")
+    return content
 
 
 class OfflineSchemaCatalog:
@@ -444,12 +469,27 @@ def _validate_cg(cg: dict[str, Any], catalog: OfflineSchemaCatalog) -> dict[str,
     for artifact_id, artifact in artifacts.items():
         outer = outer_artifacts[artifact_id]
         member_ids = _ref_ids(artifact["member_refs"], kind="source-member", scope=semantics["semantics_id"], known=members, code="source-artifact-members-invalid")
+        content = artifact.get("content")
+        if not isinstance(content, dict):
+            raise SharedContractV2Error("cg-artifact-lineage-mismatch", f"CG artifact content is absent: {artifact_id}")
+        if str(content.get("uri", "")).startswith("janus-result-internal:"):
+            resolved = _resolve_result_internal_content(cg, content)
+            expected_content = (
+                outer.get("check_artifact", {}).get("candidate")
+                if isinstance(outer.get("check_artifact"), dict)
+                else outer.get("mitigation_checkable_signal", {}).get("stimulus")
+                if isinstance(outer.get("mitigation_checkable_signal"), dict)
+                else None
+            )
+            content_matches = expected_content is not None and resolved == canonical_bytes(expected_content)
+        else:
+            content_matches = outer.get("content_hash") == content.get("digest")
         if (
             set(member_ids) != set(outer.get("member_ids", []))
             or artifact.get("artifact_kind") != outer.get("artifact_kind")
             or set(artifact.get("signal_ids", [])) != set(outer.get("signal_ids", []))
             or set(artifact.get("affected_artifact_ids", [])) != set(outer.get("affected_artifact_ids", []))
-            or artifact["content"].get("digest") != outer.get("content_hash")
+            or not content_matches
         ):
             raise SharedContractV2Error("cg-artifact-lineage-mismatch", f"CG artifact differs: {artifact_id}")
     for input_id, item in inputs.items():
@@ -904,7 +944,7 @@ def _validate_bv(bv: dict[str, Any], semantics: dict[str, Any], attestation: dic
                 raise SharedContractV2Error("bv-dimension-invalid", f"BV dimension is bogus or out of order: {obligation_id}")
             supported = actual.get("supported")
             if supported is True:
-                if not isinstance(actual.get("attempt_id"), str) or not actual["attempt_id"] or actual.get("disposition") not in {"blocked", "bypassed", "safety-stop"} or "detail" in actual:
+                if not isinstance(actual.get("attempt_id"), str) or not actual["attempt_id"] or actual.get("disposition") not in {"blocked", "bypassed", "safety-stop"} or actual.get("detail") is not None:
                     raise SharedContractV2Error("bv-dimension-invalid", f"BV supported dimension evidence differs: {obligation_id}")
                 if actual["disposition"] == "bypassed":
                     raise SharedContractV2Error(
@@ -916,7 +956,7 @@ def _validate_bv(bv: dict[str, Any], semantics: dict[str, Any], attestation: dic
                 if item["input"].get("modality") == "http-request-template":
                     expected_resolutions.append((item, components[actual["component_id"]]))
             elif supported is False:
-                if "attempt_id" in actual or "disposition" in actual or not isinstance(actual.get("detail"), str) or not actual["detail"]:
+                if actual.get("attempt_id") is not None or actual.get("disposition") is not None or not isinstance(actual.get("detail"), str) or not actual["detail"]:
                     raise SharedContractV2Error("bv-dimension-invalid", f"BV unsupported dimension evidence differs: {obligation_id}")
             else:
                 raise SharedContractV2Error("bv-dimension-invalid", f"BV dimension support state is absent: {obligation_id}")
