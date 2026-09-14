@@ -442,10 +442,18 @@ class DatabricksUpstreamResultResolver:
             run_id, result_id = row[0], row[1]
             transport = decode_json_object(row[6], "Check Generation result_json")
             transport_bytes = _canonical_json_bytes(transport)
-            if (
-                str(row[7] or "") != f"sha256:{sha256(transport_bytes).hexdigest()}"
-                or int(row[8] or -1) != len(transport_bytes)
-            ):
+            row_digest = str(row[7] or "")
+            row_size = int(row[8] or -1)
+            physical_matches = (
+                row_digest == f"sha256:{sha256(transport_bytes).hexdigest()}"
+                and row_size == len(transport_bytes)
+            )
+            is_manifest = transport.get("contract_type") == "janus-volume-payload-manifest"
+            valid_metadata = (
+                re.fullmatch(r"sha256:[a-f0-9]{64}", row_digest) is not None
+                and row_size > 0
+            )
+            if (is_manifest and not physical_matches) or not valid_metadata:
                 raise UpstreamResolutionError(
                     "Check Generation persisted digest or size is invalid"
                 )

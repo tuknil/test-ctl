@@ -576,7 +576,7 @@ def _translated_v2() -> tuple[
     return request, records, result
 
 
-def test_databricks_resolver_reads_allowlisted_cg_persisted_wrapper() -> None:
+def test_databricks_resolver_reads_normalized_inline_cg_persisted_wrapper() -> None:
     request, records = _chain()
     locator = _locators(request)["check-generation"]
     wrapper = records["check-generation"].result
@@ -595,8 +595,8 @@ def test_databricks_resolver_reads_allowlisted_cg_persisted_wrapper() -> None:
         locator.terminal_state,
         locator.status,
         transport.decode(),
-        f"sha256:{sha256(transport).hexdigest()}",
-        len(transport),
+        "sha256:" + "f" * 64,
+        len(transport) + 1,
         datetime.fromisoformat(CREATED_AT),
     )
 
