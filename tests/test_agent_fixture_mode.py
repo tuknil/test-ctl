@@ -21,7 +21,7 @@ def test_fixture_doer_returns_typed_proposal_for_akamai():
         snapshot=None,
     )
     assert isinstance(proposal, TranslationProposal)
-    assert proposal.translation_label in ("exact", "equivalent", "narrower")
+    assert proposal.translation_label in ("exact", "equivalent", "narrower", "broader")
     assert proposal.candidate_content
     assert proposal.answer_kind == "construction"
 
@@ -286,3 +286,11 @@ def test_att_inference_does_not_normalize_ambiguous_flat_response() -> None:
     ambiguous = {"conditions": [], "translation_label": "equivalent"}
 
     assert _normalize_att_proposal_data(ambiguous, "akamai-waf") == ambiguous
+
+
+def test_att_inference_normalization_preserves_broader_label() -> None:
+    from control_translation.agents.translation_agent import (
+        _normalize_translation_label,
+    )
+
+    assert _normalize_translation_label("broader than source semantics") == "broader"

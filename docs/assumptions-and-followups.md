@@ -50,10 +50,10 @@
     rather than guessed at with an invented condition.
   - Regex constructs with no wildcard image (`\s`, `\d`, `\w`, negated or
     large character classes, `\b`, quantified literals) are generalized to a
-    wildcard. The resulting candidate is labeled `narrower` and carries an
-    explicit over-match limitation, but the contract has no "broader" label,
-    so the label is an approximation and operator collateral-impact review is
-    the real control.
+    wildcard. The resulting candidate is labeled `broader`, carries an explicit
+    over-match limitation, and remains deployment-ineligible pending operator
+    collateral-impact review. Callers can decline this review path by setting
+    `allow_broader_translation` to `false`.
 - API key and model config are read from a local `.env` file via
   `python-dotenv` — never committed. `.env.example` documents variable
   names only. Default/offline tests use `FixtureTranslationDoer` and
