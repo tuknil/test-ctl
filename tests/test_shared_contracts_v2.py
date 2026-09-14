@@ -39,6 +39,8 @@ from control_translation.shared_contracts_v2 import (
     SharedContractV2Error,
     _expected_bv_dimensions,
     _shared_terminal_state_from_cg,
+    _translate_carrier_document,
+    _translate_rule_document,
     _validate_cg,
     _validate_mc,
     build_waf_translation_plan,
@@ -677,6 +679,65 @@ def test_current_bv_optional_dimension_fields_accept_serialized_nulls() -> None:
     verified = resolve_and_verify_four_result_join(request, FakeResolver(records))
 
     assert verified.verification.all_required_obligations_have_required_bv_disposition
+
+
+def test_raw_body_artifacts_translate_without_synthetic_selector() -> None:
+    artifact_id = "artifact:raw-body"
+    rule, rule_keys = _translate_rule_document(
+        {
+            "rule_set_id": "rule-set:raw-body",
+            "action": "block",
+            "rules": [
+                {
+                    "rule_id": "rule:raw-body",
+                    "carrier": "body",
+                    "name": "",
+                    "component_id": "component:raw-body",
+                    "pattern": r"person\[0\]\[\]=malicious",
+                    "flags": [],
+                    "transformations": [],
+                }
+            ],
+        },
+        source_artifact_id=artifact_id,
+    )
+    bindings, binding_keys = _translate_carrier_document(
+        {
+            "rule_set_id": "rule-set:raw-body",
+            "carrier_bindings": [
+                {
+                    "carrier": "body",
+                    "name": "",
+                    "component_id": "component:raw-body",
+                }
+            ],
+        },
+        source_artifact_id=artifact_id,
+    )
+
+    assert rule_keys == binding_keys == [("body", "", "component:raw-body")]
+    assert rule["conditions"][0]["type"] == "argsPostMatch"
+    assert "parameter" not in rule["conditions"][0]
+    assert bindings["carrierBindings"][0]["selector"] == ""
+
+
+@pytest.mark.parametrize("carrier", ["header", "cookie"])
+def test_named_carriers_reject_empty_selector(carrier: str) -> None:
+    with pytest.raises(SharedContractV2Error) as raised:
+        _translate_carrier_document(
+            {
+                "carrier_bindings": [
+                    {
+                        "carrier": carrier,
+                        "name": "",
+                        "component_id": "component:named",
+                    }
+                ]
+            },
+            source_artifact_id="artifact:named",
+        )
+
+    assert raised.value.code == "cannot-express"
 
 
 def test_outer_join_requires_producer_authenticated_bytes() -> None:

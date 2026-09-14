@@ -1208,6 +1208,8 @@ _CARRIER_CONDITION_TYPES = {
     "method": "requestMethodMatch",
 }
 
+_CARRIERS_REQUIRING_SELECTOR = frozenset({"header", "cookie"})
+
 
 def _target_artifact_id(source_artifact_id: str) -> str:
     safe = "".join(
@@ -1255,7 +1257,7 @@ def _translate_rule_document(
             or rule_id in rule_ids
             or carrier not in _CARRIER_CONDITION_TYPES
             or not isinstance(name, str)
-            or not name
+            or (carrier in _CARRIERS_REQUIRING_SELECTOR and not name)
             or not isinstance(component_id, str)
             or not component_id
             or not isinstance(pattern, str)
@@ -1292,7 +1294,7 @@ def _translate_rule_document(
         }
         if carrier == "header":
             condition["header"] = name
-        elif carrier in {"query", "body"}:
+        elif carrier in {"query", "body"} and name:
             condition["parameter"] = name
         elif carrier == "cookie":
             condition["cookieName"] = name
@@ -1336,7 +1338,7 @@ def _translate_carrier_document(
         if (
             carrier not in _CARRIER_CONDITION_TYPES
             or not isinstance(name, str)
-            or not name
+            or (carrier in _CARRIERS_REQUIRING_SELECTOR and not name)
             or not isinstance(component_id, str)
             or not component_id
         ):
