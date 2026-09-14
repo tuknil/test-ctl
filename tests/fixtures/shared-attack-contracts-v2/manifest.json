@@ -17,7 +17,7 @@
     {
       "name": "candidate-bundle.json",
       "source": "architecture/contracts/examples/waf-atomic-v2.candidate-bundle.json",
-      "sha256": "sha256:98a3c7868957ac0cd4483e685c4a532e1c833dd61e6eb54512cdded1a1f1a9d5",
+      "sha256": "sha256:d204ee6c80687da540a87a776909afe24c01e1bc6f05808e115b14284b751da1",
       "byte_length": 11531
     },
     {
@@ -47,8 +47,8 @@
     {
       "name": "waf-rule-main.json",
       "source": "mitigation-check/api/testdata/shared-attack-contracts-v2/waf-rule-main.json",
-      "sha256": "sha256:c5278463d9da91304ed51df14bee187662e725b47d4f29a4a9162ddb510e6453",
-      "byte_length": 1333
+      "sha256": "sha256:9263e4a625e1e81205ba2a700c6cbb621040bf309e230c76d076fcfc7ad39dc8",
+      "byte_length": 3469
     }
   ]
 }

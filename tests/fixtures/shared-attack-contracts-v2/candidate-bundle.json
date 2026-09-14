@@ -2,7 +2,7 @@
   "contract_id": "candidate-bundle@1.0",
   "bundle_id": "bundle-waf-42",
   "bundle_revision": 1,
-  "bundle_digest": "sha256:985085ddc5576e1f84d0493757e182ef1cef7890785e0659e7d22ae219fcecaa",
+  "bundle_digest": "sha256:4276509ff099206572a8e08e0fc40312365135c23fd3bf70ee756a12009519b7",
   "digest_profile": "rfc8785-sha256-exclude-bundle_digest-and-candidate_digest-v1",
   "produced_at": "2026-09-11T12:10:00Z",
   "semantics_binding": {
@@ -21,7 +21,7 @@
   "primary_candidate": {
     "candidate_id": "candidate-waf-42",
     "candidate_revision": 1,
-    "candidate_digest": "sha256:b328a437c2b72188245f03667840985f6a23bed838ad1d1681f70f9017b37004",
+    "candidate_digest": "sha256:b6e85ce42a29f0ff8a7889edc19633f1af39834a632774b65979a1a60cadfc2e",
     "selected_control_class": "waf",
     "intent": "Block the grounded encoded discriminator in each supported HTTP carrier without changing unrelated traffic.",
     "artifacts": [
@@ -32,9 +32,9 @@
         "kind": "match-rule",
         "content": {
           "uri": "../fixtures/waf-rule-main.json",
-          "digest": "sha256:c5278463d9da91304ed51df14bee187662e725b47d4f29a4a9162ddb510e6453",
+          "digest": "sha256:9263e4a625e1e81205ba2a700c6cbb621040bf309e230c76d076fcfc7ad39dc8",
           "media_type": "application/json",
-          "byte_length": 1333,
+          "byte_length": 3469,
           "immutable": true
         },
         "application_group_ref": {

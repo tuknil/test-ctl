@@ -37,7 +37,10 @@ from control_translation.policy_reader.base import PolicySnapshot
 from control_translation.shared_contracts_v2 import (
     OfflineSchemaCatalog,
     SharedContractV2Error,
+    _component_condition,
+    _coverage_component_ids,
     _expected_bv_dimensions,
+    _resolved_route_conditions,
     _shared_terminal_state_from_cg,
     _translate_carrier_document,
     _translate_rule_document,
@@ -683,23 +686,18 @@ def test_current_bv_optional_dimension_fields_accept_serialized_nulls() -> None:
 
 def test_raw_body_artifacts_translate_without_synthetic_selector() -> None:
     artifact_id = "artifact:raw-body"
-    rule, rule_keys = _translate_rule_document(
+    condition, rule_key = _component_condition(
         {
-            "rule_set_id": "rule-set:raw-body",
-            "action": "block",
-            "rules": [
-                {
-                    "rule_id": "rule:raw-body",
-                    "carrier": "body",
-                    "name": "",
-                    "component_id": "component:raw-body",
-                    "pattern": r"person\[0\]\[\]=malicious",
-                    "flags": [],
-                    "transformations": [],
-                }
-            ],
+            "rule_id": "rule:raw-body",
+            "carrier": "body",
+            "name": "",
+            "component_id": "component:raw-body",
+            "pattern": r"person\[0\]\[\]=malicious",
+            "flags": [],
+            "transformations": [],
         },
         source_artifact_id=artifact_id,
+        seen_rule_ids=set(),
     )
     bindings, binding_keys = _translate_carrier_document(
         {
@@ -715,10 +713,28 @@ def test_raw_body_artifacts_translate_without_synthetic_selector() -> None:
         source_artifact_id=artifact_id,
     )
 
-    assert rule_keys == binding_keys == [("body", "", "component:raw-body")]
-    assert rule["conditions"][0]["type"] == "argsPostMatch"
-    assert "parameter" not in rule["conditions"][0]
+    assert [rule_key] == binding_keys == [("body", "", "component:raw-body")]
+    assert condition["type"] == "argsPostMatch"
+    assert "parameter" not in condition
     assert bindings["carrierBindings"][0]["selector"] == ""
+
+
+def test_opaque_route_key_resolves_without_becoming_a_literal_path() -> None:
+    conditions = _resolved_route_conditions(
+        {
+            "kind": "opaque-path-key",
+            "method": "POST",
+            "path_key": "public/submit.php",
+        },
+        profile_id="waf-standard@2",
+        alternative_id="route-alternative:test",
+    )
+
+    assert conditions[0]["type"] == "pathMatch"
+    assert conditions[0]["value"] == ["/public/submit.php"]
+    assert conditions[0]["value"] != ["public/submit.php"]
+    assert conditions[1]["type"] == "requestMethodMatch"
+    assert conditions[1]["value"] == ["POST"]
 
 
 @pytest.mark.parametrize("carrier", ["header", "cookie"])
@@ -833,25 +849,39 @@ def test_valid_full_v2_invocation_preserves_all_artifacts_and_carriers() -> None
     assert structured.accounting.unaccounted_required_obligation_count == 0
     assert [item.source_artifact_id for item in structured.target_artifacts] == [
         "artifact-main",
+        "artifact-main",
+        "artifact-main",
         "artifact-carriers",
     ]
     assert structured.primary_candidate is not None
-    assert (
-        structured.target_artifacts[0].content_hash
-        == structured.primary_candidate.candidate_artifact.content_hash
-    )
+    assert structured.primary_candidate.candidate_artifact.artifact_type == "akamai-waf-rule-set"
+    primary = json.loads(structured.primary_candidate.candidate_artifact.content_ref)
+    assert primary["combinationOperation"] == "OR"
+    assert len(primary["rules"]) == 3
     assert [item.source_directive_id for item in structured.translated_directives] == [
+        "directive-main-placement",
+        "directive-main-placement",
         "directive-main-placement",
         "directive-carrier-attach",
     ]
-    main = json.loads(structured.target_artifacts[0].content)
+    mains = [
+        json.loads(item.content)
+        for item in structured.target_artifacts
+        if item.artifact_type == "akamai-waf-rule"
+    ]
+    assert all(main["operation"] == "AND" for main in mains)
+    assert all(main["conditions"][0]["type"] == "pathMatch" for main in mains)
+    assert all(main["conditions"][0]["value"] == ["/api/v1/items/42"] for main in mains)
+    assert all(main["conditions"][1]["type"] == "requestMethodMatch" for main in mains)
     carriers = {
         (
             condition["sourceCarrier"],
             condition["sourceSelector"],
             condition["sourceComponentId"],
         )
+        for main in mains
         for condition in main["conditions"]
+        if "sourceCarrier" in condition
     }
     assert carriers == {
         ("query", "target", "component-url"),
@@ -866,23 +896,45 @@ def test_valid_full_v2_invocation_preserves_all_artifacts_and_carriers() -> None
 
 def test_translation_mappings_are_exact_and_bind_emitted_target_ids() -> None:
     _, records, result = _translated_v2()
+    semantics = records["check-generation"].result["run_result"]["attack_match_semantics"]
     source_mappings = {
         item["obligation_id"]: [ref["id"] for ref in item["artifact_refs"]]
         for item in records["defense-generation"].result["candidate_bundle"][
             "primary_candidate"
         ]["obligation_mappings"]
     }
-    target_by_source = {
-        item.source_artifact_id: item.artifact_id
-        for item in result.structured_result.target_artifacts
-    }
+    target_by_source: dict[str, list[str]] = {}
+    for item in result.structured_result.target_artifacts:
+        target_by_source.setdefault(item.source_artifact_id, []).append(item.artifact_id)
     actual = {
         item.obligation_id: item.target_artifact_ids
         for item in result.structured_result.translation_mappings
     }
+    target_components = {
+        item.artifact_id: {
+            condition["sourceComponentId"]
+            for condition in json.loads(item.content).get("conditions", [])
+            if "sourceComponentId" in condition
+        }
+        for item in result.structured_result.target_artifacts
+    }
+    obligations = {
+        item["obligation_id"]: set(
+            _coverage_component_ids(item["coverage_ref"], semantics)
+        )
+        for item in semantics["obligations"]
+    }
 
     assert actual == {
-        obligation_id: [target_by_source[source_id] for source_id in source_ids]
+        obligation_id: list(
+            dict.fromkeys(
+                target_id
+                for source_id in source_ids
+                for target_id in target_by_source[source_id]
+                if not target_components[target_id]
+                or bool(target_components[target_id] & obligations[obligation_id])
+            )
+        )
         for obligation_id, source_ids in source_mappings.items()
     }
     assert len(actual) == 6

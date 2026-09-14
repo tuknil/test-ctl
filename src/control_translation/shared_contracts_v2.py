@@ -1021,6 +1021,7 @@ class VerifiedSharedContractV2:
     verification: PreTranslationVerification
     accounting: CoverageAccounting
     vulnerability_id: str
+    profile_id: str
 
 
 def verify_four_result_join(
@@ -1106,6 +1107,7 @@ def verify_four_result_join(
         verification,
         accounting,
         next(iter(present), "unknown"),
+        expected_profile_id,
     )
 
 
@@ -1197,6 +1199,7 @@ class WafTranslationPlan:
     translation_mappings: tuple[TranslationMapping, ...]
     discriminator_description: str
     pattern_summary: str
+    primary_candidate_content: str
 
 
 _CARRIER_CONDITION_TYPES = {
@@ -1211,7 +1214,7 @@ _CARRIER_CONDITION_TYPES = {
 _CARRIERS_REQUIRING_SELECTOR = frozenset({"header", "cookie"})
 
 
-def _target_artifact_id(source_artifact_id: str) -> str:
+def _target_artifact_id(source_artifact_id: str, suffix: str | None = None) -> str:
     safe = "".join(
         character if character.isalnum() or character in "-_." else "-"
         for character in source_artifact_id
@@ -1220,23 +1223,199 @@ def _target_artifact_id(source_artifact_id: str) -> str:
         raise SharedContractV2Error(
             "cannot-express", "source artifact identity cannot map to a target identity"
         )
-    return f"akamai-{safe}"
+    target = f"akamai-{safe}"
+    if suffix:
+        clean_suffix = "".join(
+            character if character.isalnum() or character in "-_." else "-"
+            for character in suffix
+        ).strip("-")
+        if not clean_suffix:
+            raise SharedContractV2Error(
+                "cannot-express", "target artifact suffix is invalid"
+            )
+        target += f"-{clean_suffix}"
+    return target
 
 
 def _strict_object(raw: bytes, *, artifact_id: str) -> dict[str, Any]:
     return strict_json_bytes(raw, context=f"DG artifact {artifact_id}")
 
 
+def _component_condition(
+    rule: dict[str, Any], *, source_artifact_id: str, seen_rule_ids: set[str]
+) -> tuple[dict[str, Any], tuple[str, str, str]]:
+    rule_id = rule.get("rule_id")
+    carrier = rule.get("carrier")
+    name = rule.get("name")
+    component_id = rule.get("component_id")
+    pattern = rule.get("pattern")
+    flags = rule.get("flags")
+    transformations = rule.get("transformations")
+    if (
+        not isinstance(rule_id, str)
+        or not rule_id
+        or rule_id in seen_rule_ids
+        or carrier not in _CARRIER_CONDITION_TYPES
+        or not isinstance(name, str)
+        or (carrier in _CARRIERS_REQUIRING_SELECTOR and not name)
+        or not isinstance(component_id, str)
+        or not component_id
+        or not isinstance(pattern, str)
+        or not pattern
+        or not isinstance(flags, list)
+        or any(flag not in {"i"} for flag in flags)
+        or not isinstance(transformations, list)
+        or any(not isinstance(item, str) or not item for item in transformations)
+    ):
+        raise SharedContractV2Error(
+            "cannot-express",
+            f"DG rule in {source_artifact_id} cannot map without semantic loss",
+        )
+    seen_rule_ids.add(rule_id)
+    condition: dict[str, Any] = {
+        "type": _CARRIER_CONDITION_TYPES[carrier],
+        "positiveMatch": True,
+        "valueCase": "i" not in flags,
+        "valueWildcard": False,
+        "value": [pattern],
+        "matchOperator": "regex",
+        "sourceRuleId": rule_id,
+        "sourceComponentId": component_id,
+        "sourceCarrier": carrier,
+        "sourceSelector": name,
+        "transformations": transformations,
+    }
+    if carrier == "header":
+        condition["header"] = name
+    elif carrier in {"query", "body"} and name:
+        condition["parameter"] = name
+    elif carrier == "cookie":
+        condition["cookieName"] = name
+    return condition, (carrier, name, component_id)
+
+
+def _source_input_route(item: dict[str, Any]) -> dict[str, str] | None:
+    value = item.get("input")
+    if not isinstance(value, dict):
+        return None
+    modality = value.get("modality")
+    method = value.get("method")
+    if modality == "http-request-template":
+        path_key = value.get("path_key")
+        if isinstance(method, str) and method and isinstance(path_key, str) and path_key:
+            return {"kind": "opaque-path-key", "method": method, "path_key": path_key}
+    elif modality == "http-request":
+        path = value.get("path")
+        if isinstance(method, str) and method and isinstance(path, str) and path:
+            route = {"kind": "rendered-http-route", "method": method, "path": path}
+            for key in ("scheme", "authority"):
+                member = value.get(key)
+                if isinstance(member, str) and member:
+                    route[key] = member
+            return route
+    return None
+
+
+def _profile_routes(profile_id: str) -> Mapping[str, Mapping[str, str]]:
+    if profile_id == LEGACY_CT_PROFILE_ID:
+        return {
+            "inventory-item-detail": {
+                "scheme": "https",
+                "authority": "approved-mc-target.internal",
+                "path": "/inventory/items/42",
+            }
+        }
+    if profile_id != CT_PROFILE_ID:
+        raise SharedContractV2Error("cannot-express", "unapproved route profile")
+    raw = (BV_PROFILE_ROOT / "mc-http-route-profile-v2.json").read_bytes()
+    if (
+        len(raw) != MC_PROFILE_BYTE_LENGTH
+        or "sha256:" + hashlib_sha256(raw).hexdigest() != MC_PROFILE_FILE_DIGEST
+    ):
+        raise SharedContractV2Error(
+            "mc-profile-integrity-failed", "embedded route profile bytes differ"
+        )
+    profile = strict_json_bytes(raw, context="waf-standard@2 profile")
+    if (
+        profile.get("profile_id") != CT_PROFILE_ID
+        or profile.get("resolver_id") != MC_RESOLVER_ID
+        or digest(profile) != MC_RESOLVER_PROFILE_DIGEST
+        or not isinstance(profile.get("routes"), dict)
+    ):
+        raise SharedContractV2Error(
+            "mc-profile-integrity-failed", "embedded route profile identity differs"
+        )
+    return profile["routes"]
+
+
+def _resolved_route_conditions(
+    route: dict[str, Any], *, profile_id: str, alternative_id: str
+) -> list[dict[str, Any]]:
+    if route.get("kind") == "opaque-path-key":
+        path_key = route.get("path_key")
+        target = _profile_routes(profile_id).get(path_key)
+        if not isinstance(target, Mapping):
+            raise SharedContractV2Error(
+                "cannot-express", f"route alternative {alternative_id} uses an unknown path_key"
+            )
+        path = target.get("path")
+    elif route.get("kind") == "rendered-http-route":
+        path = route.get("path")
+    else:
+        raise SharedContractV2Error(
+            "cannot-express", f"route alternative {alternative_id} has an unknown route kind"
+        )
+    method = route.get("method")
+    if not isinstance(path, str) or not path or not isinstance(method, str) or not method:
+        raise SharedContractV2Error(
+            "cannot-express", f"route alternative {alternative_id} is incomplete"
+        )
+    return [
+        {
+            "type": "pathMatch",
+            "positiveMatch": True,
+            "valueCase": True,
+            "valueWildcard": False,
+            "value": [path],
+            "matchOperator": "exact",
+            "sourceRoute": route,
+        },
+        {
+            "type": "requestMethodMatch",
+            "positiveMatch": True,
+            "valueCase": True,
+            "valueWildcard": False,
+            "value": [method],
+            "matchOperator": "exact",
+            "sourceRoute": route,
+        },
+    ]
+
+
 def _translate_rule_document(
-    document: dict[str, Any], *, source_artifact_id: str
-) -> tuple[dict[str, Any], list[tuple[str, str, str]]]:
+    document: dict[str, Any],
+    *,
+    source_artifact_id: str,
+    semantics: dict[str, Any],
+    profile_id: str,
+) -> tuple[list[tuple[str, dict[str, Any]]], list[tuple[str, str, str]]]:
     rules = document.get("rules")
     if not isinstance(rules, list) or not rules:
         raise SharedContractV2Error(
             "cannot-express",
             f"DG artifact {source_artifact_id} has no expressible WAF rules",
         )
-    conditions: list[dict[str, Any]] = []
+    if document.get("placement_mode") != "route-bound-v1":
+        raise SharedContractV2Error(
+            "cannot-express", f"DG artifact {source_artifact_id} lacks route-bound placement"
+        )
+    route_alternatives = document.get("route_bound_alternatives")
+    coverage_alternatives = document.get("coverage_alternatives")
+    if not isinstance(route_alternatives, list) or not route_alternatives or not isinstance(coverage_alternatives, list):
+        raise SharedContractV2Error(
+            "cannot-express", f"DG artifact {source_artifact_id} lacks route-bound alternatives"
+        )
+    rules_by_component: dict[str, dict[str, Any]] = {}
     carrier_keys: list[tuple[str, str, str]] = []
     rule_ids: set[str] = set()
     for rule in rules:
@@ -1244,76 +1423,85 @@ def _translate_rule_document(
             raise SharedContractV2Error(
                 "cannot-express", f"DG artifact {source_artifact_id} has a malformed rule"
             )
-        rule_id = rule.get("rule_id")
-        carrier = rule.get("carrier")
-        name = rule.get("name")
         component_id = rule.get("component_id")
-        pattern = rule.get("pattern")
-        flags = rule.get("flags")
-        transformations = rule.get("transformations")
-        if (
-            not isinstance(rule_id, str)
-            or not rule_id
-            or rule_id in rule_ids
-            or carrier not in _CARRIER_CONDITION_TYPES
-            or not isinstance(name, str)
-            or (carrier in _CARRIERS_REQUIRING_SELECTOR and not name)
-            or not isinstance(component_id, str)
-            or not component_id
-            or not isinstance(pattern, str)
-            or not pattern
-            or not isinstance(flags, list)
-            or any(flag not in {"i"} for flag in flags)
-            or not isinstance(transformations, list)
-            or any(not isinstance(item, str) or not item for item in transformations)
-        ):
+        if not isinstance(component_id, str) or not component_id or component_id in rules_by_component:
             raise SharedContractV2Error(
                 "cannot-express",
                 f"DG rule in {source_artifact_id} cannot map without semantic loss",
             )
-        rule_ids.add(rule_id)
-        carrier_key = (carrier, name, component_id)
+        condition, carrier_key = _component_condition(
+            rule, source_artifact_id=source_artifact_id, seen_rule_ids=rule_ids
+        )
         if carrier_key in carrier_keys:
             raise SharedContractV2Error(
                 "cannot-express",
                 f"DG artifact {source_artifact_id} repeats carrier binding {carrier}/{name}",
             )
         carrier_keys.append(carrier_key)
-        condition: dict[str, Any] = {
-            "type": _CARRIER_CONDITION_TYPES[carrier],
-            "positiveMatch": True,
-            "valueCase": "i" not in flags,
-            "valueWildcard": False,
-            "value": [pattern],
-            "matchOperator": "regex",
-            "sourceRuleId": rule_id,
-            "sourceComponentId": component_id,
-            "sourceCarrier": carrier,
-            "sourceSelector": name,
-            "transformations": transformations,
-        }
-        if carrier == "header":
-            condition["header"] = name
-        elif carrier in {"query", "body"} and name:
-            condition["parameter"] = name
-        elif carrier == "cookie":
-            condition["cookieName"] = name
-        conditions.append(condition)
-    return (
-        {
-            "name": f"janus-{document.get('rule_set_id', source_artifact_id)}",
-            "description": "Complete deterministic translation of a verified DG WAF rule artifact.",
-            "operation": "OR",
-            "conditions": conditions,
-            "sourceArtifactId": source_artifact_id,
-            "sourceRuleSetId": document.get("rule_set_id"),
-            "sourceAction": document.get("action"),
-            "fastLoopNegativeMaterials": document.get(
-                "fast_loop_negative_materials", []
-            ),
-        },
-        carrier_keys,
-    )
+        rules_by_component[component_id] = condition
+    semantic_inputs = _index(semantics["test_inputs"], "input_id", "semantics-inputs-invalid")
+    semantic_components = _index(semantics["components"], "component_id", "components-invalid")
+    coverage_keys = {canonical_bytes(item) for item in coverage_alternatives}
+    represented_coverage: set[bytes] = set()
+    translated: list[tuple[str, dict[str, Any]]] = []
+    seen_alternatives: set[str] = set()
+    for bound in route_alternatives:
+        if not isinstance(bound, dict):
+            raise SharedContractV2Error("cannot-express", "DG route alternative is malformed")
+        alternative_id = bound.get("alternative_id")
+        component_ids = bound.get("component_ids")
+        route = bound.get("route")
+        component_bindings = bound.get("component_bindings")
+        if (
+            not isinstance(alternative_id, str)
+            or not alternative_id
+            or alternative_id in seen_alternatives
+            or not isinstance(component_ids, list)
+            or not component_ids
+            or canonical_bytes(component_ids) not in coverage_keys
+            or not isinstance(route, dict)
+            or not isinstance(component_bindings, list)
+        ):
+            raise SharedContractV2Error("cannot-express", "DG route alternative differs from coverage")
+        seen_alternatives.add(alternative_id)
+        represented_coverage.add(canonical_bytes(component_ids))
+        bindings = _index(component_bindings, "component_id", "route-component-bindings-invalid")
+        if set(bindings) != set(component_ids):
+            raise SharedContractV2Error("cannot-express", "DG route component binding is incomplete")
+        for component_id in component_ids:
+            component = semantic_components.get(component_id)
+            if component is None or component_id not in rules_by_component:
+                raise SharedContractV2Error("cannot-express", "DG route alternative references an unknown component")
+            expected_refs = [
+                ref
+                for ref in component["input_refs"]
+                if ref.get("id") in semantic_inputs
+                and _source_input_route(semantic_inputs[ref["id"]]) == route
+            ]
+            if bindings[component_id].get("input_refs") != expected_refs or not expected_refs:
+                raise SharedContractV2Error("cannot-express", "DG route binding differs from authenticated CG inputs")
+        conditions = _resolved_route_conditions(
+            route, profile_id=profile_id, alternative_id=alternative_id
+        ) + [deepcopy(rules_by_component[component_id]) for component_id in component_ids]
+        translated.append(
+            (
+                alternative_id,
+                {
+                    "name": f"janus-{document.get('rule_set_id', source_artifact_id)}-{len(translated)}",
+                    "description": "One route-bound Boolean alternative from a verified DG WAF rule set.",
+                    "operation": "AND",
+                    "conditions": conditions,
+                    "sourceArtifactId": source_artifact_id,
+                    "sourceRuleSetId": document.get("rule_set_id"),
+                    "sourceAlternativeId": alternative_id,
+                    "sourceAction": document.get("action"),
+                    "fastLoopNegativeMaterials": document.get("fast_loop_negative_materials", []),
+                },
+            )
+        )
+    if represented_coverage != coverage_keys:
+        raise SharedContractV2Error("cannot-express", "DG route alternatives do not cover every Boolean alternative")
+    return translated, carrier_keys
 
 
 def _translate_carrier_document(
@@ -1389,7 +1577,8 @@ def build_waf_translation_plan(
     source_artifacts = _index(
         candidate["artifacts"], "artifact_id", "candidate-artifacts-invalid"
     )
-    source_to_target: dict[str, str] = {}
+    source_to_target: dict[str, list[str]] = {}
+    target_components: dict[str, set[str]] = {}
     target_artifacts: list[TargetTranslationArtifact] = []
     rule_documents: list[dict[str, Any]] = []
     rule_carriers: set[tuple[str, str, str]] = set()
@@ -1400,60 +1589,91 @@ def build_waf_translation_plan(
             verified.artifact_contents[source_id], artifact_id=source_id
         )
         if "rules" in document:
-            translated, carriers = _translate_rule_document(
-                document, source_artifact_id=source_id
+            translated_rules, carriers = _translate_rule_document(
+                document,
+                source_artifact_id=source_id,
+                semantics=verified.semantics,
+                profile_id=verified.profile_id,
             )
-            artifact_type = "akamai-waf-rule"
-            rule_documents.append(translated)
             rule_carriers.update(carriers)
+            source_to_target[source_id] = []
+            for alternative_id, translated in translated_rules:
+                content = canonical_bytes(translated).decode("utf-8")
+                target_id = _target_artifact_id(source_id, alternative_id)
+                source_to_target[source_id].append(target_id)
+                target_components[target_id] = {
+                    condition["sourceComponentId"]
+                    for condition in translated["conditions"]
+                    if "sourceComponentId" in condition
+                }
+                rule_documents.append(translated)
+                target_artifacts.append(
+                    TargetTranslationArtifact(
+                        artifact_id=target_id,
+                        source_artifact_id=source_id,
+                        role=source["role"],
+                        kind=source["kind"],
+                        order=len(target_artifacts),
+                        artifact_type="akamai-waf-rule",
+                        content=content,
+                        content_hash="sha256:"
+                        + hashlib_sha256(content.encode()).hexdigest(),
+                    )
+                )
         elif "carrier_bindings" in document:
             translated, carriers = _translate_carrier_document(
                 document, source_artifact_id=source_id
             )
-            artifact_type = "akamai-waf-carrier-configuration"
             binding_carriers.update(carriers)
+            content = canonical_bytes(translated).decode("utf-8")
+            target_id = _target_artifact_id(source_id)
+            source_to_target[source_id] = [target_id]
+            target_artifacts.append(
+                TargetTranslationArtifact(
+                    artifact_id=target_id,
+                    source_artifact_id=source_id,
+                    role=source["role"],
+                    kind=source["kind"],
+                    order=len(target_artifacts),
+                    artifact_type="akamai-waf-carrier-configuration",
+                    content=content,
+                    content_hash="sha256:"
+                    + hashlib_sha256(content.encode()).hexdigest(),
+                )
+            )
         else:
             raise SharedContractV2Error(
                 "cannot-express",
                 f"DG artifact {source_id} has no lossless Akamai mapping",
             )
-        content = canonical_bytes(translated).decode("utf-8")
-        target_id = _target_artifact_id(source_id)
-        source_to_target[source_id] = target_id
-        target_artifacts.append(
-            TargetTranslationArtifact(
-                artifact_id=target_id,
-                source_artifact_id=source_id,
-                role=source["role"],
-                kind=source["kind"],
-                order=source["order"],
-                artifact_type=artifact_type,
-                content=content,
-                content_hash="sha256:" + hashlib_sha256(content.encode()).hexdigest(),
-            )
-        )
     if not rule_documents or binding_carriers != rule_carriers:
         raise SharedContractV2Error(
             "cannot-express",
             "complete DG carrier bindings do not exactly match executable WAF rule carriers",
         )
-    combined_conditions = [
-        condition
-        for document in rule_documents
-        for condition in document["conditions"]
-    ]
-    proposal_content = (
-        rule_documents[0]
-        if len(rule_documents) == 1
-        else {
-            "name": f"janus-{candidate['candidate_id']}",
+    from control_translation.adapters.akamai_waf import AkamaiWafAdapter
+
+    syntax_adapter = AkamaiWafAdapter()
+    for index, rule_document in enumerate(rule_documents):
+        syntax = syntax_adapter.validate_syntax(
+            canonical_bytes(rule_document).decode("utf-8")
+        )
+        if not syntax.valid:
+            raise SharedContractV2Error(
+                "cannot-express",
+                f"translated Akamai rule {index} is invalid: {'; '.join(syntax.errors)}",
+            )
+    proposal_content = rule_documents[0]
+    primary_candidate_content = canonical_bytes(
+        {
+            "configurationType": "akamai-custom-rule-set",
+            "combinationOperation": "OR",
             "description": candidate["intent"],
-            "operation": "OR",
-            "conditions": combined_conditions,
+            "rules": rule_documents,
             "sourceCandidateId": candidate["candidate_id"],
             "sourceArtifactIds": list(source_to_target),
         }
-    )
+    ).decode("utf-8")
     proposal = TranslationProposal(
         candidate_content=canonical_bytes(proposal_content).decode("utf-8"),
         translation_label="exact",
@@ -1473,17 +1693,23 @@ def build_waf_translation_plan(
                 "cannot-express",
                 f"DG directive {directive['directive_id']} does not map to an emitted artifact",
             )
-        translated_directives.append(
-            TargetTranslationDirective(
-                directive_id=f"akamai-{directive['directive_id']}",
-                source_directive_id=directive["directive_id"],
-                target_artifact_id=source_to_target[source_id],
-                kind=directive["kind"],
-                value=directive["value"],
-                required=directive["required"],
+        for index, target_id in enumerate(source_to_target[source_id]):
+            translated_directives.append(
+                TargetTranslationDirective(
+                    directive_id=f"akamai-{directive['directive_id']}-{index}",
+                    source_directive_id=directive["directive_id"],
+                    target_artifact_id=target_id,
+                    kind=directive["kind"],
+                    value=directive["value"],
+                    required=directive["required"],
+                )
             )
-        )
     mappings: list[TranslationMapping] = []
+    obligations = _index(
+        verified.semantics["obligations"],
+        "obligation_id",
+        "obligations-invalid",
+    )
     for mapping in candidate["obligation_mappings"]:
         source_ids = _ref_ids(
             mapping["artifact_refs"],
@@ -1500,10 +1726,30 @@ def build_waf_translation_plan(
             code="obligation-directives-invalid",
             allow_empty=True,
         )
+        required_components = set(
+            _coverage_component_ids(
+                obligations[mapping["obligation_id"]]["coverage_ref"],
+                verified.semantics,
+            )
+        )
+        mapped_target_ids = list(
+            dict.fromkeys(
+                target_id
+                for item in source_ids
+                for target_id in source_to_target[item]
+                if target_id not in target_components
+                or bool(target_components[target_id] & required_components)
+            )
+        )
+        if not mapped_target_ids:
+            raise SharedContractV2Error(
+                "cannot-express",
+                f"obligation {mapping['obligation_id']} has no applicable target alternative",
+            )
         mappings.append(
             TranslationMapping(
                 obligation_id=mapping["obligation_id"],
-                target_artifact_ids=[source_to_target[item] for item in source_ids],
+                target_artifact_ids=mapped_target_ids,
             )
         )
     required_ids = {
@@ -1530,4 +1776,5 @@ def build_waf_translation_plan(
                 "source_artifact_ids": list(source_to_target),
             }
         ).decode("utf-8"),
+        primary_candidate_content=primary_candidate_content,
     )

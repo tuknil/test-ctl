@@ -654,8 +654,45 @@ def invoke_shared_contract_v2(
         "accounting": verified.accounting,
     }
     if result.terminal_state is TerminalState.TRANSLATED:
+        primary = result.structured_result.primary_candidate
+        if primary is None:
+            raise SharedContractV2Error(
+                "cannot-express", "translated shared-v2 result has no primary candidate"
+            )
+        primary_content = plan.primary_candidate_content
+        primary_digest = sha256(primary_content.encode("utf-8")).hexdigest()
+        primary = primary.model_copy(
+            update={
+                "candidate_id": (
+                    f"control-candidate:{verified.vulnerability_id}:akamai-waf:"
+                    f"{primary_digest[:16]}"
+                ),
+                "candidate_artifact": primary.candidate_artifact.model_copy(
+                    update={
+                        "artifact_type": "akamai-waf-rule-set",
+                        "content_ref": primary_content,
+                        "content_hash": f"sha256:{primary_digest}",
+                    }
+                ),
+                "implements_discriminator": primary.implements_discriminator.model_copy(
+                    update={
+                        "translation": "exact",
+                        "justification": (
+                            "Every authenticated route-bound Boolean alternative is "
+                            "emitted as an AND rule; the atomic rule set combines "
+                            "alternatives with OR."
+                        ),
+                    }
+                ),
+            }
+        )
         update.update(
             {
+                "primary_candidate": primary,
+                "prose_summary": (
+                    "Translated the complete verified route-bound WAF grammar into "
+                    "an atomic Akamai custom-rule set."
+                ),
                 "target_artifacts": list(plan.target_artifacts),
                 "translated_directives": list(plan.translated_directives),
                 "translation_mappings": list(plan.translation_mappings),

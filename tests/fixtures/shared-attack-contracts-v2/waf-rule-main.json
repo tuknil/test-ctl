@@ -1,6 +1,59 @@
 {
   "rule_set_id": "janus-42-main",
   "action": "block",
+  "placement_mode": "route-bound-v1",
+  "coverage_alternatives": [
+    ["component-url", "component-query"],
+    ["component-url", "component-header"],
+    ["component-url", "component-cookie"]
+  ],
+  "route_bound_alternatives": [
+    {
+      "alternative_id": "fixture-route-query",
+      "component_ids": ["component-url", "component-query"],
+      "component_bindings": [
+        {
+          "component_id": "component-url",
+          "input_refs": [{"kind": "test-input", "scope": "ams-composite-42", "id": "input-query"}]
+        },
+        {
+          "component_id": "component-query",
+          "input_refs": [{"kind": "test-input", "scope": "ams-composite-42", "id": "input-query"}]
+        }
+      ],
+      "route": {"kind": "rendered-http-route", "method": "GET", "scheme": "https", "authority": "app.example.test", "path": "/api/v1/items/42"}
+    },
+    {
+      "alternative_id": "fixture-route-header",
+      "component_ids": ["component-url", "component-header"],
+      "component_bindings": [
+        {
+          "component_id": "component-url",
+          "input_refs": [{"kind": "test-input", "scope": "ams-composite-42", "id": "input-query"}]
+        },
+        {
+          "component_id": "component-header",
+          "input_refs": [{"kind": "test-input", "scope": "ams-composite-42", "id": "input-header"}]
+        }
+      ],
+      "route": {"kind": "rendered-http-route", "method": "GET", "scheme": "https", "authority": "app.example.test", "path": "/api/v1/items/42"}
+    },
+    {
+      "alternative_id": "fixture-route-cookie",
+      "component_ids": ["component-url", "component-cookie"],
+      "component_bindings": [
+        {
+          "component_id": "component-url",
+          "input_refs": [{"kind": "test-input", "scope": "ams-composite-42", "id": "input-query"}]
+        },
+        {
+          "component_id": "component-cookie",
+          "input_refs": [{"kind": "test-input", "scope": "ams-composite-42", "id": "input-cookie"}]
+        }
+      ],
+      "route": {"kind": "rendered-http-route", "method": "GET", "scheme": "https", "authority": "app.example.test", "path": "/api/v1/items/42"}
+    }
+  ],
   "fast_loop_negative_materials": [
     {
       "uri": "benign-request.http",
