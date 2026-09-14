@@ -361,7 +361,10 @@ def _coverage_members(ref: dict[str, Any], semantics: dict[str, Any]) -> set[str
 def _validate_cg(cg: dict[str, Any], catalog: OfflineSchemaCatalog) -> dict[str, Any]:
     if cg.get("contract_id") != "check-generation@2.1" or not cg.get("result_id"):
         raise SharedContractV2Error("cg-identity-invalid", "expected final check-generation@2.1 result")
-    if cg.get("digest_profile") != "rfc8785-sha256-exclude-content_digest-v1" or cg.get("content_digest") != digest_without(cg, "content_digest"):
+    if ("content_digest" in cg or "digest_profile" in cg) and (
+        cg.get("digest_profile") != "rfc8785-sha256-exclude-content_digest-v1"
+        or cg.get("content_digest") != digest_without(cg, "content_digest")
+    ):
         raise SharedContractV2Error("cg-content-digest-mismatch", "CG final content digest differs")
     semantics = cg.get("attack_match_semantics")
     if not isinstance(semantics, dict):

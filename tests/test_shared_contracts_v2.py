@@ -38,6 +38,7 @@ from control_translation.shared_contracts_v2 import (
     OfflineSchemaCatalog,
     SharedContractV2Error,
     _expected_bv_dimensions,
+    _validate_cg,
     _validate_mc,
     build_waf_translation_plan,
     canonical_bytes,
@@ -1605,6 +1606,15 @@ def test_embedded_fixture_digest_profiles_are_exact() -> None:
     assert bundle["bundle_digest"] == digest(bundle_preimage)
     assert rfc8785.dumps({"b": 1, "a": 2}) == b'{"a":2,"b":1}'
     assert datetime.fromisoformat(CREATED_AT).tzinfo == UTC
+
+
+def test_cg_additive_content_digest_is_optional() -> None:
+    _request, records = _chain()
+    cg = deepcopy(records["check-generation"].result["run_result"])
+    cg.pop("content_digest", None)
+    cg.pop("digest_profile", None)
+    semantics = _validate_cg(cg, OfflineSchemaCatalog())
+    assert semantics["contract_id"] == "attack-match-semantics@2.0"
 
 
 def test_shared_v2_fixture_manifest_is_exact() -> None:
