@@ -11,6 +11,7 @@ import json
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from functools import lru_cache
 from hashlib import sha256 as hashlib_sha256
 from pathlib import Path
@@ -136,6 +137,38 @@ def digest_without(document: dict[str, Any], *fields: str) -> str:
     for field in fields:
         clone.pop(field, None)
     return digest(clone)
+
+
+def _shared_terminal_state_from_cg(value: Any) -> Any:
+    return "no-checkable-signal" if value == "no-checkable-artifact" else value
+
+
+def _same_timestamp(left: Any, right: Any) -> bool:
+    if not isinstance(left, str) or not isinstance(right, str):
+        return False
+    try:
+        def parse(value: str) -> datetime:
+            parsed = datetime.fromisoformat(value)
+            return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+        return parse(left) == parse(right)
+    except ValueError:
+        return False
+
+
+def _same_locator_document(actual: Any, locator: Any) -> bool:
+    if not isinstance(actual, dict):
+        return False
+    expected = locator.model_dump(mode="json", by_alias=True)
+    exact_fields = (
+        "capability", "contract_id", "request_id", "correlation_id", "run_id",
+        "result_id", "terminal_state", "status", "result_ref", "content_sha256",
+        "size_bytes",
+    )
+    if any(actual.get(field) != expected.get(field) for field in exact_fields):
+        return False
+    if actual.get("evidence_refs", []) != expected.get("evidence_refs", []):
+        return False
+    return _same_timestamp(actual.get("created_at"), expected.get("created_at"))
 
 
 class OfflineSchemaCatalog:
@@ -397,7 +430,13 @@ def _validate_cg(cg: dict[str, Any], catalog: OfflineSchemaCatalog) -> dict[str,
     for member_id, member in members.items():
         outer = outer_members[member_id]
         declared = membership[member_id]
-        if any(member.get(key) != outer.get(key) for key in ("signal_id", "affected_artifact_id", "terminal_state")) or any(member.get(key) != declared.get(key) for key in ("signal_id", "affected_artifact_id")):
+        if (
+            member.get("signal_id") != outer.get("signal_id")
+            or member.get("affected_artifact_id") != outer.get("affected_artifact_id")
+            or member.get("terminal_state")
+            != _shared_terminal_state_from_cg(outer.get("terminal_state"))
+            or any(member.get(key) != declared.get(key) for key in ("signal_id", "affected_artifact_id"))
+        ):
             raise SharedContractV2Error("cg-member-identity-mismatch", f"CG member differs: {member_id}")
         refs = _ref_ids(member.get("artifact_refs"), kind="source-artifact", scope=semantics["semantics_id"], known=artifacts, code="source-member-artifacts-invalid", allow_empty=True)
         if set(refs) != set(outer.get("artifact_refs", [])) or bool(refs) != (member["terminal_state"] in {"verified", "signal-produced"}):
@@ -649,7 +688,7 @@ def _validate_mc(
     if not isinstance(provenance, dict) or provenance.get("route_policy") != "shared-attack-contracts-v2" or provenance.get("verification") != "physical-and-logical-sha256-verified":
         raise SharedContractV2Error("mc-chain-provenance-mismatch", "MC chain provenance differs")
     for key, capability in (("check_result", "check-generation"), ("defense_result", "defense-generation")):
-        if provenance.get(key) != locators[capability].model_dump(mode="json", by_alias=True):
+        if not _same_locator_document(provenance.get(key), locators[capability]):
             raise SharedContractV2Error("mc-chain-provenance-mismatch", f"MC {key} differs")
     expected_artifacts = [item["id"] for item in bundle["application_unit"]["artifact_refs"]]
     if mc.get("application_unit") != {"application_unit_id": bundle["application_unit"]["application_unit_id"], "artifact_ids": expected_artifacts, "readback_verified": True}:
@@ -760,10 +799,9 @@ def _expected_bv_dimensions(obligation: dict[str, Any], semantics: dict[str, Any
             if not labels:
                 expected.append({
                     "carrier": carrier,
-                    "transformation": "unsupported:no-approved-dimension",
+                    "transformation": "baseline:identity",
                     "input_id": input_id,
                     "component_id": component_id,
-                    "supported": False,
                 })
             else:
                 expected.extend({
@@ -830,9 +868,17 @@ def _validate_bv(bv: dict[str, Any], semantics: dict[str, Any], attestation: dic
     if not isinstance(bindings, dict):
         raise SharedContractV2Error("bv-chain-provenance-mismatch", "BV input bindings are absent")
     upstreams = bindings.get("shared_contract_locators")
-    expected_upstreams = [locators[name].model_dump(mode="json", by_alias=True) for name in ("check-generation", "defense-generation", "mitigation-check")]
     if (
-        upstreams != expected_upstreams
+        not isinstance(upstreams, list)
+        or len(upstreams) != 3
+        or any(
+            not _same_locator_document(actual, locators[name])
+            for actual, name in zip(
+                upstreams,
+                ("check-generation", "defense-generation", "mitigation-check"),
+                strict=True,
+            )
+        )
         or bindings.get("bypass_profile_id") != profile_id
         or not isinstance(bindings.get("validation_substrate_id"), str)
         or not bindings["validation_substrate_id"]
@@ -956,9 +1002,8 @@ def verify_four_result_join(
     dg = documents["defense-generation"]
     if dg.get("capability") != "defense-generation" or dg.get("contract_id") != "defense-generation-result@1.0" or dg.get("terminal_state") != "candidate-produced" or dg.get("status") != "completed":
         raise SharedContractV2Error("dg-identity-invalid", "DG identity or state differs")
-    cg_locator_document = locators["check-generation"].model_dump(mode="json", by_alias=True)
     cg_bindings = [item for item in dg.get("upstream_result_refs", []) if isinstance(item, dict) and item.get("capability") == "check-generation"]
-    if cg_bindings != [cg_locator_document]:
+    if len(cg_bindings) != 1 or not _same_locator_document(cg_bindings[0], locators["check-generation"]):
         raise SharedContractV2Error("dg-cg-lineage-mismatch", "DG does not bind exact CG locator")
     bundle = dg.get("candidate_bundle")
     if not isinstance(bundle, dict):

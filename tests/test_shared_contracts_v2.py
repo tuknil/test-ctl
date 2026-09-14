@@ -38,6 +38,7 @@ from control_translation.shared_contracts_v2 import (
     OfflineSchemaCatalog,
     SharedContractV2Error,
     _expected_bv_dimensions,
+    _shared_terminal_state_from_cg,
     _validate_cg,
     _validate_mc,
     build_waf_translation_plan,
@@ -1615,6 +1616,11 @@ def test_cg_additive_content_digest_is_optional() -> None:
     cg.pop("digest_profile", None)
     semantics = _validate_cg(cg, OfflineSchemaCatalog())
     assert semantics["contract_id"] == "attack-match-semantics@2.0"
+
+
+def test_cg_outer_terminal_state_normalizes_to_shared_vocabulary() -> None:
+    assert _shared_terminal_state_from_cg("no-checkable-artifact") == "no-checkable-signal"
+    assert _shared_terminal_state_from_cg("signal-produced") == "signal-produced"
 
 
 def test_shared_v2_fixture_manifest_is_exact() -> None:

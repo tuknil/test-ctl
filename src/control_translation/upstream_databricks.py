@@ -1078,6 +1078,9 @@ def _check_generation_logical_bytes(
     ):
         raise UpstreamResolutionError("Check Generation temporal context is invalid")
     upstream = upstreams[0]
+    evidence_refs = [*inherited, *new]
+    if any(not isinstance(value, str) or not value.strip() for value in evidence_refs):
+        raise UpstreamResolutionError("Check Generation evidence references are invalid")
     logical = {
         "capability": "check-generation",
         "contract_id": "check-generation-result@1.0",
@@ -1088,7 +1091,7 @@ def _check_generation_logical_bytes(
         "terminal_state": locator.terminal_state,
         "status": locator.status,
         "upstream_result_refs": upstreams,
-        "evidence_refs": list(dict.fromkeys([*inherited, *new])),
+        "evidence_refs": sorted({value.strip() for value in evidence_refs}),
         "subject_record_revision_id": upstream.get("subject_record_revision_id"),
         "characterization_revision_id": upstream.get("characterization_revision_id"),
         "run_result": run_result,
