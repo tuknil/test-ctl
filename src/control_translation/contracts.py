@@ -792,7 +792,7 @@ class SharedContractV2UpstreamInput(StrictRequestModel):
     def validate_authenticated_locator(self) -> SharedContractV2UpstreamInput:
         expected = {
             "check-generation": (
-                "check-generation-result@1.0",
+                "check-generation@2.1",
                 "completed",
                 "check-generation-result:",
                 "check_generation",

@@ -188,7 +188,7 @@ def _chain(*, current_profiles: bool = False) -> tuple[SharedContractV2InvokeReq
     }
     cg_locator = _locator(
         "check-generation",
-        contract_id="check-generation-result@1.0",
+        contract_id="check-generation@2.1",
         state="completed",
         run_id=cg_run_id,
         result_id=cg_result_id,
