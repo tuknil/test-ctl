@@ -4,4 +4,16 @@
 apps:
   control-translation:
     service_directory: .
+# The demo UI is now a second deployable built from Dockerfile.ui. Registering
+# it here is NOT enabled yet: the schema for a second app that shares a service
+# directory with a non-default Dockerfile has to be confirmed against
+# ATT-IDP/revup-workflows@v5 before turning it on, and an unsupported key would
+# break the pipeline for the API too. Proposed entry:
+#
+#  control-translation-ui:
+#    service_directory: .
+#    dockerfile: Dockerfile.ui
+#
+# Until then build and push the UI image with:
+#   docker build -f Dockerfile.ui -t control-translation-ui:<tag> .
 trunk_name: main

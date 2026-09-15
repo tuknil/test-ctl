@@ -4,7 +4,7 @@
 
 ## What to show in the demo
 
-1. Open the demo UI: `http://127.0.0.1:8000/`.
+1. Open the demo UI: `http://127.0.0.1:8080/`. The UI is its own service; the capability API runs separately on `:8000`.
 2. Point out **Inference runtime** at the top.
    - **Live LLM enabled** means AT&T Inference creates the first candidate.
    - **Fixture mode** means local, repeatable templates create the first candidate.

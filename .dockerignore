@@ -17,3 +17,6 @@ data/
 *.db-shm
 *.db-wal
 README.md
+
+# The Go build stage needs go-api/ but not its golden fixtures.
+go-api/testdata/

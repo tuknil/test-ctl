@@ -1,3 +1,4 @@
+# Capability API service. The demo UI is a separate image; see Dockerfile.ui.
 ARG BASE_IMAGE=artifact.it.att.com/astra-secure-container-catalog/python:3.12
 FROM ${BASE_IMAGE} AS base
 
@@ -20,9 +21,6 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=secret,id=pip_conf,required=false \
     if [ -s /run/secrets/pip_conf ]; then export PIP_CONFIG_FILE=/run/secrets/pip_conf; fi && \
     pip install --no-cache-dir .
-
-# Static assets are served by FastAPI and contain no runtime secrets.
-COPY ui ./ui
 
 RUN mkdir -p /app/data && chown -R app:app /app
 
