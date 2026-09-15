@@ -83,44 +83,66 @@ class AkamaiWafAdapter:
 
     def validate_syntax(self, candidate_content: str) -> SyntaxValidationResult:
         try:
-            rule = json.loads(candidate_content)
+            document = json.loads(candidate_content)
         except json.JSONDecodeError as exc:
             return SyntaxValidationResult(
                 valid=False,
                 errors=[f"Candidate is not valid JSON: {exc}"],
             )
 
-        if not isinstance(rule, dict):
+        if not isinstance(document, dict):
             return SyntaxValidationResult(
                 valid=False,
                 errors=["Akamai custom rule must be a JSON object."],
             )
 
-        errors: list[str] = []
-        forbidden = _FORBIDDEN_ACTION_KEYS.intersection(rule.keys())
-        if forbidden:
-            errors.append(
-                "Custom rule body must not embed an action "
-                f"({', '.join(sorted(forbidden))}); the action is assigned "
-                "separately on the security policy."
-            )
-
-        if rule.get("operation") not in ("AND", "OR"):
-            errors.append("Field 'operation' must be 'AND' or 'OR'.")
-
-        conditions = rule.get("conditions")
-        if not isinstance(conditions, list) or not conditions:
-            errors.append("Field 'conditions' must be a non-empty array.")
-        else:
-            for index, condition in enumerate(conditions):
-                errors.extend(self._condition_errors(index, condition))
+        rules, wrapper_errors = self._rules(document)
+        errors = list(wrapper_errors)
+        for rule_index, rule in enumerate(rules):
+            prefix = f"rules[{rule_index}]." if len(rules) > 1 or "rules" in document else ""
+            errors.extend(self._rule_errors(rule, prefix=prefix))
 
         if errors:
             return SyntaxValidationResult(valid=False, errors=errors)
         return SyntaxValidationResult(valid=True)
 
-    def _condition_errors(self, index: int, condition: object) -> list[str]:
-        prefix = f"conditions[{index}]"
+    def _rules(self, document: dict[str, object]) -> tuple[list[dict], list[str]]:
+        if "rules" not in document:
+            return [document], []
+        if set(document) != {"rules"}:
+            return [], ["Akamai rule-set wrapper may contain only 'rules'."]
+        values = document["rules"]
+        if not isinstance(values, list) or not values:
+            return [], ["Field 'rules' must be a non-empty array."]
+        if any(not isinstance(rule, dict) for rule in values):
+            return [], ["Every rules[] member must be an object."]
+        return values, []
+
+    def _rule_errors(self, rule: dict, *, prefix: str = "") -> list[str]:
+        errors: list[str] = []
+        forbidden = _FORBIDDEN_ACTION_KEYS.intersection(rule.keys())
+        if forbidden:
+            errors.append(
+                f"{prefix}Custom rule body must not embed an action "
+                f"({', '.join(sorted(forbidden))}); the action is assigned "
+                "separately on the security policy."
+            )
+
+        if rule.get("operation") not in ("AND", "OR"):
+            errors.append(f"{prefix}Field 'operation' must be 'AND' or 'OR'.")
+
+        conditions = rule.get("conditions")
+        if not isinstance(conditions, list) or not conditions:
+            errors.append(f"{prefix}Field 'conditions' must be a non-empty array.")
+        else:
+            for index, condition in enumerate(conditions):
+                errors.extend(self._condition_errors(index, condition, prefix=prefix))
+        return errors
+
+    def _condition_errors(
+        self, index: int, condition: object, *, prefix: str = ""
+    ) -> list[str]:
+        prefix = f"{prefix}conditions[{index}]"
         if not isinstance(condition, dict):
             return [f"{prefix} must be an object."]
         errors: list[str] = []
@@ -172,13 +194,19 @@ class AkamaiWafAdapter:
         if snapshot is None:
             return []
         try:
-            rule = json.loads(candidate_content)
+            document = json.loads(candidate_content)
         except json.JSONDecodeError:
+            return []
+        if not isinstance(document, dict):
+            return []
+        rules, errors = self._rules(document)
+        if errors:
             return []
         condition_types = {
             c.get("type")
+            for rule in rules
             for c in rule.get("conditions", [])
-            if isinstance(c, dict)
+            if isinstance(rule.get("conditions"), list) and isinstance(c, dict)
         }
         conflicts: list[str] = []
         for summary in snapshot.existing_rule_summaries:

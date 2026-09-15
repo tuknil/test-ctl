@@ -37,6 +37,7 @@ from control_translation.contracts import (
     TargetTranslationArtifact,
     TargetTranslationDirective,
     TranslationMapping,
+    shared_waf_primary_artifact_id,
 )
 from control_translation.policy_reader.base import PolicySnapshot
 from control_translation.upstream import (
@@ -1214,29 +1215,6 @@ _CARRIER_CONDITION_TYPES = {
 _CARRIERS_REQUIRING_SELECTOR = frozenset({"header", "cookie"})
 
 
-def _target_artifact_id(source_artifact_id: str, suffix: str | None = None) -> str:
-    safe = "".join(
-        character if character.isalnum() or character in "-_." else "-"
-        for character in source_artifact_id
-    ).strip("-")
-    if not safe:
-        raise SharedContractV2Error(
-            "cannot-express", "source artifact identity cannot map to a target identity"
-        )
-    target = f"akamai-{safe}"
-    if suffix:
-        clean_suffix = "".join(
-            character if character.isalnum() or character in "-_." else "-"
-            for character in suffix
-        ).strip("-")
-        if not clean_suffix:
-            raise SharedContractV2Error(
-                "cannot-express", "target artifact suffix is invalid"
-            )
-        target += f"-{clean_suffix}"
-    return target
-
-
 def _strict_object(raw: bytes, *, artifact_id: str) -> dict[str, Any]:
     return strict_json_bytes(raw, context=f"DG artifact {artifact_id}")
 
@@ -1435,7 +1413,8 @@ def _translate_rule_document(
         if carrier_key in carrier_keys:
             raise SharedContractV2Error(
                 "cannot-express",
-                f"DG artifact {source_artifact_id} repeats carrier binding {carrier}/{name}",
+                f"DG artifact {source_artifact_id} repeats carrier binding "
+                f"{carrier_key[0]}/{carrier_key[1]}",
             )
         carrier_keys.append(carrier_key)
         rules_by_component[component_id] = condition
@@ -1578,8 +1557,6 @@ def build_waf_translation_plan(
         candidate["artifacts"], "artifact_id", "candidate-artifacts-invalid"
     )
     source_to_target: dict[str, list[str]] = {}
-    target_components: dict[str, set[str]] = {}
-    target_artifacts: list[TargetTranslationArtifact] = []
     rule_documents: list[dict[str, Any]] = []
     rule_carriers: set[tuple[str, str, str]] = set()
     binding_carriers: set[tuple[str, str, str]] = set()
@@ -1596,51 +1573,13 @@ def build_waf_translation_plan(
                 profile_id=verified.profile_id,
             )
             rule_carriers.update(carriers)
-            source_to_target[source_id] = []
-            for alternative_id, translated in translated_rules:
-                content = canonical_bytes(translated).decode("utf-8")
-                target_id = _target_artifact_id(source_id, alternative_id)
-                source_to_target[source_id].append(target_id)
-                target_components[target_id] = {
-                    condition["sourceComponentId"]
-                    for condition in translated["conditions"]
-                    if "sourceComponentId" in condition
-                }
+            for _, translated in translated_rules:
                 rule_documents.append(translated)
-                target_artifacts.append(
-                    TargetTranslationArtifact(
-                        artifact_id=target_id,
-                        source_artifact_id=source_id,
-                        role=source["role"],
-                        kind=source["kind"],
-                        order=len(target_artifacts),
-                        artifact_type="akamai-waf-rule",
-                        content=content,
-                        content_hash="sha256:"
-                        + hashlib_sha256(content.encode()).hexdigest(),
-                    )
-                )
         elif "carrier_bindings" in document:
-            translated, carriers = _translate_carrier_document(
+            _, carriers = _translate_carrier_document(
                 document, source_artifact_id=source_id
             )
             binding_carriers.update(carriers)
-            content = canonical_bytes(translated).decode("utf-8")
-            target_id = _target_artifact_id(source_id)
-            source_to_target[source_id] = [target_id]
-            target_artifacts.append(
-                TargetTranslationArtifact(
-                    artifact_id=target_id,
-                    source_artifact_id=source_id,
-                    role=source["role"],
-                    kind=source["kind"],
-                    order=len(target_artifacts),
-                    artifact_type="akamai-waf-carrier-configuration",
-                    content=content,
-                    content_hash="sha256:"
-                    + hashlib_sha256(content.encode()).hexdigest(),
-                )
-            )
         else:
             raise SharedContractV2Error(
                 "cannot-express",
@@ -1663,19 +1602,18 @@ def build_waf_translation_plan(
                 "cannot-express",
                 f"translated Akamai rule {index} is invalid: {'; '.join(syntax.errors)}",
             )
-    proposal_content = rule_documents[0]
-    primary_candidate_content = canonical_bytes(
-        {
-            "configurationType": "akamai-custom-rule-set",
-            "combinationOperation": "OR",
-            "description": candidate["intent"],
-            "rules": rule_documents,
-            "sourceCandidateId": candidate["candidate_id"],
-            "sourceArtifactIds": list(source_to_target),
-        }
-    ).decode("utf-8")
+    primary_candidate_content = canonical_bytes({"rules": rule_documents}).decode(
+        "utf-8"
+    )
+    primary_content_hash = "sha256:" + hashlib_sha256(
+        primary_candidate_content.encode()
+    ).hexdigest()
+    primary_artifact_id = shared_waf_primary_artifact_id(primary_content_hash)
+    source_to_target = {
+        source_id: [primary_artifact_id] for source_id in source_artifacts
+    }
     proposal = TranslationProposal(
-        candidate_content=canonical_bytes(proposal_content).decode("utf-8"),
+        candidate_content=primary_candidate_content,
         translation_label="exact",
         justification="Every verified DG WAF rule, carrier, selector, and pattern is preserved.",
         translation_assumptions=[],
@@ -1705,11 +1643,6 @@ def build_waf_translation_plan(
                 )
             )
     mappings: list[TranslationMapping] = []
-    obligations = _index(
-        verified.semantics["obligations"],
-        "obligation_id",
-        "obligations-invalid",
-    )
     for mapping in candidate["obligation_mappings"]:
         source_ids = _ref_ids(
             mapping["artifact_refs"],
@@ -1726,19 +1659,11 @@ def build_waf_translation_plan(
             code="obligation-directives-invalid",
             allow_empty=True,
         )
-        required_components = set(
-            _coverage_component_ids(
-                obligations[mapping["obligation_id"]]["coverage_ref"],
-                verified.semantics,
-            )
-        )
         mapped_target_ids = list(
             dict.fromkeys(
                 target_id
                 for item in source_ids
                 for target_id in source_to_target[item]
-                if target_id not in target_components
-                or bool(target_components[target_id] & required_components)
             )
         )
         if not mapped_target_ids:
@@ -1764,7 +1689,7 @@ def build_waf_translation_plan(
     ]
     return WafTranslationPlan(
         doer=_FixedTranslationDoer(proposal),
-        target_artifacts=tuple(target_artifacts),
+        target_artifacts=(),
         translated_directives=tuple(translated_directives),
         translation_mappings=tuple(mappings),
         discriminator_description="WAF regex matching across query, header, cookie, path, body, and method carriers: "

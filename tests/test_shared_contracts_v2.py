@@ -38,12 +38,10 @@ from control_translation.shared_contracts_v2 import (
     OfflineSchemaCatalog,
     SharedContractV2Error,
     _component_condition,
-    _coverage_component_ids,
     _expected_bv_dimensions,
     _resolved_route_conditions,
     _shared_terminal_state_from_cg,
     _translate_carrier_document,
-    _translate_rule_document,
     _validate_cg,
     _validate_mc,
     build_waf_translation_plan,
@@ -835,7 +833,7 @@ def test_bv_ddb49be_root_dimensions_match_cg_semantics_and_profile() -> None:
     verify_four_result_join(records, _locators(request))
 
 
-def test_valid_full_v2_invocation_preserves_all_artifacts_and_carriers() -> None:
+def test_valid_full_v2_invocation_emits_one_rules_only_artifact() -> None:
     request, _, result = _translated_v2()
     structured = result.structured_result
 
@@ -847,28 +845,26 @@ def test_valid_full_v2_invocation_preserves_all_artifacts_and_carriers() -> None
     assert structured.pre_translation_verification.required_obligation_count == 6
     assert structured.accounting is not None
     assert structured.accounting.unaccounted_required_obligation_count == 0
-    assert [item.source_artifact_id for item in structured.target_artifacts] == [
-        "artifact-main",
-        "artifact-main",
-        "artifact-main",
-        "artifact-carriers",
-    ]
+    assert structured.target_artifacts == []
     assert structured.primary_candidate is not None
     assert structured.primary_candidate.candidate_artifact.artifact_type == "akamai-waf-rule-set"
     primary = json.loads(structured.primary_candidate.candidate_artifact.content_ref)
-    assert primary["combinationOperation"] == "OR"
+    assert set(primary) == {"rules"}
     assert len(primary["rules"]) == 3
     assert [item.source_directive_id for item in structured.translated_directives] == [
         "directive-main-placement",
-        "directive-main-placement",
-        "directive-main-placement",
         "directive-carrier-attach",
     ]
-    mains = [
-        json.loads(item.content)
-        for item in structured.target_artifacts
-        if item.artifact_type == "akamai-waf-rule"
-    ]
+    primary_artifact_id = (
+        "akamai-rule-set-"
+        + structured.primary_candidate.candidate_artifact.content_hash.removeprefix(
+            "sha256:"
+        )
+    )
+    assert {
+        item.target_artifact_id for item in structured.translated_directives
+    } == {primary_artifact_id}
+    mains = primary["rules"]
     assert all(main["operation"] == "AND" for main in mains)
     assert all(main["conditions"][0]["type"] == "pathMatch" for main in mains)
     assert all(main["conditions"][0]["value"] == ["/api/v1/items/42"] for main in mains)
@@ -895,49 +891,20 @@ def test_valid_full_v2_invocation_preserves_all_artifacts_and_carriers() -> None
 
 
 def test_translation_mappings_are_exact_and_bind_emitted_target_ids() -> None:
-    _, records, result = _translated_v2()
-    semantics = records["check-generation"].result["run_result"]["attack_match_semantics"]
-    source_mappings = {
-        item["obligation_id"]: [ref["id"] for ref in item["artifact_refs"]]
-        for item in records["defense-generation"].result["candidate_bundle"][
-            "primary_candidate"
-        ]["obligation_mappings"]
-    }
-    target_by_source: dict[str, list[str]] = {}
-    for item in result.structured_result.target_artifacts:
-        target_by_source.setdefault(item.source_artifact_id, []).append(item.artifact_id)
+    _, _, result = _translated_v2()
+    assert result.structured_result.primary_candidate is not None
+    primary_artifact_id = (
+        "akamai-rule-set-"
+        + result.structured_result.primary_candidate.candidate_artifact.content_hash.removeprefix(
+            "sha256:"
+        )
+    )
     actual = {
         item.obligation_id: item.target_artifact_ids
         for item in result.structured_result.translation_mappings
     }
-    target_components = {
-        item.artifact_id: {
-            condition["sourceComponentId"]
-            for condition in json.loads(item.content).get("conditions", [])
-            if "sourceComponentId" in condition
-        }
-        for item in result.structured_result.target_artifacts
-    }
-    obligations = {
-        item["obligation_id"]: set(
-            _coverage_component_ids(item["coverage_ref"], semantics)
-        )
-        for item in semantics["obligations"]
-    }
-
-    assert actual == {
-        obligation_id: list(
-            dict.fromkeys(
-                target_id
-                for source_id in source_ids
-                for target_id in target_by_source[source_id]
-                if not target_components[target_id]
-                or bool(target_components[target_id] & obligations[obligation_id])
-            )
-        )
-        for obligation_id, source_ids in source_mappings.items()
-    }
     assert len(actual) == 6
+    assert {tuple(value) for value in actual.values()} == {(primary_artifact_id,)}
 
 
 def test_unmappable_required_artifact_returns_typed_cannot_express_without_partial_output(
@@ -1022,12 +989,7 @@ def test_v2_result_persistence_readback_and_canonical_integrity(tmp_path) -> Non
     assert canonical["primary_candidate"]["artifact_type"] == "akamai-waf-rule-set"
     primary_id = canonical["primary_candidate"]["artifact_id"]
     assert canonical["artifacts"][primary_id]["role"] == "primary"
-    assert len(canonical["artifacts"]) == len(result.structured_result.target_artifacts) + 1
-    assert all(
-        artifact["role"] == "supporting"
-        for artifact_id, artifact in canonical["artifacts"].items()
-        if artifact_id != primary_id
-    )
+    assert len(canonical["artifacts"]) == 1
     content = canonical_result_bytes(canonical)
     assert canonical["content_sha256"] == f"sha256:{sha256(content).hexdigest()}"
     assert canonical["size_bytes"] == len(content)

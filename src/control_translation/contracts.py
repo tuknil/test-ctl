@@ -176,6 +176,13 @@ class CandidateArtifact(BaseModel):
     emitted_as: str = "control-specific-mitigation-candidate"
 
 
+def shared_waf_primary_artifact_id(content_hash: str) -> str:
+    digest = content_hash.removeprefix("sha256:")
+    if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+        raise ValueError("shared WAF primary artifact hash is invalid")
+    return "akamai-rule-set-" + digest
+
+
 class CandidateSyntaxProfile(BaseModel):
     id: str
     family: str
@@ -526,11 +533,21 @@ class ControlTranslationResult(BaseModel):
             if any((self.target_artifacts, self.translated_directives, self.translation_mappings)):
                 raise ValueError("non-translated v2 result cannot contain partial output")
             return self
-        artifact_ids = [item.artifact_id for item in self.target_artifacts]
+        child_artifact_ids = [item.artifact_id for item in self.target_artifacts]
+        primary_artifact_id = (
+            shared_waf_primary_artifact_id(
+                self.primary_candidate.candidate_artifact.content_hash
+            )
+            if self.primary_candidate is not None
+            else None
+        )
+        artifact_ids = [*child_artifact_ids]
+        if primary_artifact_id is not None:
+            artifact_ids.append(primary_artifact_id)
         obligation_ids = [item.obligation_id for item in self.translation_mappings]
         if (
-            not artifact_ids
-            or len(artifact_ids) != len(set(artifact_ids))
+            primary_artifact_id is None
+            or len(child_artifact_ids) != len(set(child_artifact_ids))
             or len(obligation_ids) != count
             or len(obligation_ids) != len(set(obligation_ids))
             or any(

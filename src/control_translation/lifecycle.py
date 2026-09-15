@@ -22,6 +22,7 @@ from control_translation.contracts import (
     ResultEnvelope,
     RunFailure,
     SharedContractV2InvokeRequest,
+    shared_waf_primary_artifact_id,
 )
 from control_translation.persistence import (
     LifecycleRun,
@@ -451,8 +452,8 @@ def build_lifecycle_result(
         aggregate_artifact_id = None
         if candidate is not None:
             aggregate = candidate.candidate_artifact
-            aggregate_artifact_id = (
-                "akamai-rule-set-" + aggregate.content_hash.removeprefix("sha256:")
+            aggregate_artifact_id = shared_waf_primary_artifact_id(
+                aggregate.content_hash
             )
             artifacts[aggregate_artifact_id] = {
                 "source_artifact_id": structured.subject.proven_pattern_id,
@@ -483,28 +484,27 @@ def build_lifecycle_result(
                 "content_hash": item.content_hash,
                 "emitted_as": "control-specific-mitigation-candidate",
             }
-        if candidate is not None:
-            if aggregate_artifact_id is not None:
-                aggregate = candidate.candidate_artifact
-                primary_candidate = {
-                    "candidate_id": candidate.candidate_id,
-                    "target_control_class": candidate.target_control_class,
-                    "target_technology": candidate.target_technology,
-                    "target_policy_context_id": candidate.target_policy_context_id,
-                    "artifact_id": aggregate_artifact_id,
-                    "artifact_type": aggregate.artifact_type,
-                    "content_ref": _canonical_artifact_ref(
-                        settings=settings,
-                        result_id=result.result_id,
-                        artifact_id=aggregate_artifact_id,
-                    ),
-                    "content_hash": aggregate.content_hash,
-                    "candidate_metadata": (
-                        candidate.candidate_metadata.model_dump(mode="json")
-                        if candidate.candidate_metadata is not None
-                        else None
-                    ),
-                }
+        if candidate is not None and aggregate_artifact_id is not None:
+            aggregate = candidate.candidate_artifact
+            primary_candidate = {
+                "candidate_id": candidate.candidate_id,
+                "target_control_class": candidate.target_control_class,
+                "target_technology": candidate.target_technology,
+                "target_policy_context_id": candidate.target_policy_context_id,
+                "artifact_id": aggregate_artifact_id,
+                "artifact_type": aggregate.artifact_type,
+                "content_ref": _canonical_artifact_ref(
+                    settings=settings,
+                    result_id=result.result_id,
+                    artifact_id=aggregate_artifact_id,
+                ),
+                "content_hash": aggregate.content_hash,
+                "candidate_metadata": (
+                    candidate.candidate_metadata.model_dump(mode="json")
+                    if candidate.candidate_metadata is not None
+                    else None
+                ),
+            }
     elif candidate is not None:
         artifact = candidate.candidate_artifact
         content_ref = _canonical_artifact_ref(
