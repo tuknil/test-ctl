@@ -146,8 +146,15 @@ def translate(
                 cancellation_signal=cancellation_signal,
             )
             check_cancelled(cancellation_signal)
-            proposal_from_doer = True
-            proposal_source = "translation-doer"
+            deterministic_source = getattr(
+                doer, "deterministic_proposal_source", None
+            )
+            proposal_from_doer = not isinstance(deterministic_source, str)
+            proposal_source = (
+                deterministic_source
+                if isinstance(deterministic_source, str)
+                else "translation-doer"
+            )
         except OperationCancelled:
             raise
         except Exception as exc:  # provider/model failure

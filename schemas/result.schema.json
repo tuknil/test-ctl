@@ -231,6 +231,75 @@
         "prose_summary": {
           "title": "Prose Summary",
           "type": "string"
+        },
+        "shared_contract_version": {
+          "anyOf": [
+            {
+              "const": "2.0",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Shared Contract Version"
+        },
+        "profile_id": {
+          "anyOf": [
+            {
+              "enum": ["waf-standard@1", "waf-standard@2"],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Profile Id"
+        },
+        "pre_translation_verification": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PreTranslationVerification"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "accounting": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CoverageAccounting"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "target_artifacts": {
+          "items": {
+            "$ref": "#/$defs/TargetTranslationArtifact"
+          },
+          "title": "Target Artifacts",
+          "type": "array"
+        },
+        "translated_directives": {
+          "items": {
+            "$ref": "#/$defs/TargetTranslationDirective"
+          },
+          "title": "Translated Directives",
+          "type": "array"
+        },
+        "translation_mappings": {
+          "items": {
+            "$ref": "#/$defs/TranslationMapping"
+          },
+          "title": "Translation Mappings",
+          "type": "array"
         }
       },
       "required": [
@@ -242,6 +311,75 @@
         "prose_summary"
       ],
       "title": "ControlTranslationResult",
+      "type": "object"
+    },
+    "CoverageAccounting": {
+      "description": "Exact required-work accounting shared by the v2 verifier.",
+      "properties": {
+        "required_obligation_count": {
+          "minimum": 0,
+          "title": "Required Obligation Count",
+          "type": "integer"
+        },
+        "accounted_obligation_count": {
+          "minimum": 0,
+          "title": "Accounted Obligation Count",
+          "type": "integer"
+        },
+        "unaccounted_required_obligation_count": {
+          "minimum": 0,
+          "title": "Unaccounted Required Obligation Count",
+          "type": "integer"
+        },
+        "source_member_count": {
+          "minimum": 0,
+          "title": "Source Member Count",
+          "type": "integer"
+        },
+        "represented_source_member_count": {
+          "minimum": 0,
+          "title": "Represented Source Member Count",
+          "type": "integer"
+        },
+        "unsupported_source_member_count": {
+          "minimum": 0,
+          "title": "Unsupported Source Member Count",
+          "type": "integer"
+        },
+        "unaccounted_source_member_count": {
+          "minimum": 0,
+          "title": "Unaccounted Source Member Count",
+          "type": "integer"
+        },
+        "required_work_item_count": {
+          "minimum": 0,
+          "title": "Required Work Item Count",
+          "type": "integer"
+        },
+        "disposed_work_item_count": {
+          "minimum": 0,
+          "title": "Disposed Work Item Count",
+          "type": "integer"
+        },
+        "unaccounted_required_work_item_count": {
+          "minimum": 0,
+          "title": "Unaccounted Required Work Item Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "required_obligation_count",
+        "accounted_obligation_count",
+        "unaccounted_required_obligation_count",
+        "source_member_count",
+        "represented_source_member_count",
+        "unsupported_source_member_count",
+        "unaccounted_source_member_count",
+        "required_work_item_count",
+        "disposed_work_item_count",
+        "unaccounted_required_work_item_count"
+      ],
+      "title": "CoverageAccounting",
       "type": "object"
     },
     "DatabricksResultReference": {
@@ -443,6 +581,81 @@
         }
       },
       "title": "Placement",
+      "type": "object"
+    },
+    "PreTranslationVerification": {
+      "description": "Evidence that the complete four-result join passed before translation.",
+      "properties": {
+        "all_required_obligations_have_dg_mapping": {
+          "const": true,
+          "title": "All Required Obligations Have Dg Mapping",
+          "type": "boolean"
+        },
+        "all_required_obligations_have_mc_disposition": {
+          "const": true,
+          "title": "All Required Obligations Have Mc Disposition",
+          "type": "boolean"
+        },
+        "all_required_obligations_have_required_bv_disposition": {
+          "const": true,
+          "title": "All Required Obligations Have Required Bv Disposition",
+          "type": "boolean"
+        },
+        "candidate_attestation_verified": {
+          "const": true,
+          "title": "Candidate Attestation Verified",
+          "type": "boolean"
+        },
+        "source_member_partition_complete": {
+          "const": true,
+          "title": "Source Member Partition Complete",
+          "type": "boolean"
+        },
+        "lineage_verified": {
+          "const": true,
+          "title": "Lineage Verified",
+          "type": "boolean"
+        },
+        "required_obligation_count": {
+          "minimum": 1,
+          "title": "Required Obligation Count",
+          "type": "integer"
+        },
+        "dg_mapping_count": {
+          "minimum": 1,
+          "title": "Dg Mapping Count",
+          "type": "integer"
+        },
+        "mc_disposition_count": {
+          "minimum": 1,
+          "title": "Mc Disposition Count",
+          "type": "integer"
+        },
+        "bv_campaign_count": {
+          "minimum": 1,
+          "title": "Bv Campaign Count",
+          "type": "integer"
+        },
+        "unaccounted_required_obligation_count": {
+          "const": 0,
+          "title": "Unaccounted Required Obligation Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "all_required_obligations_have_dg_mapping",
+        "all_required_obligations_have_mc_disposition",
+        "all_required_obligations_have_required_bv_disposition",
+        "candidate_attestation_verified",
+        "source_member_partition_complete",
+        "lineage_verified",
+        "required_obligation_count",
+        "dg_mapping_count",
+        "mc_disposition_count",
+        "bv_campaign_count",
+        "unaccounted_required_obligation_count"
+      ],
+      "title": "PreTranslationVerification",
       "type": "object"
     },
     "PrimaryCandidate": {
@@ -653,6 +866,107 @@
       "title": "Subject",
       "type": "object"
     },
+    "TargetTranslationArtifact": {
+      "description": "One actual target artifact emitted from one DG cooperating artifact.",
+      "properties": {
+        "artifact_id": {
+          "minLength": 1,
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "source_artifact_id": {
+          "minLength": 1,
+          "title": "Source Artifact Id",
+          "type": "string"
+        },
+        "role": {
+          "minLength": 1,
+          "title": "Role",
+          "type": "string"
+        },
+        "kind": {
+          "minLength": 1,
+          "title": "Kind",
+          "type": "string"
+        },
+        "order": {
+          "minimum": 0,
+          "title": "Order",
+          "type": "integer"
+        },
+        "artifact_type": {
+          "minLength": 1,
+          "title": "Artifact Type",
+          "type": "string"
+        },
+        "content": {
+          "minLength": 1,
+          "title": "Content",
+          "type": "string"
+        },
+        "content_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Content Hash",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "source_artifact_id",
+        "role",
+        "kind",
+        "order",
+        "artifact_type",
+        "content",
+        "content_hash"
+      ],
+      "title": "TargetTranslationArtifact",
+      "type": "object"
+    },
+    "TargetTranslationDirective": {
+      "description": "A required DG directive bound to its emitted target artifact.",
+      "properties": {
+        "directive_id": {
+          "minLength": 1,
+          "title": "Directive Id",
+          "type": "string"
+        },
+        "source_directive_id": {
+          "minLength": 1,
+          "title": "Source Directive Id",
+          "type": "string"
+        },
+        "target_artifact_id": {
+          "minLength": 1,
+          "title": "Target Artifact Id",
+          "type": "string"
+        },
+        "kind": {
+          "minLength": 1,
+          "title": "Kind",
+          "type": "string"
+        },
+        "value": {
+          "minLength": 1,
+          "title": "Value",
+          "type": "string"
+        },
+        "required": {
+          "title": "Required",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "directive_id",
+        "source_directive_id",
+        "target_artifact_id",
+        "kind",
+        "value",
+        "required"
+      ],
+      "title": "TargetTranslationDirective",
+      "type": "object"
+    },
     "TerminalState": {
       "description": "Terminal states the capability may emit for a single invocation.",
       "enum": [
@@ -664,6 +978,30 @@
       ],
       "title": "TerminalState",
       "type": "string"
+    },
+    "TranslationMapping": {
+      "description": "Exact CT disposition for one required CG obligation.",
+      "properties": {
+        "obligation_id": {
+          "minLength": 1,
+          "title": "Obligation Id",
+          "type": "string"
+        },
+        "target_artifact_ids": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Target Artifact Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "obligation_id",
+        "target_artifact_ids"
+      ],
+      "title": "TranslationMapping",
+      "type": "object"
     },
     "UpstreamResultReferences": {
       "additionalProperties": false,

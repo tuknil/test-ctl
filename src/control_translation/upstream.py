@@ -22,12 +22,17 @@ from control_translation.contracts import (
     ProofLoopRoutingMetadata,
     ProofLoopTranslationRequirements,
     ProvenMitigationPattern,
+    SharedContractV2UpstreamInput,
     UpstreamResultReferences,
 )
 
 
 class UpstreamResolutionError(RuntimeError):
     """A referenced record cannot safely be promoted into translation input."""
+
+
+class UpstreamTransportError(RuntimeError):
+    """Upstream infrastructure failed before a record could be resolved."""
 
 
 @dataclass(frozen=True)
@@ -38,6 +43,12 @@ class UpstreamRecord:
     subject_record_revision_id: str | None
     request: dict[str, Any]
     result: dict[str, Any]
+    raw_result: bytes | None = None
+    payload_raw_result: bytes | None = None
+    artifact_raw_results: dict[str, bytes] | None = None
+    authenticated_content: bytes | None = None
+    authenticated_content_sha256: str | None = None
+    authenticated_content_size: int | None = None
 
     @property
     def document(self) -> dict[str, Any]:
@@ -56,7 +67,9 @@ class UpstreamResultResolver(Protocol):
         self,
         reference: DatabricksResultReference,
         *,
-        immutable_locator: OrchestrationUpstreamInput | None = None,
+        immutable_locator: (
+            OrchestrationUpstreamInput | SharedContractV2UpstreamInput | None
+        ) = None,
         cancellation_signal: CancellationSignal | None = None,
     ) -> UpstreamRecord | None: ...
 

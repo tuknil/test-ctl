@@ -42,10 +42,12 @@ from control_translation.contracts import (
     CapabilityRunSubmission,
     ControlTranslationResult,
     DirectBypassValidationResult,
+    InvocationRequest,
     InvokeAPIRequest,
     InvokeRequestEnvelope,
     ResultEnvelope,
     RunListResponse,
+    SharedContractV2InvokeRequest,
 )
 from control_translation.diagnostics import diagnostic_json
 from control_translation.lifecycle import LifecycleWorker
@@ -56,6 +58,7 @@ from control_translation.persistence import (
     create_run_repository,
     normalized_request_digest,
 )
+from control_translation.shared_contracts_v2 import SharedContractV2Error
 from control_translation.terminal import TerminalState
 from control_translation.upstream_databricks import create_upstream_result_resolver
 
@@ -311,6 +314,12 @@ def schema() -> dict[str, Any]:
         "request_model_fields": list(
             InvokeRequestEnvelope.model_fields.keys()
         ),
+        "request_variants": {
+            "legacy": list(InvokeRequestEnvelope.model_fields.keys()),
+            "shared_contract_v2": list(
+                SharedContractV2InvokeRequest.model_fields.keys()
+            ),
+        },
         "response_model_fields": list(ResultEnvelope.model_fields.keys()),
         "terminal_states": [state.value for state in TerminalState],
         "run_mode": settings.run_mode,
@@ -335,47 +344,56 @@ def invoke_endpoint(payload: InvokeAPIRequest) -> ResultEnvelope:
     direct_bypass_result = (
         payload if isinstance(payload, DirectBypassValidationResult) else None
     )
-    envelope = (
+    invocation = (
         capability.normalize_direct_bypass_request(direct_bypass_result)
         if direct_bypass_result is not None
         else payload
     )
-    assert isinstance(envelope, InvokeRequestEnvelope)
-    effective_envelope = envelope.model_copy(
-        update={
-            "request_id": envelope.request_id or str(uuid4()),
-            "correlation_id": envelope.correlation_id or str(uuid4()),
-        }
+    assert isinstance(invocation, (InvokeRequestEnvelope, SharedContractV2InvokeRequest))
+    effective_request = (
+        invocation
+        if isinstance(invocation, SharedContractV2InvokeRequest)
+        else invocation.model_copy(
+            update={
+                "request_id": invocation.request_id or str(uuid4()),
+                "correlation_id": invocation.correlation_id or str(uuid4()),
+            }
+        )
     )
-    request_hash = canonical_request_hash(effective_envelope)
+    request_hash = canonical_request_hash(effective_request)
+    effective_idempotency_key = (
+        effective_request.request_id
+        if isinstance(effective_request, SharedContractV2InvokeRequest)
+        else effective_request.idempotency_key
+    )
     logger.info(
         "Invocation accepted request_id=%s correlation_id=%s "
         "idempotency_key_present=%s request_hash=%s payload=%s",
-        effective_envelope.request_id or "-",
-        effective_envelope.correlation_id or "-",
-        effective_envelope.idempotency_key is not None,
+        effective_request.request_id or "-",
+        effective_request.correlation_id or "-",
+        effective_idempotency_key is not None,
         request_hash,
-        diagnostic_json(effective_envelope),
+        diagnostic_json(effective_request),
     )
 
-    if effective_envelope.idempotency_key is not None:
+    if effective_idempotency_key is not None:
         try:
             existing = _REPOSITORY.get_by_idempotency_key(
-                effective_envelope.idempotency_key
+                effective_idempotency_key
             )
         except PersistenceError as exc:
             raise _storage_unavailable(
                 operation="get-by-idempotency-key",
                 exc=exc,
-                request_id=effective_envelope.request_id,
-                correlation_id=effective_envelope.correlation_id,
+                request_id=effective_request.request_id,
+                correlation_id=effective_request.correlation_id,
             ) from exc
         if existing is not None:
             if existing.request_hash != request_hash:
                 logger.warning(
                     "Invocation idempotency conflict request_id=%s correlation_id=%s",
-                    effective_envelope.request_id or "-",
-                    effective_envelope.correlation_id or "-",
+                    effective_request.request_id or "-",
+                    effective_request.correlation_id or "-",
                 )
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
@@ -386,38 +404,53 @@ def invoke_endpoint(payload: InvokeAPIRequest) -> ResultEnvelope:
 
     started_at = datetime.now(UTC)
     if direct_bypass_result is not None:
+        assert isinstance(effective_request, InvokeRequestEnvelope)
         result_envelope = capability.decline_direct_bypass(
-            effective_envelope,
+            effective_request,
             direct_bypass_result,
             settings=_SETTINGS,
         )
     else:
-        result_envelope = capability.invoke_envelope(
-            effective_envelope,
-            resolver=_UPSTREAM_RESOLVER,
-            settings=_SETTINGS,
-        )
+        try:
+            result_envelope = (
+                capability.invoke_shared_contract_v2(
+                    effective_request,
+                    resolver=_UPSTREAM_RESOLVER,
+                    settings=_SETTINGS,
+                )
+                if isinstance(effective_request, SharedContractV2InvokeRequest)
+                else capability.invoke_envelope(
+                    effective_request,
+                    resolver=_UPSTREAM_RESOLVER,
+                    settings=_SETTINGS,
+                )
+            )
+        except SharedContractV2Error as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={"code": exc.code, "detail": exc.detail, "retryable": False},
+            ) from exc
     _log_invocation_result(result_envelope, source="capability")
     try:
         _REPOSITORY.save_completed_run(
-            effective_envelope,
+            effective_request,
             result_envelope,
             request_hash=request_hash,
             started_at=started_at,
         )
     except PersistenceError as exc:
         # A simultaneous retry may have committed the same idempotency key.
-        if effective_envelope.idempotency_key is not None:
+        if effective_idempotency_key is not None:
             try:
                 existing = _REPOSITORY.get_by_idempotency_key(
-                    effective_envelope.idempotency_key
+                    effective_idempotency_key
                 )
             except PersistenceError as retry_exc:
                 _log_storage_failure(
                     "retry-get-by-idempotency-key",
                     retry_exc,
-                    request_id=effective_envelope.request_id,
-                    correlation_id=effective_envelope.correlation_id,
+                    request_id=effective_request.request_id,
+                    correlation_id=effective_request.correlation_id,
                     result_id=result_envelope.result_id,
                 )
                 existing = None
@@ -427,14 +460,14 @@ def invoke_endpoint(payload: InvokeAPIRequest) -> ResultEnvelope:
         raise _storage_unavailable(
             operation="save-completed-run",
             exc=exc,
-            request_id=effective_envelope.request_id,
-            correlation_id=effective_envelope.correlation_id,
+            request_id=effective_request.request_id,
+            correlation_id=effective_request.correlation_id,
             result_id=result_envelope.result_id,
         ) from exc
     logger.info(
         "Invocation durably persisted request_id=%s correlation_id=%s "
         "run_id=%s result_id=%s backend=%s",
-        effective_envelope.request_id or "-",
+        effective_request.request_id or "-",
         result_envelope.correlation_id or "-",
         result_envelope.run_id,
         result_envelope.result_id,
@@ -464,7 +497,7 @@ def _is_retryable_http_status(http_status: int) -> bool:
     status_code=status.HTTP_202_ACCEPTED,
 )
 def submit_control_translation_run(
-    payload: InvokeRequestEnvelope,
+    payload: InvocationRequest,
     content_type: str = Header(alias="Content-Type"),
     idempotency_key: str = Header(alias="Idempotency-Key", min_length=1),
     correlation_id: str = Header(alias="X-Correlation-ID", min_length=1),
@@ -501,13 +534,16 @@ def submit_control_translation_run(
             "correlation_identity_mismatch",
             "correlation_id and X-Correlation-ID must match.",
         )
-    if payload.idempotency_key not in (None, idempotency_key):
+    if (
+        isinstance(payload, InvokeRequestEnvelope)
+        and payload.idempotency_key not in (None, idempotency_key)
+    ):
         return _lifecycle_error(
             400,
             "request_identity_mismatch",
             "Body idempotency_key must match request_id and Idempotency-Key.",
         )
-    if payload.callback is not None:
+    if isinstance(payload, InvokeRequestEnvelope) and payload.callback is not None:
         return _lifecycle_error(
             400,
             "callback_not_supported",
@@ -537,7 +573,11 @@ def submit_control_translation_run(
                 payload.request_id,
                 payload.correlation_id,
             )
-    effective = payload.model_copy(update={"idempotency_key": idempotency_key})
+    effective = (
+        payload.model_copy(update={"idempotency_key": idempotency_key})
+        if isinstance(payload, InvokeRequestEnvelope)
+        else payload
+    )
     digest = normalized_request_digest(effective)
     try:
         created = _REPOSITORY.create_lifecycle_run(

@@ -9,6 +9,7 @@ import pytest
 from control_translation.contracts import (
     DatabricksResultReference,
     OrchestrationUpstreamInput,
+    SharedContractV2UpstreamInput,
 )
 from control_translation.upstream import UpstreamResolutionError
 from control_translation.upstream_databricks import (
@@ -557,6 +558,39 @@ def test_mitigation_locator_integrity_restores_recursively_reordered_variant(
 
     assert digest == f"sha256:{sha256(expected).hexdigest()}"
     assert size == len(expected)
+
+
+def test_shared_v2_mc_locator_uses_go_producer_integrity_verification(
+    mitigation_locator_variant_fixture,
+):
+    producer, variant, expected = mitigation_locator_variant_fixture
+    reference = DatabricksResultReference.model_validate(producer["result_ref"])
+    locator = SharedContractV2UpstreamInput.model_validate(
+        {
+            "capability": "mitigation-check",
+            "contract_id": producer["contract_id"],
+            "request_id": producer["request_id"],
+            "correlation_id": producer["correlation_id"],
+            "run_id": producer["run_id"],
+            "result_id": producer["result_id"],
+            "terminal_state": producer["terminal_state"],
+            "status": producer["status"],
+            "result_ref": producer["result_ref"],
+            "evidence_refs": producer["evidence_refs"],
+            "content_sha256": producer["content_sha256"],
+            "size_bytes": producer["size_bytes"],
+            "created_at": producer["created_at"],
+        }
+    )
+
+    record = _resolver(
+        [(producer["run_id"], producer["result_id"], json.dumps(variant))]
+    ).fetch(reference, immutable_locator=locator)
+
+    assert record is not None
+    assert record.authenticated_content == expected
+    assert record.authenticated_content_sha256 == producer["content_sha256"]
+    assert record.authenticated_content_size == producer["size_bytes"]
 
 
 def test_files_api_response_reader_closes_stream():

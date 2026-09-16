@@ -1,0 +1,41 @@
+{
+  "illustrative": true,
+  "profile_id": "waf-bypass@3",
+  "resolver_id": "bv-approved-route-adapter",
+  "registry_id": "janus-approved-test-routes",
+  "routes": {
+    "inventory-item-detail": {
+      "scheme": "https",
+      "authority": "approved-bv-target.internal",
+      "path": "/inventory/items/42"
+    },
+    "public/submit.php": {
+      "scheme": "https",
+      "authority": "approved-bv-target.internal",
+      "path": "/public/submit.php"
+    }
+  },
+  "bypass_dimensions": {
+    "query": [
+      [
+        {"step_id":"bv-query-percent-decode-1","order":0,"operation":"decode","direction":"forward","input_stage":"parsed-field","output_stage":"decoded-value","parameters":{"codec":"percent","maximum_input_bytes":4096,"max_output_bytes":4096},"preconditions":["valid percent triplets"],"evidence_refs":[{"kind":"profile","scope":"waf-bypass@3","id":"bv-percent-decode"}],"failure":{"code":"invalid-percent-encoding","behavior":"reject"}}
+      ],
+      [
+        {"step_id":"bv-query-percent-decode-1-of-2","order":0,"operation":"decode","direction":"forward","input_stage":"parsed-field","output_stage":"decoded-value","parameters":{"codec":"percent","maximum_input_bytes":4096,"max_output_bytes":4096},"preconditions":["valid percent triplets"],"evidence_refs":[{"kind":"profile","scope":"waf-bypass@3","id":"bv-percent-decode-twice"}],"failure":{"code":"invalid-percent-encoding","behavior":"reject"}},
+        {"step_id":"bv-query-percent-decode-2-of-2","order":1,"operation":"decode","direction":"forward","input_stage":"decoded-value","output_stage":"normalized-value","parameters":{"codec":"percent","maximum_input_bytes":4096,"max_output_bytes":4096},"preconditions":["valid percent triplets after first decode"],"evidence_refs":[{"kind":"profile","scope":"waf-bypass@3","id":"bv-percent-decode-twice"}],"failure":{"code":"invalid-second-percent-encoding","behavior":"reject"}}
+      ]
+    ],
+    "header": [
+      [
+        {"step_id":"bv-header-percent-decode-1-of-2","order":0,"operation":"decode","direction":"forward","input_stage":"parsed-field","output_stage":"decoded-value","parameters":{"codec":"percent","maximum_input_bytes":4096,"max_output_bytes":4096},"preconditions":["valid percent triplets"],"evidence_refs":[{"kind":"profile","scope":"waf-bypass@3","id":"bv-percent-decode-twice"}],"failure":{"code":"invalid-percent-encoding","behavior":"reject"}},
+        {"step_id":"bv-header-percent-decode-2-of-2","order":1,"operation":"decode","direction":"forward","input_stage":"decoded-value","output_stage":"normalized-value","parameters":{"codec":"percent","maximum_input_bytes":4096,"max_output_bytes":4096},"preconditions":["valid percent triplets after first decode"],"evidence_refs":[{"kind":"profile","scope":"waf-bypass@3","id":"bv-percent-decode-twice"}],"failure":{"code":"invalid-second-percent-encoding","behavior":"reject"}}
+      ]
+    ],
+    "cookie": [
+      [
+        {"step_id":"bv-cookie-percent-decode-1-of-2","order":0,"operation":"decode","direction":"forward","input_stage":"parsed-field","output_stage":"decoded-value","parameters":{"codec":"percent","maximum_input_bytes":4096,"max_output_bytes":4096},"preconditions":["valid percent triplets"],"evidence_refs":[{"kind":"profile","scope":"waf-bypass@3","id":"bv-percent-decode-twice"}],"failure":{"code":"invalid-percent-encoding","behavior":"reject"}},
+        {"step_id":"bv-cookie-percent-decode-2-of-2","order":1,"operation":"decode","direction":"forward","input_stage":"decoded-value","output_stage":"normalized-value","parameters":{"codec":"percent","maximum_input_bytes":4096,"max_output_bytes":4096},"preconditions":["valid percent triplets after first decode"],"evidence_refs":[{"kind":"profile","scope":"waf-bypass@3","id":"bv-percent-decode-twice"}],"failure":{"code":"invalid-second-percent-encoding","behavior":"reject"}}
+      ]
+    ]
+  }
+}

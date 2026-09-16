@@ -17,9 +17,12 @@ from control_translation.config import Settings
 from control_translation.contracts import (
     CanonicalCompletion,
     DatabricksResultReference,
+    InvocationRequest,
     InvokeRequestEnvelope,
     ResultEnvelope,
     RunFailure,
+    SharedContractV2InvokeRequest,
+    shared_waf_primary_artifact_id,
 )
 from control_translation.persistence import (
     LifecycleRun,
@@ -27,6 +30,7 @@ from control_translation.persistence import (
     RunRepository,
     canonical_result_bytes,
 )
+from control_translation.shared_contracts_v2 import SharedContractV2Error
 from control_translation.terminal import TerminalState
 from control_translation.upstream import UpstreamResultResolver
 
@@ -205,15 +209,24 @@ class LifecycleWorker:
                     type(exc).__name__,
                 )
                 return
+            failure = (
+                RunFailure(
+                    code=exc.code,
+                    detail=exc.detail,
+                    retryable=False,
+                )
+                if isinstance(exc, SharedContractV2Error)
+                else RunFailure(
+                    code="translation_execution_failed",
+                    detail=f"Translation execution failed ({type(exc).__name__}).",
+                    retryable=True,
+                )
+            )
             repository.fail_lifecycle_run(
                 run.status.run_id,
                 worker_id=self._worker_id,
                 attempt_number=run.attempt_number,
-                failure=RunFailure(
-                    code="translation_execution_failed",
-                    detail=f"Translation execution failed ({type(exc).__name__}).",
-                    retryable=True,
-                ),
+                failure=failure,
             )
         except PersistenceError:
             logger.exception("Unable to persist lifecycle failure run_id=%s", run.status.run_id)
@@ -252,12 +265,20 @@ class LifecycleWorker:
                 return
             existing = repository.get_run(run.status.run_id)
             if existing is None:
-                generated = capability.invoke_envelope(
-                    run.request,
-                    resolver=self._resolver(),
-                    settings=self._settings,
-                    cancellation_signal=abort_work,
-                )
+                if isinstance(run.request, SharedContractV2InvokeRequest):
+                    generated = capability.invoke_shared_contract_v2(
+                        run.request,
+                        resolver=self._resolver(),
+                        settings=self._settings,
+                        cancellation_signal=abort_work,
+                    )
+                else:
+                    generated = capability.invoke_envelope(
+                        run.request,
+                        resolver=self._resolver(),
+                        settings=self._settings,
+                        cancellation_signal=abort_work,
+                    )
                 result_id = f"control-translation-result:{run.status.run_id}"
                 structured = generated.structured_result.model_copy(
                     update={"result_id": result_id}
@@ -276,6 +297,9 @@ class LifecycleWorker:
                             }
                         ),
                     }
+                )
+                existing = ResultEnvelope.model_validate(
+                    existing.model_dump(mode="json")
                 )
                 if self._abort_if_requested(repository, run, abort_work):
                     return
@@ -400,7 +424,7 @@ class LifecycleWorker:
 
 
 def build_lifecycle_result(
-    result: ResultEnvelope, request: InvokeRequestEnvelope, settings: Settings
+    result: ResultEnvelope, request: InvocationRequest, settings: Settings
 ) -> dict:
     """Project the legacy result into the immutable async result contract."""
     structured = result.structured_result
@@ -424,7 +448,64 @@ def build_lifecycle_result(
     )
     primary_candidate = None
     artifacts: dict[str, dict[str, object]] = {}
-    if candidate is not None:
+    if structured.shared_contract_version is not None:
+        aggregate_artifact_id = None
+        if candidate is not None:
+            aggregate = candidate.candidate_artifact
+            aggregate_artifact_id = shared_waf_primary_artifact_id(
+                aggregate.content_hash
+            )
+            artifacts[aggregate_artifact_id] = {
+                "source_artifact_id": structured.subject.proven_pattern_id,
+                "role": "primary",
+                "kind": "policy-fragment",
+                "order": 0,
+                "artifact_type": aggregate.artifact_type,
+                "media_type": _artifact_media_type(aggregate.content_ref),
+                "content": aggregate.content_ref,
+                "content_hash": aggregate.content_hash,
+                "emitted_as": aggregate.emitted_as,
+                "candidate_metadata": (
+                    candidate.candidate_metadata.model_dump(mode="json")
+                    if candidate.candidate_metadata is not None
+                    else None
+                ),
+            }
+        for item in structured.target_artifacts:
+            artifacts[item.artifact_id] = {
+                "source_artifact_id": item.source_artifact_id,
+                "source_role": item.role,
+                "role": "supporting",
+                "kind": item.kind,
+                "order": item.order + (1 if aggregate_artifact_id is not None else 0),
+                "artifact_type": item.artifact_type,
+                "media_type": _artifact_media_type(item.content),
+                "content": item.content,
+                "content_hash": item.content_hash,
+                "emitted_as": "control-specific-mitigation-candidate",
+            }
+        if candidate is not None and aggregate_artifact_id is not None:
+            aggregate = candidate.candidate_artifact
+            primary_candidate = {
+                "candidate_id": candidate.candidate_id,
+                "target_control_class": candidate.target_control_class,
+                "target_technology": candidate.target_technology,
+                "target_policy_context_id": candidate.target_policy_context_id,
+                "artifact_id": aggregate_artifact_id,
+                "artifact_type": aggregate.artifact_type,
+                "content_ref": _canonical_artifact_ref(
+                    settings=settings,
+                    result_id=result.result_id,
+                    artifact_id=aggregate_artifact_id,
+                ),
+                "content_hash": aggregate.content_hash,
+                "candidate_metadata": (
+                    candidate.candidate_metadata.model_dump(mode="json")
+                    if candidate.candidate_metadata is not None
+                    else None
+                ),
+            }
+    elif candidate is not None:
         artifact = candidate.candidate_artifact
         content_ref = _canonical_artifact_ref(
             settings=settings,
@@ -458,7 +539,11 @@ def build_lifecycle_result(
         }
     payload = {
         "capability": "control-translation",
-        "contract_id": "control-translation-result@1.0",
+        "contract_id": (
+            "control-translation-result@2.0"
+            if structured.shared_contract_version is not None
+            else "control-translation-result@1.0"
+        ),
         "request_id": request.request_id,
         "correlation_id": request.correlation_id,
         "run_id": result.run_id,
@@ -478,51 +563,74 @@ def build_lifecycle_result(
         "artifacts": artifacts,
         "inference": result.inference,
         "provenance": {
-            "upstream_inputs": (
-                [
-                    item.model_dump(mode="json", by_alias=True)
-                    for item in request.upstream_inputs
-                ]
-                if request.upstream_inputs is not None
-                else None
-            ),
+            "upstream_inputs": [
+                item.model_dump(mode="json", by_alias=True)
+                for item in request.upstream_inputs
+            ] if request.upstream_inputs is not None else None,
             "upstream_result_refs": (
                 request.upstream_result_refs.model_dump(mode="json", by_alias=True)
-                if request.upstream_result_refs is not None
+                if isinstance(request, InvokeRequestEnvelope)
+                and request.upstream_result_refs is not None
                 else None
             ),
             "loop_exhausted": (
                 request.routing_metadata.loop_exhausted
-                if request.routing_metadata is not None
+                if isinstance(request, InvokeRequestEnvelope)
+                and request.routing_metadata is not None
                 else None
             ),
             "completed_iterations": (
                 request.routing_metadata.completed_iterations
-                if request.routing_metadata is not None
+                if isinstance(request, InvokeRequestEnvelope)
+                and request.routing_metadata is not None
                 else None
             ),
             "max_iterations": (
                 request.routing_metadata.max_iterations
-                if request.routing_metadata is not None
+                if isinstance(request, InvokeRequestEnvelope)
+                and request.routing_metadata is not None
                 else None
             ),
         },
         "created_at": structured.produced_at.isoformat(),
     }
+    if structured.shared_contract_version is not None:
+        assert structured.pre_translation_verification is not None
+        assert structured.accounting is not None
+        payload.update(
+            {
+                "shared_contract_version": structured.shared_contract_version,
+                "profile_id": structured.profile_id,
+                "pre_translation_verification": structured.pre_translation_verification.model_dump(
+                    mode="json"
+                ),
+                "accounting": structured.accounting.model_dump(mode="json"),
+                "translation_mappings": [
+                    item.model_dump(mode="json")
+                    for item in structured.translation_mappings
+                ],
+                "translated_directives": [
+                    item.model_dump(mode="json")
+                    for item in structured.translated_directives
+                ],
+            }
+        )
     content = canonical_result_bytes(payload)
     payload["content_sha256"] = f"sha256:{sha256(content).hexdigest()}"
     payload["size_bytes"] = len(content)
     return payload
 
 
-def _canonical_artifact_ref(*, settings: Settings, result_id: str) -> str:
+def _canonical_artifact_ref(
+    *, settings: Settings, result_id: str, artifact_id: str = "primary"
+) -> str:
     """Point to artifact bytes inside the immutable canonical Databricks row."""
     encoded_result_id = quote(result_id, safe="")
     return (
         f"databricks://{settings.databricks_catalog}/"
         f"{settings.databricks_schema}/{settings.databricks_results_table}/"
         f"result_json?result_id={encoded_result_id}"
-        "#/artifacts/primary/content"
+        f"#/artifacts/{quote(artifact_id, safe='')}/content"
     )
 
 

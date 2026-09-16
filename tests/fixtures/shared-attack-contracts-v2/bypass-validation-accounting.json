@@ -1,0 +1,99 @@
+{
+  "capability": "bypass-validation",
+  "result_id": "bypass-validation-result:illustrative-42-r2",
+  "profile_id": "waf-standard@1",
+  "source_results": {
+    "attack_match_semantics": "check-generation-complete-result.json",
+    "candidate_bundle": "../examples/waf-atomic-v2.candidate-bundle.json",
+    "mitigation_check": "mitigation-check-accounting.json"
+  },
+  "campaign_results": [
+    {
+      "obligation_id": "obligation-root",
+      "disposition": "no-bypass",
+      "attempted_dimensions": [
+        {
+          "carrier": "query",
+          "transformation": "percent-decode-twice"
+        }
+      ]
+    },
+    {
+      "obligation_id": "obligation-url",
+      "disposition": "no-bypass",
+      "attempted_dimensions": [
+        {
+          "carrier": "query",
+          "transformation": "identity"
+        }
+      ]
+    },
+    {
+      "obligation_id": "obligation-carriers",
+      "disposition": "no-bypass",
+      "attempted_dimensions": [
+        {
+          "carrier": "query",
+          "transformation": "percent-decode-twice"
+        },
+        {
+          "carrier": "header",
+          "transformation": "percent-decode-twice"
+        },
+        {
+          "carrier": "cookie",
+          "transformation": "percent-decode-twice"
+        }
+      ]
+    },
+    {
+      "obligation_id": "obligation-query",
+      "disposition": "no-bypass",
+      "attempted_dimensions": [
+        {
+          "carrier": "query",
+          "transformation": "percent-decode-twice"
+        }
+      ]
+    },
+    {
+      "obligation_id": "obligation-header",
+      "disposition": "no-bypass",
+      "attempted_dimensions": [
+        {
+          "carrier": "header",
+          "transformation": "percent-decode-twice"
+        }
+      ]
+    },
+    {
+      "obligation_id": "obligation-cookie",
+      "disposition": "no-bypass",
+      "attempted_dimensions": [
+        {
+          "carrier": "cookie",
+          "transformation": "percent-decode-twice"
+        }
+      ]
+    }
+  ],
+  "counterexamples": [],
+  "feedback": [
+    {
+      "obligation_id": "obligation-header",
+      "message": "Candidate revision 2 closed the alternate-header bypass observed in revision 1."
+    }
+  ],
+  "accounting": {
+    "required_obligation_count": 6,
+    "accounted_obligation_count": 6,
+    "unaccounted_required_obligation_count": 0,
+    "source_member_count": 9,
+    "represented_source_member_count": 6,
+    "unsupported_source_member_count": 3,
+    "unaccounted_source_member_count": 0,
+    "required_work_item_count": 6,
+    "disposed_work_item_count": 6,
+    "unaccounted_required_work_item_count": 0
+  }
+}

@@ -12,15 +12,16 @@ from threading import Lock
 from time import perf_counter
 from typing import Any, Protocol
 
+from control_translation.callbacks import CallbackMetadata
 from control_translation.contracts import (
     CapabilityRunStatus,
+    InvocationRequest,
     InvokeRequestEnvelope,
     ResultEnvelope,
     RunFailure,
     RunProgress,
     RunSummary,
 )
-from control_translation.callbacks import CallbackMetadata
 from control_translation.persistence.base import (
     CreatedLifecycleRun,
     IdempotencyConflictError,
@@ -28,8 +29,9 @@ from control_translation.persistence.base import (
     LifecycleRun,
     PersistenceError,
     RunSummaryPage,
-    canonical_result_bytes,
     canonical_request_hash,
+    canonical_result_bytes,
+    parse_invocation_request_json,
 )
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9_]+$")
@@ -171,7 +173,7 @@ class DatabricksRunRepository:
 
     def save_completed_run(
         self,
-        request: InvokeRequestEnvelope,
+        request: InvocationRequest,
         result: ResultEnvelope,
         *,
         request_hash: str,
@@ -206,7 +208,11 @@ class DatabricksRunRepository:
             }
             | set(result.provenance)
         )
-        if request.upstream_result_refs is not None:
+        if not isinstance(request, InvokeRequestEnvelope):
+            upstream_result_refs = [
+                item.result_id for item in request.upstream_inputs
+            ]
+        elif request.upstream_result_refs is not None:
             upstream_result_refs = [
                 reference.key
                 for reference in (
@@ -246,7 +252,11 @@ class DatabricksRunRepository:
             contract_id,
             terminal_state,
             status,
-            request.subject_record_revision_id,
+            (
+                request.subject_record_revision_id
+                if isinstance(request, InvokeRequestEnvelope)
+                else None
+            ),
             request_json,
             structured_json,
             completion_json,
@@ -351,7 +361,7 @@ class DatabricksRunRepository:
         if row is None:
             return None
         try:
-            request = InvokeRequestEnvelope.model_validate_json(row[0])
+            request = parse_invocation_request_json(row[0])
         except ValueError as exc:
             raise PersistenceError(
                 "Stored idempotency request failed validation."
@@ -433,7 +443,7 @@ class DatabricksRunRepository:
 
     def create_lifecycle_run(
         self,
-        request: InvokeRequestEnvelope,
+        request: InvocationRequest,
         *,
         idempotency_key: str,
         request_digest: str,
@@ -739,7 +749,7 @@ class DatabricksRunRepository:
         if row is None:
             return None
         try:
-            request = InvokeRequestEnvelope.model_validate_json(row[4])
+            request = parse_invocation_request_json(row[4])
             failure = RunFailure.model_validate_json(row[9]) if row[9] else None
             status = CapabilityRunStatus(
                 request_id=row[1],
@@ -871,7 +881,10 @@ def _canonical_row_state(result: dict) -> tuple[str, str, str]:
     contract_id = result.get("contract_id")
     status = result.get("status")
     terminal_state = result.get("terminal_state")
-    if contract_id != "control-translation-result@1.0":
+    if contract_id not in {
+        "control-translation-result@1.0",
+        "control-translation-result@2.0",
+    }:
         raise PersistenceError("Canonical result contract_id is invalid.")
     if status != "completed":
         raise PersistenceError("Canonical result status must be completed.")

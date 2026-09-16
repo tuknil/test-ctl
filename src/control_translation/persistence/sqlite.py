@@ -16,6 +16,7 @@ from control_translation.callbacks import (
 )
 from control_translation.contracts import (
     CapabilityRunStatus,
+    InvocationRequest,
     InvokeRequestEnvelope,
     ResultEnvelope,
     RunFailure,
@@ -27,9 +28,10 @@ from control_translation.persistence.base import (
     IdempotencyConflictError,
     IdempotencyRecord,
     LifecycleRun,
-    PreparedPublication,
     PersistenceError,
+    PreparedPublication,
     RunSummaryPage,
+    parse_invocation_request_json,
 )
 from control_translation.persistence.migrations import MIGRATIONS
 
@@ -123,7 +125,7 @@ class SQLiteRunRepository:
 
     def save_completed_run(
         self,
-        request: InvokeRequestEnvelope,
+        request: InvocationRequest,
         result: ResultEnvelope,
         *,
         request_hash: str,
@@ -163,7 +165,11 @@ class SQLiteRunRepository:
                         structured.contract_id,
                         request.request_id,
                         result.correlation_id,
-                        request.idempotency_key,
+                        (
+                            request.idempotency_key
+                            if isinstance(request, InvokeRequestEnvelope)
+                            else request.request_id
+                        ),
                         request_hash,
                         result.result_id,
                         result.status,
@@ -385,7 +391,7 @@ class SQLiteRunRepository:
 
     def create_lifecycle_run(
         self,
-        request: InvokeRequestEnvelope,
+        request: InvocationRequest,
         *,
         idempotency_key: str,
         request_digest: str,
@@ -711,7 +717,7 @@ class SQLiteRunRepository:
             return None
         try:
             return PreparedPublication(
-                request=InvokeRequestEnvelope.model_validate_json(row["request_json"]),
+                request=parse_invocation_request_json(row["request_json"]),
                 result_envelope=ResultEnvelope.model_validate_json(
                     row["prepared_result_envelope_json"]
                 ),
@@ -1136,7 +1142,7 @@ def _utc_now() -> str:
 
 def _lifecycle_from_row(row: sqlite3.Row) -> LifecycleRun:
     try:
-        request = InvokeRequestEnvelope.model_validate_json(row["request_json"])
+        request = parse_invocation_request_json(row["request_json"])
         failure = (
             RunFailure.model_validate_json(row["failure_json"])
             if row["failure_json"]

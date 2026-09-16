@@ -8,9 +8,12 @@ from datetime import datetime
 from hashlib import sha256
 from typing import Protocol
 
+from pydantic import TypeAdapter
+
 from control_translation.callbacks import CallbackDelivery, CallbackMetadata
 from control_translation.contracts import (
     CapabilityRunStatus,
+    InvocationRequest,
     InvokeRequestEnvelope,
     ResultEnvelope,
     RunFailure,
@@ -20,6 +23,15 @@ from control_translation.contracts import (
 
 class PersistenceError(RuntimeError):
     """Raised when durable run storage cannot complete an operation."""
+
+
+_INVOCATION_REQUEST_ADAPTER = TypeAdapter(InvocationRequest)
+
+
+def parse_invocation_request_json(value: str) -> InvocationRequest:
+    """Revalidate a persisted request against the additive request union."""
+
+    return _INVOCATION_REQUEST_ADAPTER.validate_json(value)
 
 
 @dataclass(frozen=True)
@@ -47,7 +59,7 @@ class IdempotencyConflictError(PersistenceError):
 class LifecycleRun:
     """Durable worker record with the validated request and public status."""
 
-    request: InvokeRequestEnvelope
+    request: InvocationRequest
     status: CapabilityRunStatus
     request_digest: str
     cancel_requested: bool
@@ -61,7 +73,7 @@ class LifecycleRun:
 class PreparedPublication:
     """Exact immutable payload staged before external publication begins."""
 
-    request: InvokeRequestEnvelope
+    request: InvocationRequest
     result_envelope: ResultEnvelope
     canonical_result: dict
     completion: dict
@@ -78,8 +90,17 @@ class CreatedLifecycleRun:
     created: bool
 
 
-def canonical_request_hash(envelope: InvokeRequestEnvelope) -> str:
+def canonical_request_hash(envelope: InvocationRequest) -> str:
     """Hash semantic request data, excluding transport and retry identifiers."""
+    if not isinstance(envelope, InvokeRequestEnvelope):
+        payload = json.dumps(
+            envelope.model_dump(mode="json", by_alias=True),
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        return sha256(payload.encode("utf-8")).hexdigest()
     payload = envelope.model_dump_json(
         include={
             "input",
@@ -95,7 +116,7 @@ def canonical_request_hash(envelope: InvokeRequestEnvelope) -> str:
     return sha256(payload.encode("utf-8")).hexdigest()
 
 
-def normalized_request_digest(envelope: InvokeRequestEnvelope) -> str:
+def normalized_request_digest(envelope: InvocationRequest) -> str:
     """RFC-style stable SHA-256 over the complete semantic request body."""
     data = envelope.model_dump(
         mode="json",
@@ -139,7 +160,7 @@ class RunRepository(Protocol):
 
     def save_completed_run(
         self,
-        request: InvokeRequestEnvelope,
+        request: InvocationRequest,
         result: ResultEnvelope,
         *,
         request_hash: str,
@@ -157,7 +178,7 @@ class RunRepository(Protocol):
 
     def create_lifecycle_run(
         self,
-        request: InvokeRequestEnvelope,
+        request: InvocationRequest,
         *,
         idempotency_key: str,
         request_digest: str,
