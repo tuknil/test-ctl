@@ -202,15 +202,21 @@ class AkamaiWafAdapter:
         rules, errors = self._rules(document)
         if errors:
             return []
-        condition_types = {
-            c.get("type")
+        candidate_identities = {
+            identity.strip().lower()
             for rule in rules
-            for c in rule.get("conditions", [])
-            if isinstance(rule.get("conditions"), list) and isinstance(c, dict)
+            for identity in (
+                rule.get("name"),
+                rule.get("sourceRuleId"),
+            )
+            if isinstance(identity, str) and identity.strip()
+        }
+        existing_identities = {
+            identity.strip().lower()
+            for identity in snapshot.existing_rule_ids
+            if identity.strip()
         }
         conflicts: list[str] = []
-        for summary in snapshot.existing_rule_summaries:
-            lowered = summary.lower()
-            if "content-type" in lowered and "requestHeaderValueMatch" in condition_types or "query string" in lowered and "uriQueryMatch" in condition_types:
-                conflicts.append(f"Existing rule may overlap: {summary}")
+        for identity in sorted(candidate_identities & existing_identities):
+            conflicts.append(f"Existing rule identity already exists: {identity}")
         return conflicts

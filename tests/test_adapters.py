@@ -69,6 +69,64 @@ def test_akamai_adapter_validates_rules_only_aggregate():
     assert any("only 'rules'" in error for error in invalid.errors)
 
 
+def test_akamai_conflicts_require_evidence_based_identity_collision():
+    adapter = AkamaiWafAdapter()
+    snapshot = FixturePolicyReader().read_snapshot(
+        "akamai-waf",
+        "akamai-policy:example:rev-17",
+    )
+    candidate = json.dumps(
+        {
+            "rules": [
+                {
+                    "name": "janus-query-rule",
+                    "operation": "AND",
+                    "conditions": [
+                        {
+                            "type": "uriQueryMatch",
+                            "positiveMatch": True,
+                            "value": ["unrelated-pattern"],
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+
+    assert snapshot is not None
+    assert adapter.detect_conflicts(candidate, snapshot) == []
+
+
+def test_akamai_conflicts_reject_existing_rule_identity():
+    adapter = AkamaiWafAdapter()
+    snapshot = FixturePolicyReader().read_snapshot(
+        "akamai-waf",
+        "akamai-policy:example:rev-17",
+    )
+    candidate = json.dumps(
+        {
+            "rules": [
+                {
+                    "name": "rule-1001",
+                    "operation": "AND",
+                    "conditions": [
+                        {
+                            "type": "pathMatch",
+                            "positiveMatch": True,
+                            "value": ["/inventory"],
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+
+    assert snapshot is not None
+    assert adapter.detect_conflicts(candidate, snapshot) == [
+        "Existing rule identity already exists: rule-1001"
+    ]
+
+
 def test_akamai_adapter_rejects_embedded_action():
     adapter = AkamaiWafAdapter()
     with_action = json.dumps(
