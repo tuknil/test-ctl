@@ -7,6 +7,7 @@ complete join before translation, and never performs network schema lookup.
 
 from __future__ import annotations
 
+import itertools
 import json
 from collections.abc import Mapping
 from copy import deepcopy
@@ -840,6 +841,77 @@ def _component_carrier(component: dict[str, Any]) -> str:
     }.get(component["location"].get("kind"), "unsupported")
 
 
+def _expected_grammar_labels(component: dict[str, Any]) -> list[str]:
+    grammar = component.get("grammar")
+    if not isinstance(grammar, dict):
+        return ["grammar:exact"]
+    segments = grammar.get("segments")
+    raw_slots = grammar.get("slots")
+    if not isinstance(segments, list) or not isinstance(raw_slots, list) or not raw_slots:
+        return ["grammar:exact"]
+    slots = _index(raw_slots, "slot_id", "grammar-slots-invalid")
+
+    def render(overrides: Mapping[str, Any]) -> Any:
+        if (
+            len(segments) == 1
+            and isinstance(segments[0], dict)
+            and segments[0].get("kind") == "slot"
+        ):
+            ref = segments[0].get("slot_ref")
+            if isinstance(ref, dict) and ref.get("id") in slots:
+                slot_id = ref["id"]
+                return overrides.get(slot_id, slots[slot_id].get("sample"))
+        parts: list[str] = []
+        for segment in segments:
+            if isinstance(segment, dict) and segment.get("kind") == "literal":
+                parts.append(str(segment.get("value", "")))
+                continue
+            ref = segment.get("slot_ref") if isinstance(segment, dict) else None
+            slot_id = ref.get("id") if isinstance(ref, dict) else None
+            if slot_id not in slots:
+                raise SharedContractV2Error(
+                    "grammar-slot-ref-invalid", "grammar slot reference differs"
+                )
+            parts.append(str(overrides.get(slot_id, slots[slot_id].get("sample"))))
+        return "".join(parts)
+
+    domains: list[tuple[str, list[Any]]] = []
+    for slot in raw_slots:
+        domain = slot.get("allowed_domain")
+        values = domain.get("values") if isinstance(domain, dict) else None
+        if domain is not None and domain.get("kind") == "enum":
+            if not isinstance(values, list) or not values:
+                raise SharedContractV2Error(
+                    "grammar-enum-invalid", "grammar enum domain is invalid"
+                )
+            domains.append((slot["slot_id"], values))
+        else:
+            domains.append((slot["slot_id"], [slot.get("sample")]))
+    labels: list[str] = []
+    seen: set[bytes] = set()
+    for ordinal, combination in enumerate(
+        itertools.product(*(domain for _, domain in domains))
+    ):
+        overrides = {
+            slot_id: value
+            for (slot_id, _), value in zip(domains, combination, strict=True)
+        }
+        rendered = render(overrides)
+        key = canonical_bytes(rendered)
+        if key in seen:
+            continue
+        seen.add(key)
+        labels.append(
+            "grammar:sample"
+            if all(
+                overrides[slot_id] == slots[slot_id].get("sample")
+                for slot_id in overrides
+            )
+            else f"grammar:product:{ordinal}"
+        )
+    return labels
+
+
 def _expected_bv_dimensions(obligation: dict[str, Any], semantics: dict[str, Any], *, profile_id: str = "waf-bypass@2") -> list[dict[str, Any]]:
     profile = _bv_profile(profile_id)
     components = _index(semantics["components"], "component_id", "components-invalid")
@@ -852,26 +924,40 @@ def _expected_bv_dimensions(obligation: dict[str, Any], semantics: dict[str, Any
             if input_id not in {ref["id"] for ref in component["input_refs"]}:
                 continue
             carrier = _component_carrier(component)
-            labels: list[str] = []
-            transformations = component["transformations"]
+            chain_labels: list[str] = []
+            transformations = list(component["transformations"])
             if transformations:
-                labels.append("cg:" + ":".join(step["operation"] for step in transformations))
+                chain_labels.append("cg:" + ":".join(step["operation"] for step in transformations))
             for index, chain in enumerate(profile["bypass_dimensions"].get(carrier, [])):
-                labels.append(f"bv:{carrier}:{index}:" + ":".join(step["operation"] for step in chain))
-            if not labels:
-                expected.append({
-                    "carrier": carrier,
-                    "transformation": "baseline:identity",
-                    "input_id": input_id,
-                    "component_id": component_id,
-                })
-            else:
-                expected.extend({
-                    "carrier": carrier,
-                    "transformation": label,
-                    "input_id": input_id,
-                    "component_id": component_id,
-                } for label in labels)
+                bv_label = f"bv:{carrier}:{index}:" + ":".join(step["operation"] for step in chain)
+                chain_labels.append(bv_label)
+                if (
+                    transformations
+                    and chain
+                    and transformations[-1].get("output_stage")
+                    == chain[0].get("input_stage")
+                ):
+                    chain_labels.append("cg+" + bv_label)
+            if not chain_labels:
+                chain_labels.append("baseline:identity")
+            grammar_labels = (
+                _expected_grammar_labels(component)
+                if profile_id == "waf-bypass@3"
+                else ["grammar:exact"]
+            )
+            for grammar_label in grammar_labels:
+                for chain_label in chain_labels:
+                    label = (
+                        chain_label
+                        if grammar_label == "grammar:exact"
+                        else f"{grammar_label}|{chain_label}"
+                    )
+                    expected.append({
+                        "carrier": carrier,
+                        "transformation": label,
+                        "input_id": input_id,
+                        "component_id": component_id,
+                    })
     return expected
 
 

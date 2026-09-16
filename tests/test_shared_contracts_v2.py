@@ -37,6 +37,7 @@ from control_translation.policy_reader.base import PolicySnapshot
 from control_translation.shared_contracts_v2 import (
     OfflineSchemaCatalog,
     SharedContractV2Error,
+    _bv_profile,
     _component_condition,
     _expected_bv_dimensions,
     _resolved_route_conditions,
@@ -1780,6 +1781,58 @@ def test_cg_rejects_incomplete_unsupported_input_partition(defect: str) -> None:
         "cg-input-partition-incomplete",
         "unsupported-inputs-invalid",
     }
+
+
+def test_expected_bv_dimensions_include_complete_grammar_product() -> None:
+    component_id = "component:test-header"
+    input_id = "input:test-header"
+    component = {
+        "component_id": component_id,
+        "input_refs": [{"id": input_id}],
+        "location": {"kind": "http-header", "name": "User-Agent", "occurrence": 0},
+        "transformations": [],
+        "grammar": {
+            "segments": [
+                {
+                    "kind": "slot",
+                    "slot_ref": {
+                        "kind": "slot",
+                        "scope": component_id,
+                        "id": "slot:test-header",
+                    },
+                }
+            ],
+            "slots": [
+                {
+                    "slot_id": "slot:test-header",
+                    "sample": "sample",
+                    "allowed_domain": {
+                        "kind": "enum",
+                        "values": ["sample", "alternate"],
+                    },
+                }
+            ],
+        },
+    }
+    semantics = {
+        "components": [component],
+        "coverage": {"groups": []},
+    }
+    obligation = {
+        "coverage_ref": {"kind": "component", "id": component_id},
+        "required_input_refs": [{"id": input_id}],
+    }
+
+    dimensions = _expected_bv_dimensions(
+        obligation,
+        semantics,
+        profile_id="waf-bypass@3",
+    )
+
+    labels = [item["transformation"] for item in dimensions]
+    assert len(labels) == 2 * len(_bv_profile("waf-bypass@3")["bypass_dimensions"]["header"])
+    assert any(label.startswith("grammar:sample|") for label in labels)
+    assert any(label.startswith("grammar:product:1|") for label in labels)
 
 
 def test_cg_outer_terminal_state_normalizes_to_shared_vocabulary() -> None:
