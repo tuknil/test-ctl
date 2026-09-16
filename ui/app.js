@@ -1,3 +1,13 @@
+// The API is a separate service. Its browser-reachable base URL is published
+// by the UI service at /config.js (from the API_ENDPOINT environment
+// variable). An empty base means "same origin", which only applies when a
+// gateway routes both the UI and the API paths.
+const API_ENDPOINT = ((window.CONTROL_TRANSLATION_CONFIG || {}).apiEndpoint || "").replace(/\/+$/, "");
+
+function apiUrl(path) {
+  return `${API_ENDPOINT}${path}`;
+}
+
 const PATTERN_TO_CLASS = {
   "proven-pattern:CVE-2017-5638:waf:fixture-1": {
     vulnerability_id: "CVE-2017-5638",
@@ -134,7 +144,7 @@ function updateInferenceSwitchHelp() {
 
 async function loadInferenceStatus() {
   try {
-    const response = await fetch("/inference");
+    const response = await fetch(apiUrl("/inference"));
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     renderInferenceStatus(await response.json());
   } catch (error) {
@@ -332,6 +342,23 @@ function badgeClass(state) {
   return state || "unknown";
 }
 
+function proposalSourceNote(source) {
+  switch (source) {
+    case "deterministic-modsec-rule":
+      return " — the proven ModSecurity rule was compiled into Akamai custom-rule conditions in code, so no model was needed.";
+    case "deterministic-json-body-field":
+      return " — built from the JSON request field corroborated by Mitigation Check.";
+    case "deterministic-anchored-literal":
+      return " — built from the anchored literal argument value in the proven rule.";
+    case "deterministic-form-body":
+      return " — built from the authoritative proven form request body.";
+    case "translation-doer":
+      return " — no deterministic path could express the proven pattern, so the translation agent proposed the candidate.";
+    default:
+      return " — no candidate was proposed.";
+  }
+}
+
 function renderResult(envelope) {
   const r = envelope.structured_result;
   const candidate = r.primary_candidate;
@@ -342,6 +369,7 @@ function renderResult(envelope) {
       <strong>Inference evidence</strong>
       <p>Mode: <code>${escapeHtml(inference.execution_mode)}</code> · Provider: <code>${escapeHtml(inference.provider)}</code> · Model: <code>${escapeHtml(inference.model)}</code></p>
       <p><strong>LLM invoked for this request: ${inference.llm_invoked ? "yes" : "no"}</strong>${inference.llm_invoked ? " — the request reached the live translation agent." : " — this was a fixture run or the request ended before model invocation."}</p>
+      <p>Candidate built by: <code>${escapeHtml(inference.proposal_source || "none")}</code>${proposalSourceNote(inference.proposal_source)}</p>
     </section>` : "";
 
   let candidateHtml = '<p class="empty">No candidate produced.</p>';
@@ -454,7 +482,7 @@ submitBtn.addEventListener("click", async () => {
   };
 
   try {
-    const resp = await fetch("/invoke", {
+    const resp = await fetch(apiUrl("/invoke"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -761,7 +789,7 @@ submitJsonBtn.addEventListener("click", async () => {
   }
 
   try {
-    const resp = await fetch("/invoke", {
+    const resp = await fetch(apiUrl("/invoke"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -869,7 +897,7 @@ async function loadRuns(offset = runsOffset) {
   refreshRunsBtn.disabled = true;
   runsStatus.textContent = "Loading stored runs…";
   try {
-    const response = await fetch(`/v1/runs?limit=${RUNS_PAGE_SIZE}&offset=${runsOffset}`);
+    const response = await fetch(apiUrl(`/v1/runs?limit=${RUNS_PAGE_SIZE}&offset=${runsOffset}`));
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     renderRuns(await response.json());
   } catch (error) {
@@ -895,7 +923,7 @@ async function loadRunDetail(runId) {
   runDetail.scrollIntoView({ behavior: "smooth", block: "nearest" });
 
   try {
-    const response = await fetch(`/runs/${encodeURIComponent(runId)}`);
+    const response = await fetch(apiUrl(`/runs/${encodeURIComponent(runId)}`));
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const envelope = await response.json();
     const result = envelope.structured_result;

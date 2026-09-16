@@ -14,7 +14,7 @@ from control_translation.contracts import (
     TranslationPolicy,
 )
 from control_translation.providers.fixtures import get_fixture_pattern
-from control_translation.terminal import TerminalState
+from control_translation.terminal import OutcomeReasonCode, TerminalState
 from control_translation.translation.engine import _akamai_json_body_semantic_errors
 
 
@@ -39,10 +39,22 @@ def test_translated_happy_path():
 
 
 def test_scope_declined_for_unknown_target_technology():
-    request = _request("unknown-tech", "some-context")
-    envelope = capability.invoke(request)
+    """CFS: a valid target outside configured coverage is scope-declined.
+
+    cannot-express is reserved for a target that cannot represent the pattern,
+    which the adapter decides further down.
+    """
+    envelope = capability.invoke(_request("unknown-tech", "some-context"))
+
     assert envelope.terminal_state == TerminalState.SCOPE_DECLINED
     assert envelope.status == "declined"
+    reason = envelope.structured_result.outcome_reason
+    assert reason.code == OutcomeReasonCode.INVALID_INPUT
+    # The detail still names what this deployment does carry.
+    assert "unknown-tech" in reason.detail
+    for supported in ("akamai-waf", "firewall-generic", "edr-s1"):
+        assert supported in reason.detail
+    assert envelope.structured_result.primary_candidate is None
 
 
 def test_insufficient_context_when_no_snapshot_available():

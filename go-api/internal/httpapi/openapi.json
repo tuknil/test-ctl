@@ -1,0 +1,380 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "control-translation",
+    "version": "0.1.0",
+    "description": "Turns a proven mitigation pattern into a control-specific mitigation candidate for a target technology.\n\nThis deployment reads the proven ModSecurity rule from the Defense Generation row a request names, compiles it into an Akamai custom WAF rule, gates it deterministically, and persists the result in Databricks. There is no model in this path: a rule the compiler cannot express with certainty is declined, never guessed.\n\nAll declines are results, not errors. A request that is understood but cannot be translated returns HTTP 200 with a typed terminal state."
+  },
+  "tags": [
+    {"name": "status", "description": "Liveness, readiness, and runtime reporting."},
+    {"name": "translation", "description": "Synchronous invocation."},
+    {"name": "lifecycle", "description": "Durable asynchronous runs."},
+    {"name": "results", "description": "Durable reads."}
+  ],
+  "paths": {
+    "/": {
+      "get": {
+        "tags": ["status"],
+        "summary": "Service descriptor",
+        "description": "Identifies the service. The demo UI is a separate deployable and is not served here.",
+        "responses": {"200": {"description": "Service descriptor.", "content": {"application/json": {"schema": {"type": "object"}}}}}
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": ["status"],
+        "summary": "Liveness",
+        "description": "Answers without touching Databricks or the lifecycle queue, so it stays up while dependencies are down.",
+        "responses": {"200": {"description": "The process is running.", "content": {"application/json": {"schema": {"type": "object", "properties": {"status": {"const": "ok"}}}}}}}
+      }
+    },
+    "/ready": {
+      "get": {
+        "tags": ["status"],
+        "summary": "Readiness",
+        "description": "Fails when configuration is incomplete, when Databricks is unreachable, or when the lifecycle queue is unavailable. Configuration errors never contain secret values.",
+        "responses": {
+          "200": {"description": "Ready to accept work.", "content": {"application/json": {"schema": {"type": "object", "properties": {"status": {"const": "ready"}}}}}},
+          "503": {"description": "Not ready. The detail names the cause.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Detail"}}}}
+        }
+      }
+    },
+    "/inference": {
+      "get": {
+        "tags": ["status"],
+        "summary": "Runtime inference status",
+        "description": "Browser-consumable. Never returns a key, an endpoint, or any other secret; only a boolean about whether credentials are configured. This build carries no model client, so credentials_configured is always false.",
+        "responses": {"200": {"description": "Runtime status.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/InferenceStatus"}}}}}
+      }
+    },
+    "/schema": {
+      "get": {
+        "tags": ["status"],
+        "summary": "Advertised contract",
+        "description": "The request fields this build accepts, the terminal states it emits, the target technologies it carries, and its one execution path.",
+        "responses": {"200": {"description": "Contract summary.", "content": {"application/json": {"schema": {"type": "object"}}}}}
+      }
+    },
+    "/invoke": {
+      "post": {
+        "tags": ["translation"],
+        "summary": "Translate one proven pattern synchronously",
+        "description": "Two accepted forms.\n\n**Referenced** (the production form): contract_id, subject, upstream_inputs, routing_context and provenance. The three upstream_inputs[].result_ref entries name the Databricks rows to read, and the rule is taken from the Defense Generation row's primary_candidate.artifact_content. All three rows must agree on correlation, subject revision, vulnerability and candidate, or the request is insufficient-context with no candidate.\n\n**Direct**: an inline input.proven_pattern, for fixtures and local testing.\n\nUnknown fields are rejected. Supplying an idempotency_key makes the call idempotent: an identical retry returns the original result and a changed body under the same key is a 409.",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/InvokeRequest"}}}},
+        "responses": {
+          "200": {"description": "A typed result. Check terminal_state: a decline is reported here, not as an error status.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ResultEnvelope"}}}},
+          "409": {"description": "The idempotency key was already used for different input.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Detail"}}}},
+          "422": {"description": "The request body failed contract validation.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Detail"}}}},
+          "503": {"description": "Durable result storage is unavailable. Retryable.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Detail"}}}}
+        }
+      }
+    },
+    "/v1/control-translation-runs": {
+      "post": {
+        "tags": ["lifecycle"],
+        "summary": "Queue a translation",
+        "description": "Persists the request on a durable queue and returns immediately; a background worker claims it under a lease. The body's request_id must equal the Idempotency-Key header and its correlation_id the X-Correlation-ID header. An identical retry returns the same run with 200 instead of 202.\n\nThe X-Janus-Callback-* header group is all-or-none. It is accepted and then ignored: this build has no callback dispatcher, so callers poll.",
+        "parameters": [
+          {"name": "Idempotency-Key", "in": "header", "required": true, "schema": {"type": "string"}, "description": "Must equal the body's request_id."},
+          {"name": "X-Correlation-ID", "in": "header", "required": true, "schema": {"type": "string"}, "description": "Must equal the body's correlation_id."},
+          {"name": "X-Janus-Callback-URL", "in": "header", "required": false, "schema": {"type": "string"}, "description": "Part of an all-or-none group; currently ignored."},
+          {"name": "X-Janus-Callback-Workflow-ID", "in": "header", "required": false, "schema": {"type": "string"}},
+          {"name": "X-Janus-Callback-Signal", "in": "header", "required": false, "schema": {"type": "string"}}
+        ],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/InvokeRequest"}}}},
+        "responses": {
+          "202": {"description": "Queued.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RunSubmission"}}}},
+          "200": {"description": "An identical retry; the original run is returned.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RunSubmission"}}}},
+          "400": {"description": "A missing or mismatched header, a partial callback group, or a non-JSON content type.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/LifecycleError"}}}},
+          "409": {"description": "The idempotency key was already used for different input.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/LifecycleError"}}}},
+          "422": {"description": "The request body failed contract validation.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/LifecycleError"}}}}
+        }
+      }
+    },
+    "/v1/control-translation-runs/{run_id}": {
+      "get": {
+        "tags": ["lifecycle"],
+        "summary": "Poll durable run status",
+        "description": "Polling never starts work. Once completed, the response carries the canonical completion: where the immutable result is, its SHA-256, and its byte size.",
+        "parameters": [{"name": "run_id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "200": {"description": "Lifecycle status.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RunStatus"}}}},
+          "404": {"description": "No such run.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/LifecycleError"}}}}
+        }
+      }
+    },
+    "/v1/control-translation-runs/{run_id}/result": {
+      "get": {
+        "tags": ["lifecycle"],
+        "summary": "Read a completed run's immutable result",
+        "description": "Follows the queue row's pointer to the result stored in Databricks.",
+        "parameters": [{"name": "run_id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "200": {"description": "The immutable result envelope.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ResultEnvelope"}}}},
+          "404": {"description": "No such run.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/LifecycleError"}}}},
+          "409": {"description": "The run has not produced a result yet.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/LifecycleError"}}}}
+        }
+      }
+    },
+    "/v1/control-translation-runs/{run_id}/cancel": {
+      "post": {
+        "tags": ["lifecycle"],
+        "summary": "Request cancellation",
+        "description": "Idempotent. Cancellation wins before a result exists; afterwards the completion wins, because the result is already in the immutable results table and may already have been consumed.",
+        "parameters": [{"name": "run_id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "202": {"description": "The run's status after the request.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RunStatus"}}}},
+          "404": {"description": "No such run.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/LifecycleError"}}}}
+        }
+      }
+    },
+    "/runs/{run_id}": {
+      "get": {
+        "tags": ["results"],
+        "summary": "Read a durable completion envelope",
+        "parameters": [{"name": "run_id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "200": {"description": "The stored envelope.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ResultEnvelope"}}}},
+          "404": {"description": "No such run.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Detail"}}}},
+          "503": {"description": "Durable result storage is unavailable.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Detail"}}}}
+        }
+      }
+    },
+    "/v1/runs": {
+      "get": {
+        "tags": ["results"],
+        "summary": "List runs for the dashboard",
+        "description": "A safe projection: request JSON and candidate artifact content are excluded. Candidate content is available only from the on-demand run detail and should be treated as sensitive.",
+        "parameters": [
+          {"name": "limit", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 25}},
+          {"name": "offset", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 0, "default": 0}}
+        ],
+        "responses": {
+          "200": {"description": "A bounded page, newest first.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RunList"}}}},
+          "422": {"description": "limit or offset is out of range.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Detail"}}}},
+          "503": {"description": "Durable result storage is unavailable.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Detail"}}}}
+        }
+      }
+    },
+    "/v1/results/{result_id}": {
+      "get": {
+        "tags": ["results"],
+        "summary": "Read a durable business result",
+        "parameters": [{"name": "result_id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "200": {"description": "The structured result.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ControlTranslationResult"}}}},
+          "404": {"description": "No such result.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Detail"}}}},
+          "503": {"description": "Durable result storage is unavailable.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Detail"}}}}
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {"tags": ["status"], "summary": "This document", "responses": {"200": {"description": "The OpenAPI document.", "content": {"application/json": {"schema": {"type": "object"}}}}}}
+    },
+    "/docs": {
+      "get": {"tags": ["status"], "summary": "Swagger UI", "responses": {"200": {"description": "An HTML page rendering this document.", "content": {"text/html": {"schema": {"type": "string"}}}}}}
+    },
+    "/redoc": {
+      "get": {"tags": ["status"], "summary": "ReDoc", "responses": {"200": {"description": "An HTML page rendering this document.", "content": {"text/html": {"schema": {"type": "string"}}}}}}
+    }
+  },
+  "components": {
+    "schemas": {
+      "TerminalState": {
+        "type": "string",
+        "enum": ["translated", "cannot-express", "insufficient-context", "scope-declined", "malfunction"],
+        "description": "translated: one reviewable candidate. cannot-express: the target cannot represent the pattern. insufficient-context: required context (policy snapshot, upstream lineage) was missing. scope-declined: a valid target outside configured coverage, or an unresolved policy conflict. malfunction: provider or result-assembly failure."
+      },
+      "ProvenMitigationPattern": {
+        "type": "object",
+        "required": ["proven_pattern_id", "vulnerability_id", "selected_control_class", "discriminator_id", "discriminator_description", "pattern_summary", "proof_record_ids"],
+        "properties": {
+          "proven_pattern_id": {"type": "string"},
+          "vulnerability_id": {"type": "string"},
+          "selected_control_class": {"type": "string", "description": "Must match the target technology's class; this build carries waf."},
+          "discriminator_id": {"type": "string"},
+          "discriminator_description": {"type": "string"},
+          "pattern_summary": {"type": "string", "description": "The defense-generation artifact: a ModSecurity SecRule. This is the rule that gets compiled."},
+          "proof_record_ids": {"type": "array", "minItems": 2, "items": {"type": "string"}, "description": "Must include one mitigation-check-result: and one bypass-validation-result: reference."}
+        }
+      },
+      "DatabricksResultReference": {
+        "type": "object",
+        "required": ["system", "catalog", "schema", "table", "key"],
+        "properties": {
+          "system": {"const": "databricks"},
+          "catalog": {"type": "string"},
+          "schema": {"type": "string"},
+          "table": {"type": "string"},
+          "key": {"type": "string", "description": "The row's result_id. Exactly this row is read."}
+        }
+      },
+      "InvokeRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Either the referenced form (contract_id + subject + upstream_inputs + routing_context + provenance) or the direct form (input.proven_pattern).",
+        "properties": {
+          "contract_id": {"const": "control-translation@1.0"},
+          "input": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "proven_pattern": {"$ref": "#/components/schemas/ProvenMitigationPattern"},
+              "target_context": {"type": "object", "additionalProperties": false, "properties": {"target_technology": {"type": "string"}, "target_policy_context_id": {"type": "string"}}},
+              "translation_policy": {"type": "object", "additionalProperties": false, "properties": {"translation_policy_id": {"type": "string"}, "allow_narrower_translation": {"type": "boolean", "default": true}, "allow_equivalent_translation": {"type": "boolean", "default": true}}},
+              "current_policy_snapshot_id": {"type": "string"}
+            }
+          },
+          "subject": {"type": "object", "additionalProperties": false, "required": ["vulnerability_id", "candidate_id"], "properties": {"vulnerability_id": {"type": "string"}, "candidate_id": {"type": "string"}}},
+          "upstream_inputs": {
+            "type": "array", "minItems": 3, "maxItems": 3,
+            "description": "One completion per capability. Their result_refs name the rows to read.",
+            "items": {
+              "type": "object", "additionalProperties": false,
+              "required": ["capability", "contract_id", "run_id", "result_id", "terminal_state", "status", "correlation_id", "result_ref"],
+              "properties": {
+                "capability": {"type": "string", "enum": ["defense-generation", "mitigation-check", "bypass-validation"]},
+                "contract_id": {"type": "string"},
+                "run_id": {"type": "string"},
+                "result_id": {"type": "string"},
+                "terminal_state": {"type": "string"},
+                "status": {"const": "completed"},
+                "correlation_id": {"type": "string"},
+                "result_ref": {"$ref": "#/components/schemas/DatabricksResultReference"},
+                "evidence_refs": {"type": "array", "items": {"type": "string"}}
+              }
+            }
+          },
+          "routing_context": {
+            "type": "object", "additionalProperties": false,
+            "required": ["route", "mitigation_check_terminal_state", "mitigation_check_match", "bypass_validation_terminal_state", "loop_exhausted", "completed_iterations", "max_iterations"],
+            "properties": {
+              "route": {"type": "string", "enum": ["validated", "loop-exhausted"]},
+              "mitigation_check_terminal_state": {"const": "blocked"},
+              "mitigation_check_match": {"const": true},
+              "bypass_validation_terminal_state": {"type": "string", "enum": ["no-bypass-found", "bypass-found"]},
+              "loop_exhausted": {"type": "boolean"},
+              "completed_iterations": {"type": "integer", "minimum": 1},
+              "max_iterations": {"type": "integer", "minimum": 1}
+            }
+          },
+          "upstream_result_refs": {"type": "object", "description": "Normalized from upstream_inputs; supply it only if it matches."},
+          "routing_metadata": {"type": "object", "description": "Normalized from routing_context; supply it only if it matches."},
+          "request_id": {"type": "string"},
+          "correlation_id": {"type": "string"},
+          "idempotency_key": {"type": "string", "description": "For orchestration requests this must equal request_id."},
+          "subject_record_revision_id": {"type": "string"},
+          "provenance": {"type": "object", "additionalProperties": false, "properties": {"caller": {"type": "string"}, "source": {"type": "string"}}}
+        }
+      },
+      "ControlTranslationResult": {
+        "type": "object",
+        "properties": {
+          "contract_id": {"const": "control-translation@1.0"},
+          "result_id": {"type": "string"},
+          "produced_at": {"type": "string", "format": "date-time"},
+          "subject": {"type": "object"},
+          "input_bindings": {"type": "object"},
+          "terminal_state": {"$ref": "#/components/schemas/TerminalState"},
+          "outcome_reason": {"type": "object", "properties": {"code": {"type": "string"}, "detail": {"type": "string"}}},
+          "proof_loop_qualification": {"type": ["object", "null"], "description": "Present for referenced requests. bypass_cleared false means the candidate was never cleared, and it carries a limitation saying so."},
+          "bypass_counterexample": {"type": ["object", "null"]},
+          "primary_candidate": {"type": ["object", "null"], "description": "Absent for every terminal state except translated."},
+          "evidence_bindings": {"type": "array", "items": {"type": "object"}},
+          "prose_summary": {"type": "string"}
+        }
+      },
+      "ResultEnvelope": {
+        "type": "object",
+        "properties": {
+          "capability": {"const": "control-translation"},
+          "contract_id": {"const": "control-translation@1.0"},
+          "run_id": {"type": "string"},
+          "result_id": {"type": "string"},
+          "status": {"type": "string", "enum": ["succeeded", "declined", "malfunction"]},
+          "terminal_state": {"$ref": "#/components/schemas/TerminalState"},
+          "request_id": {"type": ["string", "null"]},
+          "correlation_id": {"type": "string"},
+          "result_ref": {"type": "object"},
+          "upstream_result_refs": {"type": ["object", "null"]},
+          "structured_result": {"$ref": "#/components/schemas/ControlTranslationResult"},
+          "prose": {"type": "string"},
+          "reference_bundle": {"type": "object", "description": "Echoes exactly which upstream rows were read."},
+          "provenance": {"type": "array", "items": {"type": "string"}},
+          "confidence": {"type": "object"},
+          "warnings": {"type": "array", "items": {"type": "string"}},
+          "trace": {"type": "array", "items": {"type": "string"}},
+          "inference": {"type": "object", "description": "proposal_source names the path that built the candidate."}
+        }
+      },
+      "InferenceStatus": {
+        "type": "object",
+        "properties": {
+          "execution_mode": {"type": "string"},
+          "provider": {"type": "string"},
+          "model": {"type": "string"},
+          "credentials_configured": {"type": "boolean"},
+          "switching_requires_restart": {"const": true}
+        }
+      },
+      "RunSubmission": {
+        "type": "object",
+        "properties": {
+          "capability": {"const": "control-translation"},
+          "contract_id": {"const": "control-translation-run-submission@1.0"},
+          "request_id": {"type": "string"},
+          "correlation_id": {"type": "string"},
+          "run_id": {"type": "string"},
+          "status": {"type": "string"},
+          "status_url": {"type": "string"},
+          "result_url": {"type": "string"},
+          "accepted_at": {"type": "string", "format": "date-time"}
+        }
+      },
+      "RunStatus": {
+        "type": "object",
+        "properties": {
+          "capability": {"const": "control-translation"},
+          "contract_id": {"const": "capability-run-status@1.0"},
+          "request_id": {"type": "string"},
+          "correlation_id": {"type": "string"},
+          "run_id": {"type": "string"},
+          "status": {"type": "string", "enum": ["queued", "running", "completed", "failed", "canceled"]},
+          "terminal_state": {"type": ["string", "null"]},
+          "result_id": {"type": ["string", "null"]},
+          "created_at": {"type": "string", "format": "date-time"},
+          "started_at": {"type": ["string", "null"], "format": "date-time"},
+          "updated_at": {"type": "string", "format": "date-time"},
+          "completed_at": {"type": ["string", "null"], "format": "date-time"},
+          "progress": {"type": "object"},
+          "failure": {"type": ["object", "null"]},
+          "completion": {"type": ["object", "null"], "description": "Where the immutable result is, its SHA-256, and its byte size."}
+        }
+      },
+      "RunList": {
+        "type": "object",
+        "properties": {
+          "items": {"type": "array", "items": {"type": "object"}},
+          "total": {"type": "integer"},
+          "limit": {"type": "integer"},
+          "offset": {"type": "integer"},
+          "has_more": {"type": "boolean"},
+          "terminal_state_counts": {"type": "object"}
+        }
+      },
+      "Detail": {
+        "type": "object",
+        "properties": {"detail": {"description": "A string or an object; storage failures carry a sanitized diagnostic whose root cause stays in server logs."}}
+      },
+      "LifecycleError": {
+        "type": "object",
+        "properties": {
+          "code": {"type": "string"},
+          "detail": {"type": "string"},
+          "message": {"type": "string"},
+          "retryable": {"type": "boolean"}
+        }
+      }
+    }
+  }
+}
