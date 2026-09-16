@@ -1714,6 +1714,74 @@ def test_cg_additive_content_digest_is_optional() -> None:
     assert semantics["contract_id"] == "attack-match-semantics@2.0"
 
 
+def _resign_cg_after_accounting_change(cg: dict[str, Any]) -> None:
+    semantics = cg["attack_match_semantics"]
+    projection = {
+        key: cg[key]
+        for key in ("artifacts", "input_membership", "member_results", "test_inputs")
+    }
+    semantics["source_binding"]["check_generation"][
+        "source_projection_digest"
+    ] = digest(projection)
+    semantics["semantics_digest"] = digest_without(semantics, "semantics_digest")
+    cg["content_digest"] = digest_without(cg, "content_digest")
+
+
+def test_cg_accepts_complete_unsupported_input_partition() -> None:
+    cg = deepcopy(_load("check-generation-complete-result.json"))
+    unsupported_input = deepcopy(cg["test_inputs"][0])
+    unsupported_input["input_id"] = "input-unsupported"
+    cg["test_inputs"].append(unsupported_input)
+    semantics = cg["attack_match_semantics"]
+    semantics["unsupported_dimensions"][0]["source_input_refs"].append(
+        {
+            "kind": "test-input",
+            "scope": semantics["semantics_id"],
+            "id": "input-unsupported",
+        }
+    )
+    _resign_cg_after_accounting_change(cg)
+
+    validated = _validate_cg(cg, OfflineSchemaCatalog())
+
+    assert len(validated["test_inputs"]) + 1 == len(cg["test_inputs"])
+
+
+@pytest.mark.parametrize("defect", ["missing", "invented", "overlap"])
+def test_cg_rejects_incomplete_unsupported_input_partition(defect: str) -> None:
+    cg = deepcopy(_load("check-generation-complete-result.json"))
+    semantics = cg["attack_match_semantics"]
+    if defect == "missing":
+        unsupported_input = deepcopy(cg["test_inputs"][0])
+        unsupported_input["input_id"] = "input-unaccounted"
+        cg["test_inputs"].append(unsupported_input)
+    elif defect == "invented":
+        semantics["unsupported_dimensions"][0]["source_input_refs"].append(
+            {
+                "kind": "test-input",
+                "scope": semantics["semantics_id"],
+                "id": "input-invented",
+            }
+        )
+    else:
+        semantics["unsupported_dimensions"][0]["source_input_refs"].append(
+            {
+                "kind": "test-input",
+                "scope": semantics["semantics_id"],
+                "id": semantics["test_inputs"][0]["input_id"],
+            }
+        )
+    _resign_cg_after_accounting_change(cg)
+
+    with pytest.raises(SharedContractV2Error) as raised:
+        _validate_cg(cg, OfflineSchemaCatalog())
+
+    assert raised.value.code in {
+        "cg-input-partition-incomplete",
+        "unsupported-inputs-invalid",
+    }
+
+
 def test_cg_outer_terminal_state_normalizes_to_shared_vocabulary() -> None:
     assert _shared_terminal_state_from_cg("no-checkable-artifact") == "no-checkable-signal"
     assert _shared_terminal_state_from_cg("signal-produced") == "signal-produced"

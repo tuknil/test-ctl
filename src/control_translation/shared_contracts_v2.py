@@ -448,7 +448,12 @@ def _validate_cg(cg: dict[str, Any], catalog: OfflineSchemaCatalog) -> dict[str,
     outer_inputs = _index(cg["test_inputs"], "input_id", "cg-inputs-invalid")
     obligations = _index(semantics["obligations"], "obligation_id", "obligations-invalid")
     membership = _index(cg.get("input_membership", {}).get("members"), "member_id", "cg-input-membership-invalid")
-    if set(members) != set(outer_members) or set(members) != set(membership) or set(artifacts) != set(outer_artifacts) or set(inputs) != set(outer_inputs):
+    if (
+        set(members) != set(outer_members)
+        or set(members) != set(membership)
+        or set(artifacts) != set(outer_artifacts)
+        or not set(inputs) <= set(outer_inputs)
+    ):
         raise SharedContractV2Error("cg-completeness-mismatch", "CG embedded and outer identity sets differ")
     if binding.get("member_count") != len(members) or binding.get("artifact_count") != len(artifacts):
         raise SharedContractV2Error("cg-count-mismatch", "CG source binding counts differ")
@@ -501,10 +506,26 @@ def _validate_cg(cg: dict[str, Any], catalog: OfflineSchemaCatalog) -> dict[str,
         if set(input_members) != set(outer.get("member_ids", [])) or source_artifact != [outer.get("artifact_id")]:
             raise SharedContractV2Error("cg-input-lineage-mismatch", f"CG test input differs: {input_id}")
     unsupported: set[str] = set()
+    unsupported_inputs: set[str] = set()
     for item in semantics["unsupported_dimensions"]:
         unsupported.update(_ref_ids(item["source_member_refs"], kind="source-member", scope=semantics["semantics_id"], known=members, code="unsupported-members-invalid", allow_empty=True))
+        unsupported_inputs.update(
+            _ref_ids(
+                item.get("source_input_refs", []),
+                kind="test-input",
+                scope=semantics["semantics_id"],
+                known=outer_inputs,
+                code="unsupported-inputs-invalid",
+                allow_empty=True,
+            )
+        )
     if represented & unsupported or represented | unsupported != set(members):
         raise SharedContractV2Error("source-member-partition-incomplete", "represented and unsupported source members are not a complete disjoint partition")
+    if set(inputs) & unsupported_inputs or set(inputs) | unsupported_inputs != set(outer_inputs):
+        raise SharedContractV2Error(
+            "cg-input-partition-incomplete",
+            "represented and unsupported CG inputs are not a complete disjoint partition",
+        )
     if any(obligation.get("required") is not True for obligation in obligations.values()):
         raise SharedContractV2Error("optional-obligation", "all shared-contract obligations must be required")
     for obligation in obligations.values():
