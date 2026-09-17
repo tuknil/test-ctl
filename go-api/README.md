@@ -13,16 +13,32 @@ asynchronous lifecycle.
 
 ## Run it
 
+The tests need a Postgres, because the lifecycle queue is one and its
+behaviour under test is the database's own. Start it from compose:
+
+```bash
+docker compose --profile go up -d postgres
+```
+
 ```bash
 cd go-api && go test ./... && go run ./cmd/api
 ```
 
-Databricks is the only backend, so `/ready` fails until it is configured:
+Tests look for `TEST_DATABASE_URL`, falling back to
+`postgres://postgres@127.0.0.1:55432/control_translation_test?sslmode=disable`,
+and each one runs in a schema of its own. When no server is reachable they
+skip rather than fail, and say so.
+
+Databricks and Postgres are both required, so `/ready` fails until they are
+configured. Locally, with an ordinary password and the service creating its own
+schema:
 
 ```bash
-DATABRICKS_SERVER_HOSTNAME=... DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/... \
-DATABRICKS_CLIENT_ID=... DATABRICKS_CLIENT_SECRET=... \
-DATABASE_PATH=./data/lifecycle.db \
+DATABRICKS_DSN='token:...@adb-....azuredatabricks.net:443/sql/1.0/warehouses/...' \
+DATABASE_AUTH_MODE=password DATABASE_HOST=127.0.0.1 DATABASE_PORT=55432 \
+DATABASE_NAME=control_translation DATABASE_USER=control_translation \
+DATABASE_PASSWORD=control_translation DATABASE_SSL_MODE=require \
+DATABASE_MIGRATION_MODE=managed \
 CORS_ALLOWED_ORIGINS=http://127.0.0.1:8080 go run ./cmd/api
 ```
 
@@ -218,16 +234,40 @@ decision.
 
 ## Persistence
 
-The split follows the Python service: **SQLite coordinates, Databricks
-stores.**
+**Postgres coordinates, Databricks stores.**
 
-The lifecycle queue is a local SQLite file at `DATABASE_PATH` — the one piece
-of local state — because a Delta table has no row locks and makes a poor queue.
-Its schema and `schema_migrations` bookkeeping match migration 2 of
-`src/control_translation/persistence/migrations.py`. Mount it on durable
-storage and run exactly one replica; `SERVICE_REPLICA_COUNT != 1` fails
-readiness. Losing the file forgets in-flight runs, but any result already
-written to Databricks survives.
+The lifecycle queue is a Postgres database — Azure Database for PostgreSQL in
+the deployed environment — because a Delta table has no row locks and makes a
+poor queue. The service keeps no local state: the queue is shared and the
+results are in Databricks, so a replica can be replaced or scaled at will.
+
+A run is claimed in one statement, with `FOR UPDATE SKIP LOCKED` picking the
+row and `RETURNING` handing back the one that was actually claimed. A
+concurrent poller steps over a row another transaction holds instead of
+blocking on it or taking it twice, so `SERVICE_REPLICA_COUNT` is no longer
+pinned to 1 — that limit existed only because the queue used to be a local
+file.
+
+**Authentication is an Entra token, not a password.** `DATABASE_AUTH_MODE=entra`
+mints a token per connection from `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and
+`AZURE_CLIENT_SECRET` for `AZURE_POSTGRES_TOKEN_SCOPE`, caches it until shortly
+before it expires, and attaches it as the connection password. Nothing is
+stored: a token lives about an hour, so it could not be configured even if you
+wanted to. Pool connections are recycled every 30 minutes, well inside that
+window, so the pool never holds one whose token has since expired.
+`DATABASE_AUTH_MODE=password` is the local and non-Azure path.
+
+`DATABASE_SSL_MODE` accepts only `require`, `verify-ca` and `verify-full`. The
+modes that can silently fall back to plaintext are rejected rather than
+supported, because this connection carries a bearer token; `verify-full` is the
+default and what the deployed service uses.
+
+`DATABASE_MIGRATION_MODE=external` — the deployed setting — means a separate
+process owns the schema. The service verifies the queue table exists and fails
+startup with a message naming the setting if it does not, rather than running
+`CREATE TABLE` and failing on a permission error that reads like an outage.
+`managed` lets the service create its own schema, which is what a local
+database wants.
 
 Everything durable and shareable goes to Databricks. The write is a `MERGE` that inserts only
 when the `result_id` is absent, so a retry can never overwrite a published
@@ -351,7 +391,7 @@ way: that pairing is genuinely invalid.
 | Fixture doer | An unmappable rule is `cannot-express`, not a template. |
 | `firewall-generic` and `edr-s1` adapters | Those targets are `scope-declined`; see below. |
 | Orchestration callbacks | The `X-Janus-Callback-*` header group is validated all-or-none, then ignored. Polling is the delivery mechanism. |
-| SQLite as a *result* store | It coordinates the queue only; results go to Databricks. |
+| Postgres as a *result* store | It coordinates the queue only; results go to Databricks. |
 | The other three deterministic Akamai paths | JSON-body-field, anchored-literal, and proven-form-body. The rows they read from are still fetched; only those alternative compilations are gone, so a rule that used to take one of them now goes through the general compiler or declines. |
 
 The full-parity version, before this cut, is archived at
@@ -366,9 +406,17 @@ committed, so that archive is the only copy.
   the same time and was diffed byte-for-byte across both.
 - The HTTP surface, the upstream reader, the result store, and the full
   asynchronous lifecycle are exercised end to end against an in-process fake
-  workspace (`internal/store/storetest`) and a real temporary SQLite queue —
-  including six lineage-failure cases, the approved-table check, idempotency
-  and conflict, cancellation, and the attempt-exhaustion path.
+  workspace (`internal/store/storetest`) and a real Postgres — including six
+  lineage-failure cases, the approved-table check, idempotency and conflict,
+  cancellation, and the attempt-exhaustion path.
+- The queue's concurrency is tested against a real server rather than reasoned
+  about: more workers than runs claim simultaneously, and every run must be
+  claimed exactly once. The Entra token flow is tested against an HTTP stub —
+  caching, renewal inside the expiry margin, one token for concurrent callers,
+  and that a rejected request explains itself without echoing the secret.
+- **The Entra path has not been run against a live Azure Database for
+  PostgreSQL.** The token flow, the connection string and the queue are each
+  covered, but no test has authenticated to Azure with a real principal.
 - **Nothing here has been run against a live Databricks workspace.** The SQL
   and the table shape are taken from the Python service, which is a code
   reading rather than a test. The transport is now the vendor driver the
@@ -389,7 +437,7 @@ internal/capability   gate order and result assembly
 internal/databricks   DSN handling and the shared *sql.DB helpers
 internal/upstream     proof-loop lineage validation and the three-table read
 internal/store        Databricks persistence for immutable results
-internal/lifecycle    the SQLite queue behind the asynchronous routes
+internal/lifecycle    the Postgres queue, and the Entra token that opens it
 internal/httpapi      routes and CORS
 internal/jsonx        insertion-ordered JSON, for byte parity with Python
 ```

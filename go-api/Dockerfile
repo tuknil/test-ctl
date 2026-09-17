@@ -1,7 +1,8 @@
 # Lean capability API: read the proven ModSecurity rule from the Databricks
 # rows the request names, compile it into an Akamai custom WAF rule, and
-# persist the result in Databricks. The asynchronous lifecycle queue is the
-# one piece of local state.
+# persist the result in Databricks. The asynchronous lifecycle queue is a
+# Postgres database -- Azure Database for PostgreSQL in the deployed
+# environment -- so the container keeps no state of its own.
 #
 # Built from the repository root:
 #   docker build -f go-api/Dockerfile -t control-translation-go:<tag> .
@@ -14,14 +15,9 @@ COPY go-api/go.mod go-api/go.sum ./
 RUN go mod download
 
 COPY go-api/ ./
-# modernc.org/sqlite is pure Go, so the binary is static and the runtime image
-# needs no libc.
+# No cgo: every dependency is pure Go, so the binary is static.
 ENV CGO_ENABLED=0
 RUN go build -trimpath -ldflags="-s -w" -o /out/control-translation-api ./cmd/api
-# distroless has no shell, so the lifecycle directory has to be created here
-# and copied in with the right ownership. A volume mounted at /app/data
-# inherits it, so the nonroot user can write the queue.
-RUN mkdir -p /out/data
 
 FROM  artifact.it.att.com/docker-hub/debian:bookworm-slim
 ENV GONOSUMDB=off
@@ -35,12 +31,19 @@ COPY --from=build /out/control-translation-api /app/control-translation-api
 
 ENV HOST=0.0.0.0 \
     PORT=8000 \
-    DATABASE_PATH=/app/data/control_translation.db \
+    DATABASE_PORT=5432 \
+    DATABASE_AUTH_MODE=entra \
+    DATABASE_SSL_MODE=verify-full \
+    DATABASE_MIGRATION_MODE=external \
     SERVICE_REPLICA_COUNT=1
 
-# Mount /app/data on durable storage: losing it forgets in-flight runs, though
-# any result already written to Databricks survives. Run exactly one replica
-# while the queue is a local SQLite file.
+# No volume: the queue is Postgres and the results are in Databricks, so the
+# container holds nothing that has to survive a restart. Replicas may be scaled
+# freely -- runs are claimed with FOR UPDATE SKIP LOCKED, so two replicas
+# cannot take the same one.
+#
+# ca-certificates above is what makes DATABASE_SSL_MODE=verify-full work: the
+# Azure server certificate is verified against this trust store.
 EXPOSE 8000
 
 # The binary answers /ready itself, so the platform probe is the health check.

@@ -4,8 +4,8 @@
 // Generation row named in the request, compile it into an Akamai custom WAF
 // rule, gate it, and persist the result in Databricks. Requests arrive
 // synchronously on /invoke or through the durable asynchronous lifecycle,
-// whose queue is the single local SQLite file. The demo UI is a separate
-// deployable; this process serves the API only.
+// whose queue is a Postgres database. The demo UI is a separate deployable;
+// this process serves the API only.
 package main
 
 import (
@@ -58,8 +58,10 @@ func main() {
 		slog.Warn("Databricks is not configured; referenced invocations will decline")
 	}
 
-	// The only local state: the durable queue behind the asynchronous routes.
-	queue, err := lifecycle.Open(settings.DatabasePath)
+	// The durable queue behind the asynchronous routes. On the Entra path this
+	// is the first thing that mints a token, so a credential or firewall
+	// problem surfaces here at startup rather than on the first invocation.
+	queue, err := lifecycle.Open(settings)
 	if err != nil {
 		slog.Error("unable to initialize the durable lifecycle queue", "error", err)
 		os.Exit(1)

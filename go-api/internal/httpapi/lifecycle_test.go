@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// The asynchronous lifecycle: the queue is a local SQLite file, the immutable
+// The asynchronous lifecycle: the queue is Postgres, the immutable
 // result goes to Databricks, and the queue row only points at it.
 
 func asyncHeaders(requestID string) map[string]string {

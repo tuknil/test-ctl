@@ -1,8 +1,9 @@
 // Package config loads typed settings from the environment.
 //
-// Variable names and defaults match the Python service, so one environment
-// configures either. This lean build reads only what it uses: it has no
-// worker, no callbacks, and no SQLite, so those settings are gone.
+// This lean build reads only what it uses: it has no callbacks and no local
+// file database, so those settings are gone. The lifecycle queue is Postgres,
+// configured by the DATABASE_* group, and authenticated with an Entra token
+// against Azure Database for PostgreSQL.
 package config
 
 import (
@@ -43,9 +44,29 @@ type Settings struct {
 	DatabricksSchema       string
 	DatabricksResultsTable string
 
-	// The lifecycle queue is a local SQLite file: durable coordination for
-	// this replica only. Completed results go to Databricks.
-	DatabasePath               string
+	// The lifecycle queue is Postgres -- Azure Database for PostgreSQL in the
+	// deployed environment. Completed results still go to Databricks; this
+	// database only coordinates which run is queued, claimed and retried.
+	//
+	// There is no password setting for the Entra path on purpose: the password
+	// is a short-lived Entra access token, fetched per connection, never
+	// configured. DatabasePassword applies only to DatabaseAuthMode "password".
+	DatabaseAuthMode      string
+	DatabaseHost          string
+	DatabasePort          int
+	DatabaseName          string
+	DatabaseUser          string
+	DatabasePassword      string
+	DatabaseSSLMode       string
+	DatabaseMigrationMode string
+
+	// Entra client-credentials settings, used only when DatabaseAuthMode is
+	// "entra". The secret is never logged or echoed in an error.
+	AzureTenantID           string
+	AzureClientID           string
+	AzureClientSecret       string
+	AzurePostgresTokenScope string
+
 	ServiceReplicaCount        int
 	WorkerPollSeconds          float64
 	WorkerLeaseSeconds         int
@@ -56,6 +77,23 @@ type Settings struct {
 	DefaultTargetTechnology    string
 	DefaultTargetPolicyContext string
 }
+
+// Database authentication modes. "entra" means the password is a short-lived
+// Entra access token minted per connection; "password" is an ordinary secret,
+// kept for local and non-Azure deployments.
+const (
+	AuthModeEntra    = "entra"
+	AuthModePassword = "password"
+)
+
+// Migration modes. "external" means schema changes are applied by a separate
+// process -- the deployed Azure posture, where the service's principal is not
+// expected to hold DDL rights. "managed" lets the service create its own
+// schema, which is what a local database wants.
+const (
+	MigrationModeExternal = "external"
+	MigrationModeManaged  = "managed"
+)
 
 // Load reads settings from the process environment.
 func Load() Settings {
@@ -78,7 +116,21 @@ func load() Settings {
 		DatabricksSchema:       strEnv("DATABRICKS_SCHEMA", "control_translation"),
 		DatabricksResultsTable: strEnv("DATABRICKS_RESULTS_TABLE", "control_translation_results"),
 
-		DatabasePath:               strEnv("DATABASE_PATH", "/app/data/control_translation.db"),
+		DatabaseAuthMode:      strEnv("DATABASE_AUTH_MODE", "entra"),
+		DatabaseHost:          os.Getenv("DATABASE_HOST"),
+		DatabasePort:          intEnv("DATABASE_PORT", 5432),
+		DatabaseName:          os.Getenv("DATABASE_NAME"),
+		DatabaseUser:          os.Getenv("DATABASE_USER"),
+		DatabasePassword:      os.Getenv("DATABASE_PASSWORD"),
+		DatabaseSSLMode:       strEnv("DATABASE_SSL_MODE", "verify-full"),
+		DatabaseMigrationMode: strEnv("DATABASE_MIGRATION_MODE", "external"),
+
+		AzureTenantID:     os.Getenv("AZURE_TENANT_ID"),
+		AzureClientID:     os.Getenv("AZURE_CLIENT_ID"),
+		AzureClientSecret: os.Getenv("AZURE_CLIENT_SECRET"),
+		AzurePostgresTokenScope: strEnv("AZURE_POSTGRES_TOKEN_SCOPE",
+			"https://ossrdbms-aad.database.windows.net/.default"),
+
 		ServiceReplicaCount:        intEnv("SERVICE_REPLICA_COUNT", 1),
 		WorkerPollSeconds:          floatEnv("WORKER_POLL_SECONDS", 0.25),
 		WorkerLeaseSeconds:         intEnv("WORKER_LEASE_SECONDS", 30),
@@ -225,14 +277,16 @@ func (s Settings) ConfigurationErrors() []string {
 	return errs
 }
 
-// workerErrors validates the lifecycle worker. The replica constraint is not
-// cosmetic: the queue is a local SQLite file, so a second replica would have
-// its own queue and its own view of which runs are claimed.
+// workerErrors validates the lifecycle worker.
+//
+// The replica constraint the SQLite queue needed is gone: Postgres is a shared
+// queue, and runs are claimed with FOR UPDATE SKIP LOCKED, so replicas cannot
+// claim the same run. SERVICE_REPLICA_COUNT is now only checked for being a
+// sane number.
 func (s Settings) workerErrors() []string {
 	var errs []string
-	if s.ServiceReplicaCount != 1 {
-		errs = append(errs,
-			"SERVICE_REPLICA_COUNT must be 1 while the lifecycle queue is a local SQLite file.")
+	if s.ServiceReplicaCount < 1 {
+		errs = append(errs, "SERVICE_REPLICA_COUNT must be at least 1.")
 	}
 	if s.WorkerPollSeconds <= 0 {
 		errs = append(errs, "WORKER_POLL_SECONDS must be greater than zero.")
@@ -250,8 +304,63 @@ func (s Settings) workerErrors() []string {
 	if s.WorkerShutdownGraceSeconds <= 0 {
 		errs = append(errs, "WORKER_SHUTDOWN_GRACE_SECONDS must be greater than zero.")
 	}
-	if strings.TrimSpace(s.DatabasePath) == "" {
-		errs = append(errs, "DATABASE_PATH is required for durable lifecycle coordination.")
+	errs = append(errs, s.databaseErrors()...)
+	return errs
+}
+
+// The SSL modes worth allowing against a managed Postgres. "disable" and the
+// two "prefer"/"allow" modes are not here: they let a connection silently fall
+// back to plaintext, and this connection carries an Entra token.
+var validSSLModes = map[string]bool{
+	"require": true, "verify-ca": true, "verify-full": true,
+}
+
+// databaseErrors validates the Postgres lifecycle queue and, when the Entra
+// path is selected, the credentials used to mint its short-lived password.
+func (s Settings) databaseErrors() []string {
+	var errs []string
+	if strings.TrimSpace(s.DatabaseHost) == "" {
+		errs = append(errs, "DATABASE_HOST is required for durable lifecycle coordination.")
+	}
+	if strings.TrimSpace(s.DatabaseName) == "" {
+		errs = append(errs, "DATABASE_NAME is required for durable lifecycle coordination.")
+	}
+	if strings.TrimSpace(s.DatabaseUser) == "" {
+		errs = append(errs, "DATABASE_USER is required for durable lifecycle coordination.")
+	}
+	if s.DatabasePort <= 0 || s.DatabasePort > 65535 {
+		errs = append(errs, "DATABASE_PORT must be a valid TCP port.")
+	}
+	if !validSSLModes[s.DatabaseSSLMode] {
+		errs = append(errs,
+			"DATABASE_SSL_MODE must be one of require, verify-ca, verify-full.")
+	}
+	switch s.DatabaseMigrationMode {
+	case MigrationModeExternal, MigrationModeManaged:
+	default:
+		errs = append(errs, "DATABASE_MIGRATION_MODE must be external or managed.")
+	}
+
+	switch s.DatabaseAuthMode {
+	case AuthModeEntra:
+		if strings.TrimSpace(s.AzureTenantID) == "" {
+			errs = append(errs, "AZURE_TENANT_ID is required when DATABASE_AUTH_MODE is entra.")
+		}
+		if strings.TrimSpace(s.AzureClientID) == "" {
+			errs = append(errs, "AZURE_CLIENT_ID is required when DATABASE_AUTH_MODE is entra.")
+		}
+		if strings.TrimSpace(s.AzureClientSecret) == "" {
+			errs = append(errs, "AZURE_CLIENT_SECRET is required when DATABASE_AUTH_MODE is entra.")
+		}
+		if strings.TrimSpace(s.AzurePostgresTokenScope) == "" {
+			errs = append(errs, "AZURE_POSTGRES_TOKEN_SCOPE must not be empty.")
+		}
+	case AuthModePassword:
+		if strings.TrimSpace(s.DatabasePassword) == "" {
+			errs = append(errs, "DATABASE_PASSWORD is required when DATABASE_AUTH_MODE is password.")
+		}
+	default:
+		errs = append(errs, "DATABASE_AUTH_MODE must be entra or password.")
 	}
 	return errs
 }
