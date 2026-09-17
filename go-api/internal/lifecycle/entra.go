@@ -146,6 +146,13 @@ func (e *EntraTokenSource) fetch(ctx context.Context) (string, time.Duration, er
 
 // summarizeTokenError pulls the error fields out of a failed token response
 // and leaves the rest of the body out.
+//
+// The description is kept whole. A real AADSTS description carries the trace
+// and correlation ids inline -- "AADSTS900023: ... Trace ID: <id>
+// Correlation ID: <id>" -- and those are the identifiers Microsoft support
+// asks for, so dropping them would throw away the useful half of the message.
+// Newlines are folded to spaces rather than cut: a newline in a log line can
+// forge a second entry, and nothing is gained by splitting the message.
 func summarizeTokenError(body []byte) string {
 	var decoded struct {
 		Error       string `json:"error"`
@@ -154,12 +161,22 @@ func summarizeTokenError(body []byte) string {
 	if err := json.Unmarshal(body, &decoded); err != nil || decoded.Error == "" {
 		return "unrecognized error response"
 	}
-	description := decoded.Description
-	if index := strings.IndexAny(description, "\r\n"); index != -1 {
-		description = description[:index]
-	}
+	description := foldLines(decoded.Description)
 	if description == "" {
 		return decoded.Error
 	}
+	if len(description) > maxDescription {
+		description = description[:maxDescription] + "..."
+	}
 	return decoded.Error + ": " + description
+}
+
+// maxDescription bounds how much of a token endpoint's prose reaches a log
+// line. Long enough for an AADSTS code, its sentence and the trace ids.
+const maxDescription = 400
+
+func foldLines(text string) string {
+	return strings.TrimSpace(strings.Join(strings.FieldsFunc(text, func(r rune) bool {
+		return r == '\r' || r == '\n'
+	}), " "))
 }

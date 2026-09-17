@@ -185,13 +185,17 @@ func TestConcurrentCallersShareOneToken(t *testing.T) {
 }
 
 // Every misconfiguration here looks the same from the outside -- wrong tenant,
-// wrong secret, principal without access -- so the description Entra returns
-// is worth keeping. It names the failure and carries no secret.
+// wrong secret, principal without access -- so the description Entra returns is
+// worth keeping. This body is the shape a real endpoint returns: the AADSTS
+// code and its sentence, then the trace and correlation ids inline, which are
+// the identifiers Microsoft support asks for.
 func TestAFailedTokenExplainsWhyWithoutLeakingTheSecret(t *testing.T) {
 	endpoint := newTokenEndpoint(t)
-	endpoint.status = http.StatusUnauthorized
-	endpoint.body = `{"error":"invalid_client",` +
-		`"error_description":"AADSTS7000215: Invalid client secret provided.\r\nTrace ID: abc"}`
+	endpoint.status = http.StatusBadRequest
+	endpoint.body = `{"error":"invalid_request","error_description":` +
+		`"AADSTS900023: Specified tenant identifier 'wrong' is neither a valid DNS name, ` +
+		`nor a valid external domain. Trace ID: 91752d89-32c0-422b-8e22-8a7d5787be00 ` +
+		`Correlation ID: ebd7b733-0fdf-4530-ab37-69ebb2e982e2 Timestamp: 2026-09-17 22:14:43Z"}`
 
 	_, err := newSource(endpoint).Token(context.Background())
 
@@ -202,13 +206,51 @@ func TestAFailedTokenExplainsWhyWithoutLeakingTheSecret(t *testing.T) {
 	if strings.Contains(message, testSecret) {
 		t.Error("the client secret appeared in the error")
 	}
-	if !strings.Contains(message, "invalid_client") ||
-		!strings.Contains(message, "AADSTS7000215") {
+	if !strings.Contains(message, "invalid_request") ||
+		!strings.Contains(message, "AADSTS900023") {
 		t.Errorf("the error should say why Entra refused: %v", err)
 	}
-	// The multi-line trace is cut, so the message stays one readable line.
-	if strings.Contains(message, "Trace ID") {
-		t.Errorf("the error should stop at the first line: %v", err)
+	// The trace id is the point of keeping the description at all.
+	if !strings.Contains(message, "91752d89-32c0-422b-8e22-8a7d5787be00") {
+		t.Errorf("the trace id was dropped: %v", err)
+	}
+}
+
+// A newline in a log line can forge a second entry, so they are folded to
+// spaces rather than passed through.
+func TestAFailedTokenCannotInjectLinesIntoTheLog(t *testing.T) {
+	endpoint := newTokenEndpoint(t)
+	endpoint.status = http.StatusUnauthorized
+	endpoint.body = "{\"error\":\"invalid_client\",\"error_description\":" +
+		"\"Invalid client secret.\\r\\nlevel=INFO msg=\\\"all clear\\\"\"}"
+
+	_, err := newSource(endpoint).Token(context.Background())
+
+	if err == nil {
+		t.Fatal("a rejected token request should fail")
+	}
+	if strings.ContainsAny(err.Error(), "\r\n") {
+		t.Errorf("a newline survived into the message: %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "Invalid client secret.") {
+		t.Errorf("folding lost the description: %v", err)
+	}
+}
+
+// A description long enough to bury a log line is bounded.
+func TestAnEnormousDescriptionIsTruncated(t *testing.T) {
+	endpoint := newTokenEndpoint(t)
+	endpoint.status = http.StatusBadRequest
+	endpoint.body = `{"error":"invalid_request","error_description":"` +
+		strings.Repeat("x", 5000) + `"}`
+
+	_, err := newSource(endpoint).Token(context.Background())
+
+	if err == nil {
+		t.Fatal("a rejected token request should fail")
+	}
+	if len(err.Error()) > maxDescription+300 {
+		t.Errorf("the message is %d characters; it should be bounded", len(err.Error()))
 	}
 }
 
