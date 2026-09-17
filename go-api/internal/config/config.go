@@ -48,16 +48,15 @@ type Settings struct {
 	// deployed environment. Completed results still go to Databricks; this
 	// database only coordinates which run is queued, claimed and retried.
 	//
-	// There is no password setting for the Entra path on purpose: the password
-	// is a short-lived Entra access token, fetched per connection, never
-	// configured. DatabasePassword applies only to DatabaseAuthMode "password".
+	// DatabaseURL is the whole connection: host, port, database, user, sslmode
+	// and, on the password path, the password. One string, the way
+	// DatabricksDSN is one string.
+	//
+	// On the Entra path it carries no password. The password there is a
+	// short-lived access token minted per connection, so it could not live in
+	// a static setting even if you wanted it to.
+	DatabaseURL           string
 	DatabaseAuthMode      string
-	DatabaseHost          string
-	DatabasePort          int
-	DatabaseName          string
-	DatabaseUser          string
-	DatabasePassword      string
-	DatabaseSSLMode       string
 	DatabaseMigrationMode string
 
 	// Entra client-credentials settings, used only when DatabaseAuthMode is
@@ -116,13 +115,8 @@ func load() Settings {
 		DatabricksSchema:       strEnv("DATABRICKS_SCHEMA", "control_translation"),
 		DatabricksResultsTable: strEnv("DATABRICKS_RESULTS_TABLE", "control_translation_results"),
 
+		DatabaseURL:           os.Getenv("DATABASE_URL"),
 		DatabaseAuthMode:      strEnv("DATABASE_AUTH_MODE", "entra"),
-		DatabaseHost:          os.Getenv("DATABASE_HOST"),
-		DatabasePort:          intEnv("DATABASE_PORT", 5432),
-		DatabaseName:          os.Getenv("DATABASE_NAME"),
-		DatabaseUser:          os.Getenv("DATABASE_USER"),
-		DatabasePassword:      os.Getenv("DATABASE_PASSWORD"),
-		DatabaseSSLMode:       strEnv("DATABASE_SSL_MODE", "verify-full"),
 		DatabaseMigrationMode: strEnv("DATABASE_MIGRATION_MODE", "external"),
 
 		AzureTenantID:     os.Getenv("AZURE_TENANT_ID"),
@@ -308,9 +302,10 @@ func (s Settings) workerErrors() []string {
 	return errs
 }
 
-// The SSL modes worth allowing against a managed Postgres. "disable" and the
-// two "prefer"/"allow" modes are not here: they let a connection silently fall
-// back to plaintext, and this connection carries an Entra token.
+// The SSL modes allowed on the Entra path. "disable", "allow" and "prefer" are
+// not here: they let a connection silently fall back to plaintext, and an
+// Entra connection carries a bearer token. The password path is unrestricted,
+// so a local database over a loopback socket can use sslmode=disable.
 var validSSLModes = map[string]bool{
 	"require": true, "verify-ca": true, "verify-full": true,
 }
@@ -319,48 +314,73 @@ var validSSLModes = map[string]bool{
 // path is selected, the credentials used to mint its short-lived password.
 func (s Settings) databaseErrors() []string {
 	var errs []string
-	if strings.TrimSpace(s.DatabaseHost) == "" {
-		errs = append(errs, "DATABASE_HOST is required for durable lifecycle coordination.")
-	}
-	if strings.TrimSpace(s.DatabaseName) == "" {
-		errs = append(errs, "DATABASE_NAME is required for durable lifecycle coordination.")
-	}
-	if strings.TrimSpace(s.DatabaseUser) == "" {
-		errs = append(errs, "DATABASE_USER is required for durable lifecycle coordination.")
-	}
-	if s.DatabasePort <= 0 || s.DatabasePort > 65535 {
-		errs = append(errs, "DATABASE_PORT must be a valid TCP port.")
-	}
-	if !validSSLModes[s.DatabaseSSLMode] {
-		errs = append(errs,
-			"DATABASE_SSL_MODE must be one of require, verify-ca, verify-full.")
-	}
+
 	switch s.DatabaseMigrationMode {
 	case MigrationModeExternal, MigrationModeManaged:
 	default:
 		errs = append(errs, "DATABASE_MIGRATION_MODE must be external or managed.")
 	}
-
 	switch s.DatabaseAuthMode {
-	case AuthModeEntra:
-		if strings.TrimSpace(s.AzureTenantID) == "" {
-			errs = append(errs, "AZURE_TENANT_ID is required when DATABASE_AUTH_MODE is entra.")
-		}
-		if strings.TrimSpace(s.AzureClientID) == "" {
-			errs = append(errs, "AZURE_CLIENT_ID is required when DATABASE_AUTH_MODE is entra.")
-		}
-		if strings.TrimSpace(s.AzureClientSecret) == "" {
-			errs = append(errs, "AZURE_CLIENT_SECRET is required when DATABASE_AUTH_MODE is entra.")
-		}
-		if strings.TrimSpace(s.AzurePostgresTokenScope) == "" {
-			errs = append(errs, "AZURE_POSTGRES_TOKEN_SCOPE must not be empty.")
-		}
-	case AuthModePassword:
-		if strings.TrimSpace(s.DatabasePassword) == "" {
-			errs = append(errs, "DATABASE_PASSWORD is required when DATABASE_AUTH_MODE is password.")
-		}
+	case AuthModeEntra, AuthModePassword:
 	default:
 		errs = append(errs, "DATABASE_AUTH_MODE must be entra or password.")
+	}
+
+	if strings.TrimSpace(s.DatabaseURL) == "" {
+		errs = append(errs, "DATABASE_URL is required for durable lifecycle coordination: "+
+			"postgres://<user>@<host>:5432/<database>?sslmode=verify-full")
+		return errs
+	}
+	parsed, err := url.Parse(strings.TrimSpace(s.DatabaseURL))
+	if err != nil {
+		// The URL may carry a password, so the value never reaches the message.
+		errs = append(errs, "DATABASE_URL is not a valid URL.")
+		return errs
+	}
+	if parsed.Scheme != "postgres" && parsed.Scheme != "postgresql" {
+		errs = append(errs, "DATABASE_URL must use the postgres:// scheme.")
+	}
+	if parsed.Hostname() == "" {
+		errs = append(errs, "DATABASE_URL must name a host.")
+	}
+	if strings.Trim(parsed.Path, "/") == "" {
+		errs = append(errs, "DATABASE_URL must name a database.")
+	}
+
+	sslMode := parsed.Query().Get("sslmode")
+	if s.DatabaseAuthMode == AuthModeEntra {
+		// The Entra principal is the database user, and the token is minted
+		// for it, so the URL has to say who is connecting.
+		if parsed.User == nil || parsed.User.Username() == "" {
+			errs = append(errs, "DATABASE_URL must name a user when DATABASE_AUTH_MODE is entra: "+
+				"the Entra principal is the database user.")
+		}
+		// This connection carries a bearer token. The modes that can fall back
+		// to plaintext would put it on the wire in the clear, so they are
+		// refused here rather than merely discouraged.
+		if !validSSLModes[sslMode] {
+			errs = append(errs, "DATABASE_URL must set sslmode to one of require, verify-ca "+
+				"or verify-full when DATABASE_AUTH_MODE is entra.")
+		}
+		errs = append(errs, s.entraErrors()...)
+	}
+	return errs
+}
+
+// entraErrors validates the principal used to mint the connection password.
+func (s Settings) entraErrors() []string {
+	var errs []string
+	if strings.TrimSpace(s.AzureTenantID) == "" {
+		errs = append(errs, "AZURE_TENANT_ID is required when DATABASE_AUTH_MODE is entra.")
+	}
+	if strings.TrimSpace(s.AzureClientID) == "" {
+		errs = append(errs, "AZURE_CLIENT_ID is required when DATABASE_AUTH_MODE is entra.")
+	}
+	if strings.TrimSpace(s.AzureClientSecret) == "" {
+		errs = append(errs, "AZURE_CLIENT_SECRET is required when DATABASE_AUTH_MODE is entra.")
+	}
+	if strings.TrimSpace(s.AzurePostgresTokenScope) == "" {
+		errs = append(errs, "AZURE_POSTGRES_TOKEN_SCOPE must not be empty.")
 	}
 	return errs
 }

@@ -272,95 +272,107 @@ func TestTheDefaultEndpointIsTheTenantsTokenEndpoint(t *testing.T) {
 func entraSettings() config.Settings {
 	return config.Settings{
 		DatabaseAuthMode: config.AuthModeEntra,
-		DatabaseHost:     "janus.postgres.database.azure.com",
-		DatabasePort:     5432,
-		DatabaseName:     "control_translation",
-		DatabaseUser:     "janus-app",
-		DatabaseSSLMode:  "verify-full",
+		DatabaseURL: "postgres://janus-app@janus.postgres.database.azure.com:5432" +
+			"/control_translation?sslmode=verify-full",
 	}
 }
 
-// The connection string describes where to connect, never how to authenticate:
-// on the Entra path the password is attached per connection, and a password
-// baked into the string would be a stale token within the hour.
-func TestTheConnectionStringCarriesNoCredential(t *testing.T) {
-	built := connectionString(entraSettings())
-
-	parsed, err := url.Parse(built)
+// The connection string is DATABASE_URL as the operator wrote it. The only
+// addition is an application_name, so a session holding a queue lock is
+// identifiable in pg_stat_activity.
+func TestTheConnectionStringIsTheConfiguredURL(t *testing.T) {
+	parsed, err := url.Parse(connectionString(entraSettings()))
 	if err != nil {
 		t.Fatalf("the connection string is not a URL: %v", err)
 	}
-	if password, set := parsed.User.Password(); set {
-		t.Errorf("the connection string carries a password: %q", password)
-	}
-	if parsed.User.Username() != "janus-app" {
-		t.Errorf("user = %s", parsed.User.Username())
-	}
+
 	if parsed.Host != "janus.postgres.database.azure.com:5432" {
 		t.Errorf("host = %s", parsed.Host)
 	}
 	if parsed.Path != "/control_translation" {
 		t.Errorf("database = %s", parsed.Path)
 	}
-}
-
-// verify-full is the whole point of the setting: it is what makes the server
-// certificate, and therefore the target of the token, actually checked.
-func TestTheConnectionStringKeepsTheConfiguredSSLMode(t *testing.T) {
-	for _, mode := range []string{"require", "verify-ca", "verify-full"} {
-		settings := entraSettings()
-		settings.DatabaseSSLMode = mode
-
-		parsed, err := url.Parse(connectionString(settings))
-		if err != nil {
-			t.Fatalf("the connection string is not a URL: %v", err)
-		}
-		if got := parsed.Query().Get("sslmode"); got != mode {
-			t.Errorf("sslmode = %q, want %q", got, mode)
-		}
+	if parsed.User.Username() != "janus-app" {
+		t.Errorf("user = %s", parsed.User.Username())
 	}
-}
-
-// A session holding a queue lock should be identifiable in pg_stat_activity.
-func TestTheConnectionStringNamesTheApplication(t *testing.T) {
-	parsed, _ := url.Parse(connectionString(entraSettings()))
-
+	if got := parsed.Query().Get("sslmode"); got != "verify-full" {
+		t.Errorf("sslmode = %q, want the mode the URL set", got)
+	}
 	if got := parsed.Query().Get("application_name"); got != "control-translation-go" {
 		t.Errorf("application_name = %q", got)
 	}
 }
 
-// A host or database name with a character that means something in a URL must
-// not be able to rewrite the connection.
-func TestTheConnectionStringEscapesItsParts(t *testing.T) {
+// Whatever the URL already carries is left alone: it is the operator's string,
+// not a set of parts to reassemble.
+func TestTheConnectionStringPreservesTheURLsOwnParameters(t *testing.T) {
 	settings := entraSettings()
-	settings.DatabaseUser = "janus app@tenant"
-	settings.DatabaseName = "control translation"
+	settings.DatabaseURL = "postgres://janus-app@host:5432/db" +
+		"?sslmode=verify-ca&connect_timeout=8&application_name=set-by-operator"
 
 	parsed, err := url.Parse(connectionString(settings))
 	if err != nil {
 		t.Fatalf("the connection string is not a URL: %v", err)
 	}
-	if parsed.User.Username() != "janus app@tenant" {
-		t.Errorf("user did not round-trip: %q", parsed.User.Username())
+	query := parsed.Query()
+
+	if query.Get("connect_timeout") != "8" {
+		t.Errorf("an unrelated parameter was dropped: %v", query)
 	}
-	if parsed.Path != "/control translation" {
-		t.Errorf("database did not round-trip: %q", parsed.Path)
+	if query.Get("sslmode") != "verify-ca" {
+		t.Errorf("sslmode was rewritten to %q", query.Get("sslmode"))
+	}
+	// An application_name the operator chose is theirs to keep.
+	if query.Get("application_name") != "set-by-operator" {
+		t.Errorf("application_name was overwritten: %q", query.Get("application_name"))
 	}
 }
 
-// The password path exists for local and non-Azure databases.
-func TestThePasswordModeUsesTheConfiguredSecret(t *testing.T) {
+// A password in the URL is meaningless on the Entra path -- the password is a
+// token minted per connection -- and leaving a stale one in place would only
+// produce a confusing authentication failure.
+func TestAPasswordInTheURLIsDroppedOnTheEntraPath(t *testing.T) {
+	settings := entraSettings()
+	settings.DatabaseURL = "postgres://janus-app:leftover-secret@host:5432/db?sslmode=verify-full"
+
+	built := connectionString(settings)
+
+	if strings.Contains(built, "leftover-secret") {
+		t.Errorf("a stale password survived into the connection string: %s", built)
+	}
+	parsed, _ := url.Parse(built)
+	if parsed.User.Username() != "janus-app" {
+		t.Errorf("the user was dropped along with the password: %q", parsed.User.Username())
+	}
+}
+
+// The password path uses the URL exactly as given, password and all.
+func TestThePasswordPathKeepsTheURLsCredential(t *testing.T) {
 	settings := entraSettings()
 	settings.DatabaseAuthMode = config.AuthModePassword
-	settings.DatabasePassword = "local-secret"
+	settings.DatabaseURL = "postgres://app:local-secret@127.0.0.1:55432/db?sslmode=disable"
 
-	token, err := tokenSourceFor(settings).Token(context.Background())
+	parsed, err := url.Parse(connectionString(settings))
 	if err != nil {
-		t.Fatalf("token failed: %v", err)
+		t.Fatalf("the connection string is not a URL: %v", err)
 	}
-	if token != "local-secret" {
-		t.Errorf("token = %q, want the configured password", token)
+
+	password, set := parsed.User.Password()
+	if !set || password != "local-secret" {
+		t.Error("the password path dropped the URL's own credential")
+	}
+	if got := parsed.Query().Get("sslmode"); got != "disable" {
+		t.Errorf("sslmode = %q; the password path does not rewrite it", got)
+	}
+}
+
+// The password path mints nothing: the credential is already in the URL.
+func TestThePasswordModeNeedsNoTokenSource(t *testing.T) {
+	settings := entraSettings()
+	settings.DatabaseAuthMode = config.AuthModePassword
+
+	if source := tokenSourceFor(settings); source != nil {
+		t.Errorf("password mode built a token source: %T", source)
 	}
 }
 

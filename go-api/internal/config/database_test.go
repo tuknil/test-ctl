@@ -13,12 +13,9 @@ import (
 // azureEnvironment is the deployed configuration, as the service is given it.
 func azureEnvironment() map[string]string {
 	return map[string]string{
+		"DATABASE_URL": "postgres://janus-app@janus.postgres.database.azure.com:5432" +
+			"/control_translation?sslmode=verify-full",
 		"DATABASE_AUTH_MODE":         "entra",
-		"DATABASE_HOST":              "janus.postgres.database.azure.com",
-		"DATABASE_PORT":              "5432",
-		"DATABASE_NAME":              "control_translation",
-		"DATABASE_USER":              "janus-app",
-		"DATABASE_SSL_MODE":          "verify-full",
 		"DATABASE_MIGRATION_MODE":    "external",
 		"AZURE_TENANT_ID":            "tenant-1",
 		"AZURE_CLIENT_ID":            "client-1",
@@ -58,6 +55,9 @@ func TestTheDeployedAzureConfigurationIsAccepted(t *testing.T) {
 		settings.DatabaseMigrationMode != MigrationModeExternal {
 		t.Errorf("unexpected modes: %+v", settings)
 	}
+	if !strings.Contains(settings.DatabaseURL, "janus.postgres.database.azure.com") {
+		t.Errorf("the connection URL was not read: %q", settings.DatabaseURL)
+	}
 }
 
 // The Entra path has no password, so the principal is the credential. Starting
@@ -79,40 +79,50 @@ func TestEntraModeRequiresItsPrincipal(t *testing.T) {
 	}
 }
 
-// The connection carries a bearer token. A mode that can silently fall back to
-// plaintext would put that token on the wire in the clear.
-func TestSSLModesThatAllowAPlaintextFallbackAreRefused(t *testing.T) {
+// The Entra connection carries a bearer token. A mode that can silently fall
+// back to plaintext would put that token on the wire in the clear.
+func TestEntraRefusesSSLModesThatAllowAPlaintextFallback(t *testing.T) {
 	for _, mode := range []string{"disable", "allow", "prefer"} {
 		t.Run("mode="+mode, func(t *testing.T) {
 			environment := azureEnvironment()
-			environment["DATABASE_SSL_MODE"] = mode
+			environment["DATABASE_URL"] = "postgres://janus-app@host:5432/db?sslmode=" + mode
 
 			problems := databaseProblems(settingsFor(t, environment))
 
-			if !mentions(problems, "DATABASE_SSL_MODE") {
-				t.Errorf("%q was accepted: %v", mode, problems)
+			if !mentions(problems, "sslmode") {
+				t.Errorf("%q was accepted on the entra path: %v", mode, problems)
 			}
 		})
 	}
 }
 
-// An unset DATABASE_SSL_MODE must not mean "no TLS". The default is the
-// strictest mode, so a deployment that forgets it still verifies the server.
-func TestTheDefaultSSLModeVerifiesTheServer(t *testing.T) {
+// An Entra URL with no sslmode at all is refused too: libpq's own default is
+// "prefer", which is exactly the silent fallback being guarded against.
+func TestEntraRefusesAURLWithNoSSLModeAtAll(t *testing.T) {
 	environment := azureEnvironment()
-	delete(environment, "DATABASE_SSL_MODE")
+	environment["DATABASE_URL"] = "postgres://janus-app@host:5432/db"
 
-	settings := settingsFor(t, environment)
+	if !mentions(databaseProblems(settingsFor(t, environment)), "sslmode") {
+		t.Error("an entra URL with no sslmode was accepted")
+	}
+}
 
-	if settings.DatabaseSSLMode != "verify-full" {
-		t.Errorf("default sslmode = %q, want verify-full", settings.DatabaseSSLMode)
+// The password path is local and non-Azure, where there is no token to
+// protect, so a loopback connection may use sslmode=disable.
+func TestThePasswordPathAllowsAPlaintextLocalConnection(t *testing.T) {
+	environment := azureEnvironment()
+	environment["DATABASE_AUTH_MODE"] = "password"
+	environment["DATABASE_URL"] = "postgres://app:secret@127.0.0.1:55432/db?sslmode=disable"
+
+	if problems := databaseProblems(settingsFor(t, environment)); len(problems) != 0 {
+		t.Errorf("a local password connection was rejected: %v", problems)
 	}
 }
 
 func TestVerifyingSSLModesAreAccepted(t *testing.T) {
 	for _, mode := range []string{"require", "verify-ca", "verify-full"} {
 		environment := azureEnvironment()
-		environment["DATABASE_SSL_MODE"] = mode
+		environment["DATABASE_URL"] = "postgres://janus-app@host:5432/db?sslmode=" + mode
 
 		if problems := databaseProblems(settingsFor(t, environment)); len(problems) != 0 {
 			t.Errorf("%q was rejected: %v", mode, problems)
@@ -120,18 +130,53 @@ func TestVerifyingSSLModesAreAccepted(t *testing.T) {
 	}
 }
 
-func TestTheDatabaseCoordinatesAreRequired(t *testing.T) {
-	for _, missing := range []string{"DATABASE_HOST", "DATABASE_NAME", "DATABASE_USER"} {
-		t.Run(missing, func(t *testing.T) {
+func TestTheConnectionURLIsRequired(t *testing.T) {
+	environment := azureEnvironment()
+	environment["DATABASE_URL"] = ""
+
+	problems := databaseProblems(settingsFor(t, environment))
+
+	if !mentions(problems, "DATABASE_URL") {
+		t.Errorf("a missing DATABASE_URL was not reported: %v", problems)
+	}
+}
+
+// A URL that is missing the part the connection cannot be made without should
+// fail at startup, not on the first query.
+func TestAnIncompleteConnectionURLIsRefused(t *testing.T) {
+	cases := map[string]string{
+		"no host":     "postgres:///control_translation?sslmode=verify-full",
+		"no database": "postgres://janus-app@host:5432?sslmode=verify-full",
+		"wrong scheme": "mysql://janus-app@host:3306/control_translation" +
+			"?sslmode=verify-full",
+		"not a url": "postgres://janus-app@host:notaport/db",
+		// The Entra token is minted for a principal, so the URL has to say who.
+		"no user on the entra path": "postgres://host:5432/control_translation" +
+			"?sslmode=verify-full",
+	}
+	for name, raw := range cases {
+		t.Run(name, func(t *testing.T) {
 			environment := azureEnvironment()
-			environment[missing] = ""
+			environment["DATABASE_URL"] = raw
 
-			problems := databaseProblems(settingsFor(t, environment))
-
-			if !mentions(problems, missing) {
-				t.Errorf("a missing %s was not reported: %v", missing, problems)
+			if problems := databaseProblems(settingsFor(t, environment)); len(problems) == 0 {
+				t.Errorf("%q was accepted", raw)
 			}
 		})
+	}
+}
+
+// A malformed URL may still contain a password, so the value must not be
+// echoed back in the complaint about it.
+func TestAMalformedConnectionURLIsNotEchoed(t *testing.T) {
+	const secret = "url-password-value"
+	environment := azureEnvironment()
+	environment["DATABASE_URL"] = "postgres://app:" + secret + "@host:notaport/db"
+
+	for _, problem := range settingsFor(t, environment).ConfigurationErrors() {
+		if strings.Contains(problem, secret) {
+			t.Errorf("a configuration error echoed the URL password: %s", problem)
+		}
 	}
 }
 
@@ -157,23 +202,18 @@ func TestAnUnknownMigrationModeIsRefused(t *testing.T) {
 	}
 }
 
-// The password path is for local and non-Azure databases, where the Entra
-// principal is meaningless and the secret is the credential.
-func TestPasswordModeRequiresAPasswordAndNotAPrincipal(t *testing.T) {
+// The Entra principal is meaningless on the password path, where the
+// credential is in the URL, so it is not demanded there.
+func TestPasswordModeDoesNotRequireAnEntraPrincipal(t *testing.T) {
 	environment := azureEnvironment()
 	environment["DATABASE_AUTH_MODE"] = "password"
+	environment["DATABASE_URL"] = "postgres://app:secret@127.0.0.1:5432/db?sslmode=require"
 	environment["AZURE_TENANT_ID"] = ""
 	environment["AZURE_CLIENT_ID"] = ""
 	environment["AZURE_CLIENT_SECRET"] = ""
 
-	problems := databaseProblems(settingsFor(t, environment))
-	if !mentions(problems, "DATABASE_PASSWORD") {
-		t.Errorf("password mode without a password was accepted: %v", problems)
-	}
-
-	environment["DATABASE_PASSWORD"] = "local-secret"
 	if problems := databaseProblems(settingsFor(t, environment)); len(problems) != 0 {
-		t.Errorf("password mode with a password was rejected: %v", problems)
+		t.Errorf("password mode was made to supply an Entra principal: %v", problems)
 	}
 }
 
@@ -182,8 +222,7 @@ func TestPasswordModeRequiresAPasswordAndNotAPrincipal(t *testing.T) {
 func TestConfigurationErrorsNeverEchoTheSecret(t *testing.T) {
 	const secret = "super-secret-value"
 	environment := azureEnvironment()
-	environment["DATABASE_HOST"] = ""
-	environment["DATABASE_SSL_MODE"] = "disable"
+	environment["DATABASE_URL"] = "postgres://janus-app@host:5432/db?sslmode=disable"
 
 	for _, problem := range settingsFor(t, environment).ConfigurationErrors() {
 		if strings.Contains(problem, secret) {
@@ -215,16 +254,27 @@ func TestZeroReplicasIsStillRefused(t *testing.T) {
 	}
 }
 
-// DATABASE_PATH configured the SQLite file. A deployment still setting it
-// should not appear to work while the service reads something else.
-func TestTheRetiredSQLitePathIsNoLongerRead(t *testing.T) {
+// DATABASE_PATH configured the SQLite file, and DATABASE_HOST and its
+// neighbours configured Postgres before the URL replaced them. A deployment
+// still setting any of them should not appear to work while the service reads
+// something else.
+func TestTheRetiredDatabaseVariablesAreNoLongerRead(t *testing.T) {
 	environment := azureEnvironment()
 	environment["DATABASE_PATH"] = "/app/data/control_translation.db"
+	environment["DATABASE_HOST"] = "wrong.example.com"
+	environment["DATABASE_PORT"] = "1234"
+	environment["DATABASE_NAME"] = "wrong_database"
+	environment["DATABASE_USER"] = "wrong-user"
+	environment["DATABASE_PASSWORD"] = "wrong-password"
+	environment["DATABASE_SSL_MODE"] = "disable"
 
 	settings := settingsFor(t, environment)
 
-	if settings.DatabaseHost != "janus.postgres.database.azure.com" {
-		t.Errorf("DATABASE_PATH displaced the Postgres coordinates: %+v", settings)
+	if !strings.Contains(settings.DatabaseURL, "janus.postgres.database.azure.com") {
+		t.Errorf("a retired variable displaced DATABASE_URL: %q", settings.DatabaseURL)
+	}
+	if problems := databaseProblems(settings); len(problems) != 0 {
+		t.Errorf("a retired variable was still validated: %v", problems)
 	}
 }
 

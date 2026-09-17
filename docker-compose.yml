@@ -82,22 +82,19 @@ services:
       # The Go service takes its whole Databricks connection from this one
       # string and ignores the individual DATABRICKS_* variables in .env.
       - DATABRICKS_DSN=${DATABRICKS_DSN}
+      # One string for the whole connection. The local server has no TLS, which
+      # the password path allows; the deployed Entra path requires verify-full.
+      - DATABASE_URL=postgres://control_translation:control_translation@postgres:5432/control_translation?sslmode=disable
       - DATABASE_AUTH_MODE=password
-      - DATABASE_HOST=postgres
-      - DATABASE_PORT=5432
-      - DATABASE_NAME=control_translation
-      - DATABASE_USER=control_translation
-      - DATABASE_PASSWORD=control_translation
-      # The local server has no TLS, and require is the weakest mode the
-      # service accepts; the deployed one uses verify-full.
-      - DATABASE_SSL_MODE=require
       - DATABASE_MIGRATION_MODE=managed
     depends_on:
       postgres:
         condition: service_healthy
     restart: unless-stopped
 
-  # The lifecycle queue for the Go service. Only started with the go profile.
+  # The lifecycle queue for the Go service, and the database `go test ./...` in
+  # go-api expects. Only started with the go profile:
+  #   docker compose --profile go up -d postgres
   postgres:
     profiles: ["go"]
     image: postgres:16-alpine

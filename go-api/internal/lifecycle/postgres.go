@@ -16,9 +16,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"net"
 	"net/url"
-	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -60,6 +59,9 @@ func Open(settings config.Settings) (*Store, error) {
 }
 
 // tokenSourceFor picks how the connection password is produced.
+//
+// On the password path there is nothing to produce: the password is already in
+// DATABASE_URL, so no source is returned and the URL is used as given.
 func tokenSourceFor(settings config.Settings) TokenSource {
 	if settings.DatabaseAuthMode == config.AuthModeEntra {
 		return NewEntraTokenSource(
@@ -67,7 +69,7 @@ func tokenSourceFor(settings config.Settings) TokenSource {
 			settings.AzureClientSecret, settings.AzurePostgresTokenScope,
 		)
 	}
-	return staticToken(settings.DatabasePassword)
+	return nil
 }
 
 // OpenWithTokenSource is Open with the credential source supplied, which is
@@ -119,23 +121,32 @@ func open(url, migrationMode string, tokens TokenSource) (*Store, error) {
 	return store, nil
 }
 
-// connectionString describes the target without any credential in it. The
-// password is attached per connection by BeforeConnect.
+// connectionString is DATABASE_URL, with the one addition worth making: an
+// application_name, so a session holding a queue lock is identifiable in
+// pg_stat_activity. Anything already in the URL is left alone -- it is the
+// operator's string, not a set of parts to reassemble.
+//
+// On the Entra path any password in the URL is dropped. A token is attached
+// per connection instead, and leaving a stale one in place would only produce
+// a confusing authentication failure.
 func connectionString(settings config.Settings) string {
-	host := net.JoinHostPort(settings.DatabaseHost, strconv.Itoa(settings.DatabasePort))
-	values := url.Values{
-		"sslmode": {settings.DatabaseSSLMode},
-		// Named so a session holding a lock is identifiable in pg_stat_activity.
-		"application_name": {"control-translation-go"},
+	raw := strings.TrimSpace(settings.DatabaseURL)
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		// Configuration validation already reports this; pass it through so
+		// the driver produces the error rather than this returning a
+		// half-built string.
+		return raw
 	}
-	target := url.URL{
-		Scheme:   "postgres",
-		User:     url.User(settings.DatabaseUser),
-		Host:     host,
-		Path:     "/" + settings.DatabaseName,
-		RawQuery: values.Encode(),
+	if settings.DatabaseAuthMode == config.AuthModeEntra && parsed.User != nil {
+		parsed.User = url.User(parsed.User.Username())
 	}
-	return target.String()
+	query := parsed.Query()
+	if query.Get("application_name") == "" {
+		query.Set("application_name", "control-translation-go")
+		parsed.RawQuery = query.Encode()
+	}
+	return parsed.String()
 }
 
 // Close releases the pool.

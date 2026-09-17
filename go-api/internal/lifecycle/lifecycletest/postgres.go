@@ -21,9 +21,14 @@ import (
 	"github.com/ATT-CSO/control-translation/go-api/internal/lifecycle"
 )
 
-// DefaultURL is where the tests look when TEST_DATABASE_URL is unset. See
-// go-api/README.md for the one command that starts a matching server.
-const DefaultURL = "postgres://postgres@127.0.0.1:55432/control_translation_test?sslmode=disable"
+// DefaultURL is where the tests look when TEST_DATABASE_URL is unset. It
+// matches the postgres service in docker-compose.yml, so
+// `docker compose --profile go up -d postgres` is all the setup there is.
+//
+// Beware the skip below: a queue suite that skips is a suite that did not run.
+// When a change to this package looks green, check that it actually ran.
+const DefaultURL = "postgres://control_translation:control_translation" +
+	"@127.0.0.1:55432/control_translation?sslmode=disable"
 
 // URL is the server the tests use.
 func URL() string {

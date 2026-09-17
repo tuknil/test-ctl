@@ -24,10 +24,14 @@ docker compose --profile go up -d postgres
 cd go-api && go test ./... && go run ./cmd/api
 ```
 
-Tests look for `TEST_DATABASE_URL`, falling back to
-`postgres://postgres@127.0.0.1:55432/control_translation_test?sslmode=disable`,
+Tests look for `TEST_DATABASE_URL`, falling back to the compose service above,
 and each one runs in a schema of its own. When no server is reachable they
-skip rather than fail, and say so.
+**skip** rather than fail — so a green run with no database is a run that
+tested nothing. After changing this package, check that it actually ran:
+
+```bash
+go test ./internal/lifecycle/ -v | grep -c -- "--- SKIP"
+```
 
 Databricks and Postgres are both required, so `/ready` fails until they are
 configured. Locally, with an ordinary password and the service creating its own
@@ -35,10 +39,8 @@ schema:
 
 ```bash
 DATABRICKS_DSN='token:...@adb-....azuredatabricks.net:443/sql/1.0/warehouses/...' \
-DATABASE_AUTH_MODE=password DATABASE_HOST=127.0.0.1 DATABASE_PORT=55432 \
-DATABASE_NAME=control_translation DATABASE_USER=control_translation \
-DATABASE_PASSWORD=control_translation DATABASE_SSL_MODE=require \
-DATABASE_MIGRATION_MODE=managed \
+DATABASE_URL='postgres://control_translation:control_translation@127.0.0.1:55432/control_translation?sslmode=disable' \
+DATABASE_AUTH_MODE=password DATABASE_MIGRATION_MODE=managed \
 CORS_ALLOWED_ORIGINS=http://127.0.0.1:8080 go run ./cmd/api
 ```
 
@@ -248,19 +250,31 @@ blocking on it or taking it twice, so `SERVICE_REPLICA_COUNT` is no longer
 pinned to 1 — that limit existed only because the queue used to be a local
 file.
 
+**`DATABASE_URL` is the whole connection** — host, port, database, user,
+`sslmode`, and on the password path the password. One string, the way
+`DATABRICKS_DSN` is one string. It is used as the operator wrote it; the only
+thing added is an `application_name`, so a session holding a queue lock is
+identifiable in `pg_stat_activity`, and an `application_name` already in the
+URL is left alone.
+
 **Authentication is an Entra token, not a password.** `DATABASE_AUTH_MODE=entra`
 mints a token per connection from `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and
 `AZURE_CLIENT_SECRET` for `AZURE_POSTGRES_TOKEN_SCOPE`, caches it until shortly
 before it expires, and attaches it as the connection password. Nothing is
 stored: a token lives about an hour, so it could not be configured even if you
-wanted to. Pool connections are recycled every 30 minutes, well inside that
-window, so the pool never holds one whose token has since expired.
-`DATABASE_AUTH_MODE=password` is the local and non-Azure path.
+wanted to. The URL still names the *user*, because the token is minted for that
+principal — and any password left in the URL is dropped, since a stale one
+would only produce a confusing authentication failure. Pool connections are
+recycled every 30 minutes, well inside the token's hour, so the pool never
+holds one whose token has since expired.
 
-`DATABASE_SSL_MODE` accepts only `require`, `verify-ca` and `verify-full`. The
-modes that can silently fall back to plaintext are rejected rather than
-supported, because this connection carries a bearer token; `verify-full` is the
-default and what the deployed service uses.
+On the Entra path `sslmode` is **required** and must be `require`, `verify-ca`
+or `verify-full`. The modes that can silently fall back to plaintext are
+refused, because the connection carries a bearer token — and a URL with no
+`sslmode` at all is refused too, since libpq's own default is `prefer`, which
+is exactly that fallback. `DATABASE_AUTH_MODE=password` is the local and
+non-Azure path and carries no such restriction, so a loopback connection may
+use `sslmode=disable`.
 
 `DATABASE_MIGRATION_MODE=external` — the deployed setting — means a separate
 process owns the schema. The service verifies the queue table exists and fails

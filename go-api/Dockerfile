@@ -31,9 +31,7 @@ COPY --from=build /out/control-translation-api /app/control-translation-api
 
 ENV HOST=0.0.0.0 \
     PORT=8000 \
-    DATABASE_PORT=5432 \
     DATABASE_AUTH_MODE=entra \
-    DATABASE_SSL_MODE=verify-full \
     DATABASE_MIGRATION_MODE=external \
     SERVICE_REPLICA_COUNT=1
 
@@ -42,8 +40,8 @@ ENV HOST=0.0.0.0 \
 # freely -- runs are claimed with FOR UPDATE SKIP LOCKED, so two replicas
 # cannot take the same one.
 #
-# ca-certificates above is what makes DATABASE_SSL_MODE=verify-full work: the
-# Azure server certificate is verified against this trust store.
+# ca-certificates above is what makes sslmode=verify-full in DATABASE_URL work:
+# the Azure server certificate is verified against this trust store.
 EXPOSE 8000
 
 # The binary answers /ready itself, so the platform probe is the health check.
