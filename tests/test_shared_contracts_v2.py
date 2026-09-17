@@ -417,7 +417,7 @@ def _chain(*, current_profiles: bool = False) -> tuple[SharedContractV2InvokeReq
         "campaign_results": campaigns,
         "counterexamples": [],
         "feedback": [],
-        "accounting": bv_seed["accounting"],
+        "accounting": _load("bypass-validation-expanded-work-accounting.json"),
         "limitations": [],
         "prose_summary": "Every required obligation campaign completed without an attributable bypass.",
         "produced_at": CREATED_AT,
@@ -546,6 +546,27 @@ def _resign_record(
     return SharedContractV2InvokeRequest.model_validate(body)
 
 
+def _sync_bv_dimension_accounting(records: dict[str, UpstreamRecord]) -> None:
+    bv = records["bypass-validation"].result
+    dimensions = [
+        dimension
+        for campaign in bv["campaign_results"]
+        for dimension in campaign["attempted_dimensions"]
+    ]
+    executed = sum(len(campaign["attempt_refs"]) for campaign in bv["campaign_results"])
+    disposed = executed + sum(dimension["supported"] is False for dimension in dimensions)
+    bv["search_bounds"]["variant_families_attempted"] = sorted(
+        {dimension["transformation"] for dimension in dimensions}
+    )
+    bv["search_bounds"]["attempt_budget"] = len(dimensions)
+    bv["search_bounds"]["attempts_executed"] = executed
+    bv["accounting"]["required_work_item_count"] = len(dimensions)
+    bv["accounting"]["disposed_work_item_count"] = disposed
+    bv["accounting"]["unaccounted_required_work_item_count"] = (
+        len(dimensions) - disposed
+    )
+
+
 class FakeResolver:
     def __init__(self, records: dict[str, UpstreamRecord]) -> None:
         self.records = records
@@ -655,7 +676,46 @@ def test_valid_four_result_join_is_complete_and_deterministic() -> None:
     assert first.verification == second.verification
     assert first.verification.required_obligation_count == 6
     assert first.accounting.unaccounted_required_obligation_count == 0
+    assert first.accounting.model_dump(mode="json") == _load(
+        "bypass-validation-expanded-work-accounting.json"
+    )
+    assert (
+        first.accounting.required_work_item_count
+        > first.accounting.required_obligation_count
+    )
     assert set(first.artifact_contents) == {"artifact-main", "artifact-carriers"}
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("required_work_item_count", 20),
+        ("disposed_work_item_count", 18),
+    ],
+)
+def test_join_rejects_bv_campaign_accounting_contradiction(
+    field: str, value: int
+) -> None:
+    request, records = _chain()
+    records["bypass-validation"].result["accounting"][field] = value
+    request = _resign_record(request, records, "bypass-validation")
+
+    with pytest.raises(SharedContractV2Error) as raised:
+        verify_four_result_join(records, _locators(request))
+    assert raised.value.code == "bv-accounting-invalid"
+
+
+def test_join_rejects_globally_duplicated_bv_attempt_id() -> None:
+    request, records = _chain()
+    campaigns = records["bypass-validation"].result["campaign_results"]
+    duplicate_id = campaigns[0]["attempt_refs"][0]
+    campaigns[1]["attempted_dimensions"][0]["attempt_id"] = duplicate_id
+    campaigns[1]["attempt_refs"][0] = duplicate_id
+    request = _resign_record(request, records, "bypass-validation")
+
+    with pytest.raises(SharedContractV2Error) as raised:
+        verify_four_result_join(records, _locators(request))
+    assert raised.value.code == "bv-attempt-accounting-invalid"
 
 
 def test_current_four_result_join_requires_exact_profile_revisions() -> None:
@@ -681,6 +741,142 @@ def test_current_bv_optional_dimension_fields_accept_serialized_nulls() -> None:
     verified = resolve_and_verify_four_result_join(request, FakeResolver(records))
 
     assert verified.verification.all_required_obligations_have_required_bv_disposition
+
+
+def test_current_bv_accepts_real_regex_challenge_dimension() -> None:
+    request, records = _chain(current_profiles=True)
+    campaign = next(
+        campaign
+        for campaign in records["bypass-validation"].result["campaign_results"]
+        if any(
+            dimension["component_id"] == "component-url"
+            for dimension in campaign["attempted_dimensions"]
+        )
+    )
+    baseline = next(
+        dimension
+        for dimension in campaign["attempted_dimensions"]
+        if dimension["component_id"] == "component-url"
+    )
+    challenge = {
+        **baseline,
+        "transformation": (
+            "challenge:regex-independent-witness:slot-resource:0|"
+            "component:component-url|carrier:query|transformation:"
+            + baseline["transformation"].split("|", 1)[-1]
+        ),
+        "attempt_id": "bv-attempt:regex-independent-witness",
+    }
+    campaign["attempted_dimensions"].append(challenge)
+    campaign["attempt_refs"].append(challenge["attempt_id"])
+    _sync_bv_dimension_accounting(records)
+    request = _resign_record(request, records, "bypass-validation")
+
+    verified = resolve_and_verify_four_result_join(request, FakeResolver(records))
+
+    assert verified.accounting.required_work_item_count == 20
+
+
+def test_current_bv_accepts_deduplicated_multi_attribution_label() -> None:
+    request, records = _chain(current_profiles=True)
+    dimension = next(
+        dimension
+        for campaign in records["bypass-validation"].result["campaign_results"]
+        for dimension in campaign["attempted_dimensions"]
+        if dimension["component_id"] == "component-url"
+    )
+    producer_label = dimension["transformation"]
+    dimension["transformation"] = (
+        producer_label
+        + "||attribution:challenge:regex-independent-witness:slot-resource:0|"
+        "component:component-url|carrier:query|transformation:"
+        + producer_label.split("|", 1)[-1]
+    )
+    _sync_bv_dimension_accounting(records)
+    request = _resign_record(request, records, "bypass-validation")
+
+    verified = resolve_and_verify_four_result_join(request, FakeResolver(records))
+
+    assert verified.verification.all_required_obligations_have_required_bv_disposition
+
+
+def test_current_bv_accepts_unsupported_approved_challenge() -> None:
+    request, records = _chain(current_profiles=True)
+    campaign = next(
+        campaign
+        for campaign in records["bypass-validation"].result["campaign_results"]
+        if any(
+            dimension["component_id"] == "component-query"
+            for dimension in campaign["attempted_dimensions"]
+        )
+    )
+    baseline = next(
+        dimension
+        for dimension in campaign["attempted_dimensions"]
+        if dimension["component_id"] == "component-query"
+    )
+    campaign["attempted_dimensions"].append(
+        {
+            "carrier": baseline["carrier"],
+            "transformation": (
+                "challenge:percent-representation:slot-probe|"
+                "component:component-query|carrier:query|transformation:unsupported"
+            ),
+            "input_id": baseline["input_id"],
+            "component_id": baseline["component_id"],
+            "supported": False,
+            "detail": "authenticated source decoder chain is unavailable",
+        }
+    )
+    _sync_bv_dimension_accounting(records)
+    request = _resign_record(request, records, "bypass-validation")
+
+    verified = resolve_and_verify_four_result_join(request, FakeResolver(records))
+
+    assert verified.accounting.required_work_item_count == 20
+    assert verified.accounting.disposed_work_item_count == 20
+
+
+@pytest.mark.parametrize(
+    "challenge_label",
+    [
+        "challenge:not-profile-approved:slot-resource:0|component:component-url|carrier:query|transformation:bv:query:0:decode",
+        "challenge:regex-independent-witness:slot-resource:0|component:component-query|carrier:query|transformation:bv:query:0:decode",
+        "challenge:regex-independent-witness:slot-resource:2|component:component-url|carrier:query|transformation:bv:query:0:decode",
+    ],
+)
+def test_current_bv_rejects_bogus_challenge_attribution(
+    challenge_label: str,
+) -> None:
+    request, records = _chain(current_profiles=True)
+    dimension = next(
+        dimension
+        for campaign in records["bypass-validation"].result["campaign_results"]
+        for dimension in campaign["attempted_dimensions"]
+        if dimension["component_id"] == "component-url"
+    )
+    dimension["transformation"] += "||attribution:" + challenge_label
+    _sync_bv_dimension_accounting(records)
+    request = _resign_record(request, records, "bypass-validation")
+
+    with pytest.raises(SharedContractV2Error) as raised:
+        resolve_and_verify_four_result_join(request, FakeResolver(records))
+
+    assert raised.value.code == "bv-dimension-invalid"
+
+
+def test_current_bv_rejects_missing_required_producer_dimension() -> None:
+    request, records = _chain(current_profiles=True)
+    campaign = records["bypass-validation"].result["campaign_results"][0]
+    removed = campaign["attempted_dimensions"].pop()
+    campaign["attempt_refs"].remove(removed["attempt_id"])
+    _sync_bv_dimension_accounting(records)
+    request = _resign_record(request, records, "bypass-validation")
+
+    with pytest.raises(SharedContractV2Error) as raised:
+        resolve_and_verify_four_result_join(request, FakeResolver(records))
+
+    assert raised.value.code == "bv-dimension-invalid"
 
 
 def test_raw_body_artifacts_translate_without_synthetic_selector() -> None:

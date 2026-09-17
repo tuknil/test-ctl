@@ -9,6 +9,12 @@
       "byte_length": 2597
     },
     {
+      "name": "bypass-validation-expanded-work-accounting.json",
+      "source": "control-translation regression fixture for campaign-derived BV work accounting",
+      "sha256": "sha256:28dd0a4013cb11cc599d469aba60f18ee2ed8cd51126eb0efaca1bbe49481a38",
+      "byte_length": 379
+    },
+    {
       "name": "bypass-validation-root-dimensions-ddb49be.json",
       "source": "bypass-validation producer capture@ddb49be",
       "sha256": "sha256:e76e23ff745a1f161636c9a8f7336846bd721e71c1ab0f1c89fa47e416e75ed3",
