@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/ATT-CSO/control-translation/go-api/internal/store/storetest"
+	"github.com/ATT-CSO/control-translation/go-api/internal/upstream"
 )
 
 // The referenced route: the request names three Databricks rows, and the rule
@@ -72,15 +73,16 @@ func orchestrationBody(requestID string) string {
 
 // seedProofLoop registers the three rows the resolver will read. The column
 // order matches each role's SELECT.
-func seedProofLoop(fake *storetest.FakeWorkspace, artifactContent string) {
-	seedProofLoopForTarget(fake, artifactContent, "waf", "akamai-waf")
+func seedProofLoop(fake *storetest.FakeWorkspace, artifactContent string) string {
+	return seedProofLoopForTarget(fake, artifactContent, "waf", "akamai-waf")
 }
 
 // seedProofLoopForTarget seeds a proof loop whose Defense Generation row names
 // a specific control class and target technology.
+// It returns the Defense Generation result exactly as stored.
 func seedProofLoopForTarget(
 	fake *storetest.FakeWorkspace, artifactContent, controlClass, targetTechnology string,
-) {
+) string {
 	defenseRequest, _ := json.Marshal(map[string]any{
 		"vulnerability_id": vulnerabilityID, "selected_control_class": controlClass,
 		"correlation_id": correlationID,
@@ -112,6 +114,8 @@ func seedProofLoopForTarget(
 		},
 	})
 	fake.UpstreamRow(bypassID, bypassID, "no-bypass-found", correlationID, "{}", string(bypassResult))
+
+	return string(defenseResult)
 }
 
 func TestReferencedRequestCompilesTheRuleFromTheDefenseGenerationRow(t *testing.T) {
@@ -339,5 +343,127 @@ func TestLoopExhaustedRouteMarksTheCandidateNotBypassCleared(t *testing.T) {
 	}
 	if structured["bypass_counterexample"] == nil {
 		t.Error("the bypass evidence must be preserved for operator review")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Producer signature
+// ---------------------------------------------------------------------------
+
+// The orchestrator passes along what the producer signed. Databricks does not
+// hand back the producer's bytes -- it normalizes what it stored -- so the
+// reader rebuilds them before checking. These cover that end to end, on the
+// route that actually compiles a rule out of the row.
+
+// locatorFor computes what the stored Defense Generation row authenticates to.
+func locatorFor(t *testing.T, storedResult string) upstream.ProducerLocator {
+	t.Helper()
+	decoder := json.NewDecoder(strings.NewReader(storedResult))
+	decoder.UseNumber()
+	var result map[string]any
+	if err := decoder.Decode(&result); err != nil {
+		t.Fatalf("the stored row is not JSON: %v", err)
+	}
+	locator, err := upstream.LocatorFor(upstream.RoleDefense, result)
+	if err != nil {
+		t.Fatalf("unable to compute the locator: %v", err)
+	}
+	return locator
+}
+
+// signedOrchestrationBody is orchestrationBody with the Defense Generation
+// input declaring the digest and size its row must reproduce.
+func signedOrchestrationBody(t *testing.T, requestID string, locator upstream.ProducerLocator) string {
+	t.Helper()
+	var body map[string]any
+	if err := json.Unmarshal([]byte(orchestrationBody(requestID)), &body); err != nil {
+		t.Fatalf("the fixture body is not JSON: %v", err)
+	}
+	defense := body["upstream_inputs"].([]any)[0].(map[string]any)
+	if defense["capability"] != "defense-generation" {
+		t.Fatalf("expected the defense input first, got %v", defense["capability"])
+	}
+	defense["content_sha256"] = locator.ContentSHA256
+	defense["size_bytes"] = locator.SizeBytes
+
+	encoded, _ := json.Marshal(body)
+	return string(encoded)
+}
+
+func TestReferencedRequestAcceptsARowThatReproducesItsSignature(t *testing.T) {
+	handler, fake := newTestServer(t)
+	stored := seedProofLoop(fake, provenSecRule)
+
+	recorder := post(t, handler, "/invoke",
+		signedOrchestrationBody(t, "req-signed-1", locatorFor(t, stored)))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("invoke = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	payload := decode(t, recorder)
+	if payload["terminal_state"] != "translated" {
+		t.Fatalf("a correctly signed row should translate: %s", recorder.Body.String())
+	}
+}
+
+// The row was signed, then its rule was changed. The lineage still lines up --
+// every id matches -- so the digest is the only thing standing between a
+// swapped rule and a compiled Akamai policy.
+func TestReferencedRequestRefusesARowThatDoesNotReproduceItsSignature(t *testing.T) {
+	handler, fake := newTestServer(t)
+	signed := locatorFor(t, seedProofLoop(fake, provenSecRule))
+
+	// Re-seed the same row with a different rule, keeping the original locator.
+	seedProofLoop(fake, `SecRule ARGS:Researcher "@rx attacker-supplied" "id:99,deny"`)
+
+	recorder := post(t, handler, "/invoke", signedOrchestrationBody(t, "req-signed-2", signed))
+
+	payload := decode(t, recorder)
+	if payload["terminal_state"] == "translated" {
+		t.Fatalf("a tampered row must not translate: %s", recorder.Body.String())
+	}
+	structured := payload["structured_result"].(map[string]any)
+	if structured["primary_candidate"] != nil {
+		t.Errorf("a tampered row produced a candidate: %v", structured["primary_candidate"])
+	}
+	// Same decline the Python reader raises for this: the row cannot be used,
+	// so there is no pattern to translate.
+	if payload["status"] != "declined" {
+		t.Errorf("status = %v, want declined", payload["status"])
+	}
+	reason := structured["outcome_reason"].(map[string]any)
+	if reason["code"] != "insufficient-pattern-context" {
+		t.Errorf("outcome_reason = %v, want insufficient-pattern-context", reason["code"])
+	}
+	// The failure names authentication, not lineage -- every id matched.
+	if !strings.Contains(strings.ToLower(recorder.Body.String()), "authenticated") {
+		t.Errorf("the decline should say the row failed authentication: %s", recorder.Body.String())
+	}
+}
+
+// A caller that predates the signed contract sends no digest, and its rows
+// still resolve on lineage alone.
+func TestReferencedRequestStillWorksWithoutASignature(t *testing.T) {
+	handler, fake := newTestServer(t)
+	seedProofLoop(fake, provenSecRule)
+
+	recorder := post(t, handler, "/invoke", orchestrationBody("req-unsigned-1"))
+
+	payload := decode(t, recorder)
+	if payload["terminal_state"] != "translated" {
+		t.Fatalf("an unsigned request should still translate: %s", recorder.Body.String())
+	}
+}
+
+// A digest that is not a digest is rejected at the envelope, before any read.
+func TestReferencedRequestRejectsAMalformedDigest(t *testing.T) {
+	handler, fake := newTestServer(t)
+	seedProofLoop(fake, provenSecRule)
+
+	body := signedOrchestrationBody(t, "req-signed-3",
+		upstream.ProducerLocator{ContentSHA256: "not-a-digest", SizeBytes: 10})
+
+	if recorder := post(t, handler, "/invoke", body); recorder.Code != http.StatusUnprocessableEntity {
+		t.Errorf("invoke = %d, want 422: %s", recorder.Code, recorder.Body.String())
 	}
 }
