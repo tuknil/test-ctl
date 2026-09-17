@@ -1,8 +1,8 @@
 // Package config loads typed settings from the environment.
 //
-// Variable names and defaults match the Python service, so one environment
-// configures either. This lean build reads only what it uses: it has no
-// worker, no callbacks, and no SQLite, so those settings are gone.
+// This lean build reads only what it uses: it has no callbacks and no local
+// file database, so those settings are gone. The lifecycle queue is Postgres,
+// configured entirely by DATABASE_URL.
 package config
 
 import (
@@ -43,9 +43,14 @@ type Settings struct {
 	DatabricksSchema       string
 	DatabricksResultsTable string
 
-	// The lifecycle queue is a local SQLite file: durable coordination for
-	// this replica only. Completed results go to Databricks.
-	DatabasePath               string
+	// Completed results go to Databricks; this database only coordinates which
+	// run is queued, claimed and retried.
+	//
+	// DatabaseURL is the whole Postgres connection and the only setting for
+	// it: host, port, database, user, password and sslmode, all in one string,
+	// the way DatabricksDSN is one string.
+	DatabaseURL string
+
 	ServiceReplicaCount        int
 	WorkerPollSeconds          float64
 	WorkerLeaseSeconds         int
@@ -78,7 +83,7 @@ func load() Settings {
 		DatabricksSchema:       strEnv("DATABRICKS_SCHEMA", "control_translation"),
 		DatabricksResultsTable: strEnv("DATABRICKS_RESULTS_TABLE", "control_translation_results"),
 
-		DatabasePath:               strEnv("DATABASE_PATH", "/app/data/control_translation.db"),
+		DatabaseURL:                os.Getenv("DATABASE_URL"),
 		ServiceReplicaCount:        intEnv("SERVICE_REPLICA_COUNT", 1),
 		WorkerPollSeconds:          floatEnv("WORKER_POLL_SECONDS", 0.25),
 		WorkerLeaseSeconds:         intEnv("WORKER_LEASE_SECONDS", 30),
@@ -225,14 +230,16 @@ func (s Settings) ConfigurationErrors() []string {
 	return errs
 }
 
-// workerErrors validates the lifecycle worker. The replica constraint is not
-// cosmetic: the queue is a local SQLite file, so a second replica would have
-// its own queue and its own view of which runs are claimed.
+// workerErrors validates the lifecycle worker.
+//
+// The replica constraint the SQLite queue needed is gone: Postgres is a shared
+// queue, and runs are claimed with FOR UPDATE SKIP LOCKED, so replicas cannot
+// claim the same run. SERVICE_REPLICA_COUNT is now only checked for being a
+// sane number.
 func (s Settings) workerErrors() []string {
 	var errs []string
-	if s.ServiceReplicaCount != 1 {
-		errs = append(errs,
-			"SERVICE_REPLICA_COUNT must be 1 while the lifecycle queue is a local SQLite file.")
+	if s.ServiceReplicaCount < 1 {
+		errs = append(errs, "SERVICE_REPLICA_COUNT must be at least 1.")
 	}
 	if s.WorkerPollSeconds <= 0 {
 		errs = append(errs, "WORKER_POLL_SECONDS must be greater than zero.")
@@ -250,8 +257,34 @@ func (s Settings) workerErrors() []string {
 	if s.WorkerShutdownGraceSeconds <= 0 {
 		errs = append(errs, "WORKER_SHUTDOWN_GRACE_SECONDS must be greater than zero.")
 	}
-	if strings.TrimSpace(s.DatabasePath) == "" {
-		errs = append(errs, "DATABASE_PATH is required for durable lifecycle coordination.")
+	errs = append(errs, s.databaseErrors()...)
+	return errs
+}
+
+// databaseErrors validates the Postgres lifecycle queue. One URL, so the only
+// things that can be wrong are that it is missing or not a usable Postgres URL.
+func (s Settings) databaseErrors() []string {
+	var errs []string
+
+	if strings.TrimSpace(s.DatabaseURL) == "" {
+		errs = append(errs, "DATABASE_URL is required for durable lifecycle coordination: "+
+			"postgres://<user>:<password>@<host>:5432/<database>?sslmode=require")
+		return errs
+	}
+	parsed, err := url.Parse(strings.TrimSpace(s.DatabaseURL))
+	if err != nil {
+		// The URL carries a password, so the value never reaches the message.
+		errs = append(errs, "DATABASE_URL is not a valid URL.")
+		return errs
+	}
+	if parsed.Scheme != "postgres" && parsed.Scheme != "postgresql" {
+		errs = append(errs, "DATABASE_URL must use the postgres:// scheme.")
+	}
+	if parsed.Hostname() == "" {
+		errs = append(errs, "DATABASE_URL must name a host.")
+	}
+	if strings.Trim(parsed.Path, "/") == "" {
+		errs = append(errs, "DATABASE_URL must name a database.")
 	}
 	return errs
 }

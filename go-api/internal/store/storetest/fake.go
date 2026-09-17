@@ -248,7 +248,7 @@ func FakeSettings() config.Settings {
 		DatabricksCatalog:          "test_catalog",
 		DatabricksSchema:           "control_translation",
 		DatabricksResultsTable:     "control_translation_results",
-		DatabasePath:               "lifecycle.db",
+		DatabaseURL:                "postgres://postgres:postgres@127.0.0.1:5432/control_translation_test?sslmode=disable",
 		ServiceReplicaCount:        1,
 		WorkerPollSeconds:          0.02,
 		WorkerLeaseSeconds:         30,
