@@ -175,8 +175,12 @@ func decodeJSONObject(value *string, label string) (map[string]any, error) {
 	if value == nil || *value == "" {
 		return map[string]any{}, nil
 	}
+	// UseNumber keeps integers exact: re-encoding a float64 would change the
+	// bytes the digest is computed over.
+	decoder := json.NewDecoder(strings.NewReader(*value))
+	decoder.UseNumber()
 	var decoded any
-	if err := json.Unmarshal([]byte(*value), &decoded); err != nil {
+	if err := decoder.Decode(&decoded); err != nil {
 		return nil, resolutionError("%s is not valid JSON", label)
 	}
 	object, ok := decoded.(map[string]any)

@@ -49,6 +49,7 @@ func InvokeEnvelope(
 			RoutingMetadata:         *envelope.RoutingMetadata,
 			ExpectedVulnerabilityID: subjectVulnerability(envelope),
 			ExpectedCandidateID:     subjectCandidate(envelope),
+			Locators:                producerLocators(envelope),
 		})
 		if err != nil {
 			slog.Error("upstream proof-loop resolution failed",
@@ -129,6 +130,29 @@ func referenceBundle(references contracts.UpstreamResultReferences) jsonx.Obj {
 		Set("defense_generation", encode(references.DefenseGeneration)).
 		Set("mitigation_check", encode(references.MitigationCheck)).
 		Set("bypass_validation", encode(references.BypassValidation))
+}
+
+// producerLocators keys each upstream input's declared digest by the role the
+// resolver fetches it under, so a row can be authenticated against what the
+// caller said it should be.
+func producerLocators(envelope contracts.InvokeRequestEnvelope) map[string]upstream.ProducerLocator {
+	roles := map[string]string{
+		"defense-generation": upstream.RoleDefense,
+		"mitigation-check":   upstream.RoleMitigation,
+		"bypass-validation":  upstream.RoleBypass,
+	}
+	locators := map[string]upstream.ProducerLocator{}
+	for _, input := range envelope.UpstreamInputs {
+		role, known := roles[input.Capability]
+		if !known || input.ContentSHA256 == "" {
+			continue
+		}
+		locators[role] = upstream.ProducerLocator{
+			ContentSHA256: input.ContentSHA256,
+			SizeBytes:     input.SizeBytes,
+		}
+	}
+	return locators
 }
 
 func subjectVulnerability(envelope contracts.InvokeRequestEnvelope) string {

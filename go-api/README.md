@@ -99,6 +99,32 @@ Any mismatch is `insufficient-context` with no candidate — the point of the
 read is that the service must never compile a rule belonging to a different
 candidate.
 
+**Producer signatures.** Lineage says a row *belongs* to this candidate;
+it cannot say the row is the one the producer actually emitted. When an
+`upstream_inputs[]` entry carries `content_sha256` and `size_bytes` — what the
+producer signed — the row read back must reproduce them, or resolution fails
+with `insufficient-context` and no candidate. Both fields are optional: a
+caller that does not send them resolves on lineage alone, so this is additive
+for existing callers.
+
+Databricks does not hand back the producer's bytes. It stores the result as a
+VARIANT and normalizes it, so the reader has to reconstruct the exact bytes
+`encoding/json` produced at the producer before the digest means anything:
+field order comes from the producer struct's declaration order rather than
+sorted map order, absent fields stay absent rather than being emitted as
+zeroes, the two integrity fields are blanked before hashing, and `&`, `<` and
+`>` keep Go's default HTML escaping. That last point is the opposite of what
+`internal/jsonx` does — it disables escaping to match Python's `json.dumps` for
+the candidate artifact this service emits — so the two encoders are
+deliberately different and each is pinned by its own byte-parity test.
+
+`internal/upstream/producer.go` carries the schema tables this reconstruction
+walks, ported field for field from the Python reader's. The two readers
+authenticate the same rows, so `TestReconstructionMatchesThePythonReaderByte`
+pins the Go output against a digest produced by running the same fixture
+through Python — if either side's schema drifts, that test fails rather than
+the service starting to reject good rows in production.
+
 The response echoes the three references it read in `reference_bundle`, and
 records the route in `proof_loop_qualification`. On the PoC-exhaustion route
 the candidate is still emitted but carries an explicit *not bypass-cleared*

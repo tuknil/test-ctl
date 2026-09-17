@@ -94,12 +94,23 @@ type ResolveInput struct {
 	RoutingMetadata         contracts.ProofLoopRoutingMetadata
 	ExpectedVulnerabilityID string
 	ExpectedCandidateID     string
+	// Locators declare what each row must hash to, keyed by role. A role with
+	// no locator is not authenticated, which is how a caller that predates the
+	// signed contract still resolves.
+	Locators map[string]ProducerLocator
 }
 
 const (
 	roleDefense    = "Defense Generation"
 	roleMitigation = "Mitigation Check"
 	roleBypass     = "Bypass Validation"
+)
+
+// The roles, exported so callers can key locators by the same names.
+const (
+	RoleDefense    = roleDefense
+	RoleMitigation = roleMitigation
+	RoleBypass     = roleBypass
 )
 
 // ResolveProofLoop fetches all three records and enforces proof state and
@@ -144,6 +155,13 @@ func ResolveProofLoop(in ResolveInput) (*ResolvedProofLoop, error) {
 			return nil, resolutionError("%s terminal state must be '%s'", entry.role, entry.required)
 		}
 		if err := validateRecordIdentity(entry.role, *record); err != nil {
+			return nil, err
+		}
+		// Lineage says the row belongs to this candidate; the signature says
+		// the row is the one the producer emitted. Both have to hold.
+		if err := verifyProducerSignature(
+			producerShape(entry.role), record.Result, in.Locators[entry.role],
+		); err != nil {
 			return nil, err
 		}
 		records[entry.role] = *record
@@ -305,6 +323,20 @@ func ResolveProofLoop(in ResolveInput) (*ResolvedProofLoop, error) {
 		BypassCounterexample:  counterexample,
 		BypassEvidenceRefs:    evidenceRefs,
 	}, nil
+}
+
+// producerShape maps a role onto the producer struct whose bytes are rebuilt.
+// Bypass Validation results are not reconstructed: the Python reader does not
+// carry a schema for them either, so a locator on that role is not verified.
+func producerShape(role string) string {
+	switch role {
+	case roleDefense:
+		return "defense"
+	case roleMitigation:
+		return "mitigation"
+	default:
+		return ""
+	}
 }
 
 func validateRecordIdentity(role string, record Record) error {
