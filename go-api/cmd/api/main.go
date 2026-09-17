@@ -58,9 +58,9 @@ func main() {
 		slog.Warn("Databricks is not configured; referenced invocations will decline")
 	}
 
-	// The durable queue behind the asynchronous routes. On the Entra path this
-	// is the first thing that mints a token, so a credential or firewall
-	// problem surfaces here at startup rather than on the first invocation.
+	// The durable queue behind the asynchronous routes. Connecting here at
+	// startup means a bad DATABASE_URL, an unreachable database or a missing
+	// table surfaces now rather than on the first invocation.
 	queue, err := lifecycle.Open(settings)
 	if err != nil {
 		slog.Error("unable to initialize the durable lifecycle queue", "error", err)

@@ -40,7 +40,6 @@ schema:
 ```bash
 DATABRICKS_DSN='token:...@adb-....azuredatabricks.net:443/sql/1.0/warehouses/...' \
 DATABASE_URL='postgres://control_translation:control_translation@127.0.0.1:55432/control_translation?sslmode=disable' \
-DATABASE_AUTH_MODE=password DATABASE_MIGRATION_MODE=managed \
 CORS_ALLOWED_ORIGINS=http://127.0.0.1:8080 go run ./cmd/api
 ```
 
@@ -238,9 +237,8 @@ decision.
 
 **Postgres coordinates, Databricks stores.**
 
-The lifecycle queue is a Postgres database — Azure Database for PostgreSQL in
-the deployed environment — because a Delta table has no row locks and makes a
-poor queue. The service keeps no local state: the queue is shared and the
+The lifecycle queue is a Postgres database — because a Delta table has no row
+locks and makes a poor queue. The service keeps no local state: the queue is shared and the
 results are in Databricks, so a replica can be replaced or scaled at will.
 
 A run is claimed in one statement, with `FOR UPDATE SKIP LOCKED` picking the
@@ -250,38 +248,34 @@ blocking on it or taking it twice, so `SERVICE_REPLICA_COUNT` is no longer
 pinned to 1 — that limit existed only because the queue used to be a local
 file.
 
-**`DATABASE_URL` is the whole connection** — host, port, database, user,
-`sslmode`, and on the password path the password. One string, the way
-`DATABRICKS_DSN` is one string. It is used as the operator wrote it; the only
-thing added is an `application_name`, so a session holding a queue lock is
-identifiable in `pg_stat_activity`, and an `application_name` already in the
-URL is left alone.
+**`DATABASE_URL` is the whole connection, and the only setting for it** — host,
+port, database, user, password and `sslmode`, in one string, the way
+`DATABRICKS_DSN` is one string:
 
-**Authentication is an Entra token, not a password.** `DATABASE_AUTH_MODE=entra`
-mints a token per connection from `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and
-`AZURE_CLIENT_SECRET` for `AZURE_POSTGRES_TOKEN_SCOPE`, caches it until shortly
-before it expires, and attaches it as the connection password. Nothing is
-stored: a token lives about an hour, so it could not be configured even if you
-wanted to. The URL still names the *user*, because the token is minted for that
-principal — and any password left in the URL is dropped, since a stale one
-would only produce a confusing authentication failure. Pool connections are
-recycled every 30 minutes, well inside the token's hour, so the pool never
-holds one whose token has since expired.
+```
+postgres://<user>:<password>@<host>:5432/<database>?sslmode=require
+```
 
-On the Entra path `sslmode` is **required** and must be `require`, `verify-ca`
-or `verify-full`. The modes that can silently fall back to plaintext are
-refused, because the connection carries a bearer token — and a URL with no
-`sslmode` at all is refused too, since libpq's own default is `prefer`, which
-is exactly that fallback. `DATABASE_AUTH_MODE=password` is the local and
-non-Azure path and carries no such restriction, so a loopback connection may
-use `sslmode=disable`.
+It is used as the operator wrote it. The only thing added is an
+`application_name`, so a session holding a queue lock is identifiable in
+`pg_stat_activity`, and one already in the URL is left alone. Validation checks
+only what a connection cannot be made without: that it parses, uses the
+`postgres://` scheme, and names a host and a database. The URL carries a
+password, so it is never echoed into a configuration error — not even a
+complaint about some other setting.
 
-`DATABASE_MIGRATION_MODE=external` — the deployed setting — means a separate
-process owns the schema. The service verifies the queue table exists and fails
-startup with a message naming the setting if it does not, rather than running
-`CREATE TABLE` and failing on a permission error that reads like an outage.
-`managed` lets the service create its own schema, which is what a local
-database wants.
+`sslmode` is deliberately not policed. It is the operator's to choose, so a
+local container over loopback can use `sslmode=disable`; use `require` or
+stronger for anything that is not loopback, because the password travels in
+this connection. Azure Database for PostgreSQL enforces TLS server-side
+regardless.
+
+**The schema needs no setting either.** On startup the service runs
+`CREATE TABLE IF NOT EXISTS`. If the role holds no DDL rights — a managed
+database whose schema someone else applies — that statement fails, and the
+service then checks whether the table is there anyway; if it is, there was
+nothing to do. Only a role that cannot create the table *and* cannot find it
+is a startup failure. Both postures work with nothing configured.
 
 Everything durable and shareable goes to Databricks. The write is a `MERGE` that inserts only
 when the `result_id` is absent, so a retry can never overwrite a published
@@ -425,12 +419,13 @@ committed, so that archive is the only copy.
   cancellation, and the attempt-exhaustion path.
 - The queue's concurrency is tested against a real server rather than reasoned
   about: more workers than runs claim simultaneously, and every run must be
-  claimed exactly once. The Entra token flow is tested against an HTTP stub —
-  caching, renewal inside the expiry margin, one token for concurrent callers,
-  and that a rejected request explains itself without echoing the secret.
-- **The Entra path has not been run against a live Azure Database for
-  PostgreSQL.** The token flow, the connection string and the queue are each
-  covered, but no test has authenticated to Azure with a real principal.
+  claimed exactly once. Separately, four independent OS processes were run
+  against one queue of 1000 runs — 1000 claims, 1000 distinct, none taken
+  twice.
+- **Nothing has been run against a managed Postgres.** Every check above is
+  against `postgres:16-alpine` on loopback. A managed instance differs in the
+  two places this code touches: TLS, and whether the connecting role may
+  create the table.
 - **Nothing here has been run against a live Databricks workspace.** The SQL
   and the table shape are taken from the Python service, which is a code
   reading rather than a test. The transport is now the vendor driver the
@@ -451,7 +446,7 @@ internal/capability   gate order and result assembly
 internal/databricks   DSN handling and the shared *sql.DB helpers
 internal/upstream     proof-loop lineage validation and the three-table read
 internal/store        Databricks persistence for immutable results
-internal/lifecycle    the Postgres queue, and the Entra token that opens it
+internal/lifecycle    the Postgres queue behind the asynchronous routes
 internal/httpapi      routes and CORS
 internal/jsonx        insertion-ordered JSON, for byte parity with Python
 ```

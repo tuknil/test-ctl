@@ -17,7 +17,6 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
-	"github.com/ATT-CSO/control-translation/go-api/internal/config"
 	"github.com/ATT-CSO/control-translation/go-api/internal/lifecycle"
 )
 
@@ -89,10 +88,7 @@ func Queue(t *testing.T) *lifecycle.Store {
 		_, _ = cleanup.Exec("DROP SCHEMA " + pq(schema) + " CASCADE")
 	})
 
-	// The service creates its own schema here, which is what a local database
-	// wants; the deployed one is migrated externally.
-	queue, err := lifecycle.OpenConnectionString(
-		withSearchPath(URL(), schema), config.MigrationModeManaged)
+	queue, err := lifecycle.OpenConnectionString(withSearchPath(URL(), schema))
 	if err != nil {
 		t.Fatalf("unable to open the lifecycle queue: %v", err)
 	}

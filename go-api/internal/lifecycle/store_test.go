@@ -3,12 +3,10 @@ package lifecycle_test
 import (
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/ATT-CSO/control-translation/go-api/internal/config"
 	"github.com/ATT-CSO/control-translation/go-api/internal/contracts"
 	"github.com/ATT-CSO/control-translation/go-api/internal/lifecycle"
 	"github.com/ATT-CSO/control-translation/go-api/internal/lifecycle/lifecycletest"
@@ -491,44 +489,43 @@ func TestAnUnknownRunIsNotAnError(t *testing.T) {
 // Schema handling
 // ---------------------------------------------------------------------------
 
-// The deployed posture: a separate process owns the schema, and the service's
-// principal may not hold DDL rights. A missing table has to be a clear startup
-// failure rather than a permission error on CREATE TABLE.
-func TestExternalMigrationModeRefusesToStartWithoutTheSchema(t *testing.T) {
+// The service creates its table when it can. A role without DDL rights, on a
+// database whose schema someone else applied, is not an error: the table is
+// already there. Running it twice has to be safe either way.
+func TestOpeningCreatesTheSchemaAndIsRepeatable(t *testing.T) {
 	url := lifecycletest.EmptySchemaURL(t)
 
-	_, err := lifecycle.OpenConnectionString(url, config.MigrationModeExternal)
-
-	if !errors.Is(err, lifecycle.ErrSchemaMissing) {
-		t.Fatalf("err = %v, want ErrSchemaMissing", err)
-	}
-	if !strings.Contains(err.Error(), "DATABASE_MIGRATION_MODE") {
-		t.Errorf("the failure should name the setting that explains it: %v", err)
-	}
-}
-
-// Managed mode is what a local database wants, and running it twice is safe.
-func TestManagedMigrationModeCreatesTheSchemaAndIsRepeatable(t *testing.T) {
-	url := lifecycletest.EmptySchemaURL(t)
-
-	first, err := lifecycle.OpenConnectionString(url, config.MigrationModeManaged)
+	first, err := lifecycle.OpenConnectionString(url)
 	if err != nil {
 		t.Fatalf("first open failed: %v", err)
 	}
 	_ = first.Close()
 
-	second, err := lifecycle.OpenConnectionString(url, config.MigrationModeManaged)
+	second, err := lifecycle.OpenConnectionString(url)
 	if err != nil {
 		t.Fatalf("reopening an already-migrated database failed: %v", err)
 	}
 	defer func() { _ = second.Close() }()
 
-	// External mode now finds what managed mode created.
-	third, err := lifecycle.OpenConnectionString(url, config.MigrationModeExternal)
-	if err != nil {
-		t.Fatalf("external mode rejected a schema that exists: %v", err)
+	// The second open found a usable table rather than a broken one.
+	if !second.Healthcheck() {
+		t.Error("the reopened queue is not reachable")
 	}
-	_ = third.Close()
+}
+
+// A URL that points nowhere fails at startup, not on the first query.
+func TestOpeningAnUnreachableDatabaseFails(t *testing.T) {
+	lifecycletest.Require(t)
+
+	_, err := lifecycle.OpenConnectionString(
+		"postgres://nobody:nothing@127.0.0.1:1/nowhere?sslmode=disable&connect_timeout=2")
+
+	if err == nil {
+		t.Fatal("an unreachable database should fail to open")
+	}
+	if !errors.Is(err, lifecycle.ErrStore) {
+		t.Errorf("err = %v, want ErrStore", err)
+	}
 }
 
 func TestHealthcheckReportsAReachableQueue(t *testing.T) {

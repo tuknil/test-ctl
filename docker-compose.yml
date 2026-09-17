@@ -60,10 +60,6 @@ services:
   # service's API_ENDPOINT at http://127.0.0.1:8010. It needs real
   # DATABRICKS_DSN settings in .env or it will fail readiness.
   #
-  # The deployed service authenticates to Azure Database for PostgreSQL with an
-  # Entra token and has its schema applied externally. Compose runs the local
-  # equivalent instead: an ordinary password, and the service creating its own
-  # schema, which is what DATABASE_AUTH_MODE and DATABASE_MIGRATION_MODE select.
   api-go:
     profiles: ["go"]
     build:
@@ -82,11 +78,9 @@ services:
       # The Go service takes its whole Databricks connection from this one
       # string and ignores the individual DATABRICKS_* variables in .env.
       - DATABRICKS_DSN=${DATABRICKS_DSN}
-      # One string for the whole connection. The local server has no TLS, which
-      # the password path allows; the deployed Entra path requires verify-full.
+      # One variable for the whole connection. The local server has no TLS;
+      # a deployed one should use sslmode=require or stronger.
       - DATABASE_URL=postgres://control_translation:control_translation@postgres:5432/control_translation?sslmode=disable
-      - DATABASE_AUTH_MODE=password
-      - DATABASE_MIGRATION_MODE=managed
     depends_on:
       postgres:
         condition: service_healthy

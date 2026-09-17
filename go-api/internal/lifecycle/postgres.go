@@ -5,10 +5,8 @@
 // work -- which run is queued, which worker holds it, and how many attempts it
 // has had -- because a Delta table has no row locks and makes a poor queue.
 //
-// The deployed database is Azure Database for PostgreSQL, authenticated with
-// an Entra access token rather than a password. The queue is shared: runs are
-// claimed with FOR UPDATE SKIP LOCKED, so any number of replicas can poll it
-// without two of them claiming the same run.
+// The queue is shared: runs are claimed with FOR UPDATE SKIP LOCKED, so any
+// number of replicas can poll it without two of them claiming the same run.
 package lifecycle
 
 import (
@@ -20,7 +18,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -34,10 +31,6 @@ var ErrStore = errors.New("durable lifecycle storage is unavailable")
 // ErrIdempotencyConflict reports a key reused for different semantic input.
 var ErrIdempotencyConflict = errors.New("idempotency key was already used for a different request")
 
-// ErrSchemaMissing reports that the queue table is absent and this service is
-// not the thing that creates it.
-var ErrSchemaMissing = errors.New("lifecycle schema is missing and DATABASE_MIGRATION_MODE is external")
-
 func storeError(operation string, cause error) error {
 	return fmt.Errorf("%w: %s: %v", ErrStore, operation, cause)
 }
@@ -48,65 +41,19 @@ type Store struct {
 	pool *pgxpool.Pool
 }
 
-// Open connects to the lifecycle database and readies its schema.
-//
-// Nothing here is a password: on the Entra path the connection's password is a
-// token minted immediately before each connection is made, which is why the
-// pool is built from a config with a BeforeConnect hook rather than from a
-// connection string.
+// Open connects to the lifecycle database named by DATABASE_URL.
 func Open(settings config.Settings) (*Store, error) {
-	return OpenWithTokenSource(settings, tokenSourceFor(settings))
+	return OpenConnectionString(settings.DatabaseURL)
 }
 
-// tokenSourceFor picks how the connection password is produced.
-//
-// On the password path there is nothing to produce: the password is already in
-// DATABASE_URL, so no source is returned and the URL is used as given.
-func tokenSourceFor(settings config.Settings) TokenSource {
-	if settings.DatabaseAuthMode == config.AuthModeEntra {
-		return NewEntraTokenSource(
-			settings.AzureTenantID, settings.AzureClientID,
-			settings.AzureClientSecret, settings.AzurePostgresTokenScope,
-		)
-	}
-	return nil
-}
-
-// OpenWithTokenSource is Open with the credential source supplied, which is
-// how a caller substitutes a different way of minting the password.
-func OpenWithTokenSource(settings config.Settings, tokens TokenSource) (*Store, error) {
-	return open(connectionString(settings), settings.DatabaseMigrationMode, tokens)
-}
-
-// OpenConnectionString connects using an ordinary Postgres URL, for a local or
-// non-Azure database where the password is in the string and no token has to
-// be minted. The deployed service does not use this path.
-func OpenConnectionString(url, migrationMode string) (*Store, error) {
-	return open(url, migrationMode, nil)
-}
-
-// open is the one place a pool is built, so every path gets the same lifetimes
-// and the same schema handling.
-func open(url, migrationMode string, tokens TokenSource) (*Store, error) {
-	poolConfig, err := pgxpool.ParseConfig(url)
+// OpenConnectionString connects using a Postgres URL. It is what Open does,
+// exposed for tests and for anything holding a URL rather than settings.
+func OpenConnectionString(rawURL string) (*Store, error) {
+	poolConfig, err := pgxpool.ParseConfig(connectionString(rawURL))
 	if err != nil {
-		return nil, storeError("parse-database-settings", err)
+		return nil, storeError("parse-database-url", err)
 	}
-
-	// A token lives about an hour. Recycling connections well inside that
-	// keeps the pool from holding one whose token has since expired.
-	poolConfig.MaxConnLifetime = 30 * time.Minute
 	poolConfig.MaxConnIdleTime = 5 * time.Minute
-	if tokens != nil {
-		poolConfig.BeforeConnect = func(ctx context.Context, connConfig *pgx.ConnConfig) error {
-			token, err := tokens.Token(ctx)
-			if err != nil {
-				return err
-			}
-			connConfig.Password = token
-			return nil
-		}
-	}
 
 	pool, err := pgxpool.NewWithConfig(context.Background(), poolConfig)
 	if err != nil {
@@ -114,32 +61,25 @@ func open(url, migrationMode string, tokens TokenSource) (*Store, error) {
 	}
 
 	store := &Store{db: stdlib.OpenDBFromPool(pool), pool: pool}
-	if err := store.migrate(migrationMode); err != nil {
+	if err := store.migrate(); err != nil {
 		_ = store.Close()
 		return nil, err
 	}
 	return store, nil
 }
 
-// connectionString is DATABASE_URL, with the one addition worth making: an
+// connectionString is DATABASE_URL with the one addition worth making: an
 // application_name, so a session holding a queue lock is identifiable in
-// pg_stat_activity. Anything already in the URL is left alone -- it is the
-// operator's string, not a set of parts to reassemble.
-//
-// On the Entra path any password in the URL is dropped. A token is attached
-// per connection instead, and leaving a stale one in place would only produce
-// a confusing authentication failure.
-func connectionString(settings config.Settings) string {
-	raw := strings.TrimSpace(settings.DatabaseURL)
+// pg_stat_activity. Everything else is left exactly as the operator wrote it,
+// including any application_name they chose themselves.
+func connectionString(rawURL string) string {
+	raw := strings.TrimSpace(rawURL)
 	parsed, err := url.Parse(raw)
 	if err != nil {
-		// Configuration validation already reports this; pass it through so
-		// the driver produces the error rather than this returning a
-		// half-built string.
+		// Configuration validation already reports a malformed URL. Pass it
+		// through so the driver produces the error rather than this returning
+		// a half-built string.
 		return raw
-	}
-	if settings.DatabaseAuthMode == config.AuthModeEntra && parsed.User != nil {
-		parsed.User = url.User(parsed.User.Username())
 	}
 	query := parsed.Query()
 	if query.Get("application_name") == "" {
@@ -204,32 +144,27 @@ const lifecycleSchema = `
 		ON capability_run_lifecycle(correlation_id);
 `
 
-// migrate readies the schema, or verifies someone else has.
+// migrate readies the schema, and needs no setting to say whether it may.
 //
-// In the deployed posture DATABASE_MIGRATION_MODE is external: the service's
-// principal is not expected to hold DDL rights, so it checks the table exists
-// and fails startup loudly if it does not, rather than running CREATE TABLE
-// and failing on a permission error that reads like an outage.
-func (s *Store) migrate(mode string) error {
-	if mode == config.MigrationModeExternal {
-		return s.verifySchema()
-	}
+// It tries to create the table. When that fails because the connecting role
+// holds no DDL rights -- a managed database whose schema is applied by someone
+// else -- the table is already there and there is nothing to do, so the
+// failure only matters if the table really is absent. That covers both
+// postures without asking the operator which one they are in.
+func (s *Store) migrate() error {
 	if _, err := s.db.Exec(lifecycleSchema); err != nil {
+		if present, checkErr := s.schemaPresent(); checkErr == nil && present {
+			return nil
+		}
 		return storeError("apply-migration", err)
 	}
 	return nil
 }
 
-func (s *Store) verifySchema() error {
+func (s *Store) schemaPresent() (bool, error) {
 	var present bool
 	err := s.db.QueryRow(`SELECT to_regclass('capability_run_lifecycle') IS NOT NULL`).Scan(&present)
-	if err != nil {
-		return storeError("verify-schema", err)
-	}
-	if !present {
-		return ErrSchemaMissing
-	}
-	return nil
+	return present, err
 }
 
 // isUniqueViolation reports a duplicate key, which the queue treats as a

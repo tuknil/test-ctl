@@ -1,8 +1,8 @@
 # Lean capability API: read the proven ModSecurity rule from the Databricks
 # rows the request names, compile it into an Akamai custom WAF rule, and
-# persist the result in Databricks. The asynchronous lifecycle queue is a
-# Postgres database -- Azure Database for PostgreSQL in the deployed
-# environment -- so the container keeps no state of its own.
+# persist the result in Databricks. The asynchronous lifecycle queue is the
+# Postgres database named by DATABASE_URL, so the container keeps no state of
+# its own.
 #
 # Built from the repository root:
 #   docker build -f go-api/Dockerfile -t control-translation-go:<tag> .
@@ -31,8 +31,6 @@ COPY --from=build /out/control-translation-api /app/control-translation-api
 
 ENV HOST=0.0.0.0 \
     PORT=8000 \
-    DATABASE_AUTH_MODE=entra \
-    DATABASE_MIGRATION_MODE=external \
     SERVICE_REPLICA_COUNT=1
 
 # No volume: the queue is Postgres and the results are in Databricks, so the
@@ -41,7 +39,7 @@ ENV HOST=0.0.0.0 \
 # cannot take the same one.
 #
 # ca-certificates above is what makes sslmode=verify-full in DATABASE_URL work:
-# the Azure server certificate is verified against this trust store.
+# the server certificate is verified against this trust store.
 EXPOSE 8000
 
 # The binary answers /ready itself, so the platform probe is the health check.
