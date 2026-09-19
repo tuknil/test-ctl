@@ -37,5 +37,67 @@
         {"step_id":"bv-cookie-percent-decode-2-of-2","order":1,"operation":"decode","direction":"forward","input_stage":"decoded-value","output_stage":"normalized-value","parameters":{"codec":"percent","maximum_input_bytes":4096,"max_output_bytes":4096},"preconditions":["valid percent triplets after first decode"],"evidence_refs":[{"kind":"profile","scope":"waf-bypass@3","id":"bv-percent-decode-twice"}],"failure":{"code":"invalid-second-percent-encoding","behavior":"reject"}}
       ]
     ]
-  }
+  },
+  "positive_challenges": [
+    {
+      "challenge_id": "enum-alternate",
+      "strategy": "alternate-enum",
+      "carriers": ["query", "header", "cookie", "method", "body-raw", "body-json", "path"],
+      "value_types": ["string", "bytes", "integer", "ip-address", "port", "scheme", "authority", "path", "event-attribute"],
+      "domain_kinds": ["enum"],
+      "maximum_values": 2
+    },
+    {
+      "challenge_id": "regex-independent-witness",
+      "strategy": "regex-witness",
+      "carriers": ["query", "header", "cookie", "body-raw", "body-json", "path"],
+      "value_types": ["string", "authority", "path"],
+      "domain_kinds": ["regex"],
+      "maximum_values": 2,
+      "maximum_attempts": 4096
+    },
+    {
+      "challenge_id": "integer-range-boundary",
+      "strategy": "integer-range-witness",
+      "carriers": ["query", "header", "cookie", "body-json", "path"],
+      "value_types": ["integer", "port"],
+      "domain_kinds": ["integer-range"],
+      "maximum_values": 2
+    },
+    {
+      "challenge_id": "ascii-case-variant",
+      "strategy": "ascii-case",
+      "carriers": ["query", "header", "cookie", "method", "body-raw", "body-json", "path"],
+      "value_types": ["string", "scheme", "authority", "path", "event-attribute"],
+      "domain_kinds": ["enum", "regex"],
+      "maximum_values": 2
+    },
+    {
+      "challenge_id": "percent-representation",
+      "strategy": "representation",
+      "codec": "percent",
+      "carriers": ["query", "header", "cookie", "body-raw", "body-json", "path"],
+      "value_types": ["string", "scheme", "authority", "path", "event-attribute"],
+      "domain_kinds": ["enum", "regex"],
+      "maximum_values": 1
+    },
+    {
+      "challenge_id": "hex-representation",
+      "strategy": "representation",
+      "codec": "hex",
+      "carriers": ["query", "header", "cookie", "body-raw", "body-json", "path"],
+      "value_types": ["string", "scheme", "authority", "path", "event-attribute"],
+      "domain_kinds": ["enum", "regex"],
+      "maximum_values": 1
+    },
+    {
+      "challenge_id": "base64-representation",
+      "strategy": "representation",
+      "codec": "base64",
+      "carriers": ["query", "header", "cookie", "body-raw", "body-json", "path"],
+      "value_types": ["string", "scheme", "authority", "path", "event-attribute"],
+      "domain_kinds": ["enum", "regex"],
+      "maximum_values": 1
+    }
+  ]
 }

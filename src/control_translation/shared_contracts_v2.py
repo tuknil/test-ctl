@@ -70,9 +70,9 @@ BV_RESOLVER_ID = "bv-approved-route-adapter"
 LEGACY_BV_PROFILE_FILE_DIGEST = "sha256:e32674808bc8691021f26683aaa44bdd313a25875ea57168ddb4e0a2a6c1e2bc"
 LEGACY_BV_PROFILE_BYTE_LENGTH = 3745
 LEGACY_BV_RESOLVER_PROFILE_DIGEST = "sha256:46f4d0dd59e1464acc1ef19ef68d0134a4be554cc203da653192f057aa82e577"
-BV_PROFILE_FILE_DIGEST = "sha256:ca9e037080199f3a58958aa324484953d39e9c73e904c77ea6305692024900cb"
-BV_PROFILE_BYTE_LENGTH = 3861
-BV_RESOLVER_PROFILE_DIGEST = "sha256:eb15d48ba11ecf93d26c8ae1b0f08bb1754edf0afef1c0401f1bf897ac8771af"
+BV_PROFILE_FILE_DIGEST = "sha256:9373f61caafa9fcede696e9c01e7d146235994b35faed4c9ada147b3f78396a6"
+BV_PROFILE_BYTE_LENGTH = 6251
+BV_RESOLVER_PROFILE_DIGEST = "sha256:749b4773b1f479e0b5ce00868a99a148076be87952640b41408d9dd3dc3f14f9"
 
 
 def _expected_profiles(ct_profile_id: str) -> tuple[str, str, str, str]:
@@ -620,12 +620,19 @@ def _validate_bundle(bundle: dict[str, Any], semantics: dict[str, Any], cg: dict
     return attestation, contents
 
 
-def _accounting(semantics: dict[str, Any], *, work: int) -> CoverageAccounting:
+def _accounting(
+    semantics: dict[str, Any],
+    *,
+    required_work: int,
+    disposed_work: int,
+) -> CoverageAccounting:
     members = {item["member_id"] for item in semantics["source_binding"]["members"]}
     represented = {ref["id"] for item in semantics["test_inputs"] for ref in item["source_member_refs"]}
     unsupported = {ref["id"] for item in semantics["unsupported_dimensions"] for ref in item["source_member_refs"]}
     if represented & unsupported or represented | unsupported != members:
         raise SharedContractV2Error("source-member-partition-incomplete", "source member partition differs")
+    if disposed_work > required_work:
+        raise SharedContractV2Error("coverage-accounting-invalid", "disposed work exceeds required work")
     count = len(semantics["obligations"])
     return CoverageAccounting(
         required_obligation_count=count,
@@ -635,9 +642,9 @@ def _accounting(semantics: dict[str, Any], *, work: int) -> CoverageAccounting:
         represented_source_member_count=len(represented),
         unsupported_source_member_count=len(unsupported),
         unaccounted_source_member_count=0,
-        required_work_item_count=work,
-        disposed_work_item_count=work,
-        unaccounted_required_work_item_count=0,
+        required_work_item_count=required_work,
+        disposed_work_item_count=disposed_work,
+        unaccounted_required_work_item_count=required_work - disposed_work,
     )
 
 
@@ -779,7 +786,11 @@ def _validate_mc(
             _validate_mc_evidence(case, obligation_id=obligation_id)
             _validate_mc_resolution(case, inputs[input_id], obligation_id=obligation_id, profile_id=profile_id, profile_digest=profile_digest)
         work += len(cases)
-    if mc.get("accounting") != _accounting(semantics, work=work).model_dump(mode="json"):
+    if mc.get("accounting") != _accounting(
+        semantics,
+        required_work=work,
+        disposed_work=work,
+    ).model_dump(mode="json"):
         raise SharedContractV2Error("mc-accounting-invalid", "MC CoverageAccounting differs")
 
 
@@ -792,6 +803,26 @@ def _bv_profile(profile_id: str) -> dict[str, Any]:
     if profile_id not in metadata:
         raise SharedContractV2Error("bv-profile-integrity-failed", "unapproved embedded BV profile")
     filename, byte_length, file_digest, profile_digest = metadata[profile_id]
+    if profile_id == "waf-bypass@3":
+        manifest = strict_json_bytes(
+            (BV_PROFILE_ROOT / "manifest-v3.json").read_bytes(),
+            context="waf-bypass@3 manifest",
+        )
+        expected_manifest = {
+            "manifest_version": 1,
+            "profile_id": profile_id,
+            "resolver_id": BV_RESOLVER_ID,
+            "registry_id": "janus-approved-test-routes",
+            "relative_path": filename,
+            "sha256": file_digest,
+            "byte_length": byte_length,
+            "resolver_profile_digest": profile_digest,
+        }
+        if manifest != expected_manifest:
+            raise SharedContractV2Error(
+                "bv-profile-integrity-failed",
+                "embedded waf-bypass@3 manifest metadata differs",
+            )
     raw = (BV_PROFILE_ROOT / filename).read_bytes()
     if len(raw) != byte_length or "sha256:" + hashlib_sha256(raw).hexdigest() != file_digest:
         raise SharedContractV2Error("bv-profile-integrity-failed", f"embedded {profile_id} profile bytes differ")
@@ -961,6 +992,239 @@ def _expected_bv_dimensions(obligation: dict[str, Any], semantics: dict[str, Any
     return expected
 
 
+def _v3_challenge_attribution(
+    attribution: str,
+    *,
+    actual: dict[str, Any],
+    component: dict[str, Any],
+    producer_attributions: set[str],
+    challenges: dict[str, dict[str, Any]],
+) -> None:
+    fields = attribution.split("|")
+    if (
+        len(fields) != 4
+        or not fields[0].startswith("challenge:")
+        or fields[1] != f"component:{actual['component_id']}"
+        or fields[2] != f"carrier:{actual['carrier']}"
+        or not fields[3].startswith("transformation:")
+    ):
+        raise SharedContractV2Error(
+            "bv-dimension-invalid", "BV challenge attribution shape differs"
+        )
+    challenge_label = fields[0].removeprefix("challenge:")
+    matching_ids = [
+        challenge_id
+        for challenge_id in challenges
+        if challenge_label.startswith(f"{challenge_id}:")
+    ]
+    if not matching_ids:
+        raise SharedContractV2Error(
+            "bv-dimension-invalid", "BV challenge attribution is not profile-approved"
+        )
+    challenge_id = max(matching_ids, key=len)
+    challenge = challenges[challenge_id]
+    if actual["carrier"] not in challenge.get("carriers", []):
+        raise SharedContractV2Error(
+            "bv-dimension-invalid", "BV challenge carrier is not profile-approved"
+        )
+    grammar = component.get("grammar")
+    slots = grammar.get("slots") if isinstance(grammar, dict) else None
+    if not isinstance(slots, list):
+        raise SharedContractV2Error(
+            "bv-dimension-invalid", "BV challenge component has no declared slots"
+        )
+    challenge_suffix = challenge_label[len(challenge_id) + 1 :]
+    matching_slots = [
+        slot
+        for slot in slots
+        if isinstance(slot, dict)
+        and isinstance(slot.get("slot_id"), str)
+        and (
+            challenge_suffix == slot["slot_id"]
+            or challenge_suffix.startswith(f"{slot['slot_id']}:")
+        )
+    ]
+    if not matching_slots:
+        raise SharedContractV2Error(
+            "bv-dimension-invalid", "BV challenge names an unknown component slot"
+        )
+    slot = max(matching_slots, key=lambda item: len(item["slot_id"]))
+    ordinal_suffix = challenge_suffix[len(slot["slot_id"]) :]
+    ordinal: int | None = None
+    if ordinal_suffix:
+        raw_ordinal = ordinal_suffix.removeprefix(":")
+        if not raw_ordinal.isdecimal():
+            raise SharedContractV2Error(
+                "bv-dimension-invalid", "BV challenge ordinal is malformed"
+            )
+        ordinal = int(raw_ordinal)
+        if ordinal >= challenge.get("maximum_values", 0):
+            raise SharedContractV2Error(
+                "bv-dimension-invalid", "BV challenge ordinal exceeds its profile bound"
+            )
+    domain = slot.get("allowed_domain")
+    if (
+        slot.get("value_type") not in challenge.get("value_types", [])
+        or not isinstance(domain, dict)
+        or domain.get("kind") not in challenge.get("domain_kinds", [])
+    ):
+        raise SharedContractV2Error(
+            "bv-dimension-invalid", "BV challenge is inapplicable to its declared slot"
+        )
+    transformation = fields[3].removeprefix("transformation:")
+    if actual.get("supported") is False:
+        if transformation != "unsupported":
+            raise SharedContractV2Error(
+                "bv-dimension-invalid", "BV unsupported challenge attribution differs"
+            )
+        return
+    if ordinal is None:
+        raise SharedContractV2Error(
+            "bv-dimension-invalid", "BV supported challenge has no bounded ordinal"
+        )
+    if challenge.get("strategy") == "representation":
+        expected_transformation = f"authenticated-encode-{challenge.get('codec')}"
+        if transformation != expected_transformation:
+            raise SharedContractV2Error(
+                "bv-dimension-invalid", "BV representation challenge transformation differs"
+            )
+        return
+    producer_chains = {
+        label.split("|", 1)[1] if label.startswith("grammar:") else label
+        for label in producer_attributions
+    }
+    if transformation not in producer_chains:
+        raise SharedContractV2Error(
+            "bv-dimension-invalid", "BV challenge transformation is not producer-derived"
+        )
+
+
+def _validate_bv_v3_dimensions(
+    dimensions: list[Any],
+    obligation: dict[str, Any],
+    semantics: dict[str, Any],
+    *,
+    obligation_id: str,
+) -> None:
+    components = _index(semantics["components"], "component_id", "components-invalid")
+    producer_by_target: dict[tuple[str, str, str], set[str]] = {}
+    for expected in _expected_bv_dimensions(
+        obligation, semantics, profile_id="waf-bypass@3"
+    ):
+        target = (
+            expected["input_id"],
+            expected["component_id"],
+            expected["carrier"],
+        )
+        producer_by_target.setdefault(target, set()).add(expected["transformation"])
+    profile_challenges = _bv_profile("waf-bypass@3").get("positive_challenges")
+    if not isinstance(profile_challenges, list):
+        raise SharedContractV2Error(
+            "bv-profile-integrity-failed", "embedded waf-bypass@3 challenges are absent"
+        )
+    challenges = _index(profile_challenges, "challenge_id", "bv-profile-integrity-failed")
+    seen_dimensions: set[bytes] = set()
+    seen_attributions: set[tuple[tuple[str, str, str], str]] = set()
+    observed_producers: dict[tuple[str, str, str], set[str]] = {
+        target: set() for target in producer_by_target
+    }
+    for actual in dimensions:
+        if not isinstance(actual, dict):
+            raise SharedContractV2Error(
+                "bv-dimension-invalid", f"BV dimension is malformed: {obligation_id}"
+            )
+        input_id = actual.get("input_id")
+        component_id = actual.get("component_id")
+        carrier = actual.get("carrier")
+        if (
+            not isinstance(input_id, str)
+            or not input_id
+            or not isinstance(component_id, str)
+            or not component_id
+            or not isinstance(carrier, str)
+            or not carrier
+        ):
+            raise SharedContractV2Error(
+                "bv-dimension-invalid",
+                f"BV dimension identity fields are absent: {obligation_id}",
+            )
+        target: tuple[str, str, str] = (input_id, component_id, carrier)
+        producer_attributions = producer_by_target.get(target)
+        if producer_attributions is None:
+            raise SharedContractV2Error(
+                "bv-dimension-invalid",
+                f"BV dimension is unreachable from its obligation: {obligation_id}",
+            )
+        component = components[target[1]]
+        if (
+            target[0] not in {ref["id"] for ref in obligation["required_input_refs"]}
+            or target[0] not in {ref["id"] for ref in component["input_refs"]}
+            or target[2] != _component_carrier(component)
+        ):
+            raise SharedContractV2Error(
+                "bv-dimension-invalid",
+                f"BV dimension input, component, or carrier differs: {obligation_id}",
+            )
+        transformation = actual.get("transformation")
+        if not isinstance(transformation, str) or not transformation:
+            raise SharedContractV2Error(
+                "bv-dimension-invalid", f"BV dimension label is absent: {obligation_id}"
+            )
+        dimension_key = canonical_bytes(
+            {
+                "carrier": target[2],
+                "transformation": transformation,
+                "input_id": target[0],
+                "component_id": target[1],
+            }
+        )
+        if dimension_key in seen_dimensions:
+            raise SharedContractV2Error(
+                "bv-dimension-invalid", f"BV dimension is duplicated: {obligation_id}"
+            )
+        seen_dimensions.add(dimension_key)
+        attributions = transformation.split("||attribution:")
+        if any(not attribution for attribution in attributions) or len(attributions) != len(
+            set(attributions)
+        ):
+            raise SharedContractV2Error(
+                "bv-dimension-invalid", f"BV dimension attributions are invalid: {obligation_id}"
+            )
+        if actual.get("supported") is False and any(
+            not attribution.startswith("challenge:") for attribution in attributions
+        ):
+            raise SharedContractV2Error(
+                "bv-dimension-invalid",
+                f"BV unsupported label is not an approved challenge: {obligation_id}",
+            )
+        for attribution in attributions:
+            attribution_key = (target, attribution)
+            if attribution_key in seen_attributions:
+                raise SharedContractV2Error(
+                    "bv-dimension-invalid",
+                    f"BV attribution is duplicated across dimensions: {obligation_id}",
+                )
+            seen_attributions.add(attribution_key)
+            if attribution in producer_attributions:
+                observed_producers[target].add(attribution)
+                continue
+            _v3_challenge_attribution(
+                attribution,
+                actual=actual,
+                component=component,
+                producer_attributions=producer_attributions,
+                challenges=challenges,
+            )
+    if any(
+        observed_producers[target] != expected
+        for target, expected in producer_by_target.items()
+    ):
+        raise SharedContractV2Error(
+            "bv-dimension-invalid",
+            f"BV campaign omitted required producer baseline work: {obligation_id}",
+        )
+
+
 def _validate_bv_resolution(
     resolution: Any,
     *,
@@ -1001,7 +1265,7 @@ def _validate_bv_resolution(
         raise SharedContractV2Error("bv-template-resolution-invalid", f"BV changed a nonselected template field: {obligation_id}")
 
 
-def _validate_bv(bv: dict[str, Any], semantics: dict[str, Any], attestation: dict[str, Any], locators: Mapping[str, Any], *, profile_id: str, profile_digest: str) -> None:
+def _validate_bv(bv: dict[str, Any], semantics: dict[str, Any], attestation: dict[str, Any], locators: Mapping[str, Any], *, profile_id: str, profile_digest: str) -> CoverageAccounting:
     if (
         bv.get("contract_id") != "bypass-validation@2.0"
         or bv.get("profile_id") != profile_id
@@ -1039,17 +1303,43 @@ def _validate_bv(bv: dict[str, Any], semantics: dict[str, Any], attestation: dic
     inputs = _index(semantics["test_inputs"], "input_id", "semantics-inputs-invalid")
     components = _index(semantics["components"], "component_id", "components-invalid")
     nested_resolutions: list[dict[str, Any]] = []
+    planned_work = 0
+    executed_work = 0
+    unsupported_work = 0
+    attempted_families: set[str] = set()
+    all_attempt_ids: set[str] = set()
     for obligation_id, campaign in campaigns.items():
         dimensions = campaign.get("attempted_dimensions")
         expected_dimensions = _expected_bv_dimensions(obligations[obligation_id], semantics, profile_id=profile_id)
-        if not isinstance(dimensions, list) or len(dimensions) != len(expected_dimensions):
+        if not isinstance(dimensions, list) or not dimensions:
             raise SharedContractV2Error("bv-empty-campaign", f"BV campaign has no attempted dimensions: {obligation_id}")
+        if profile_id == "waf-bypass@3":
+            _validate_bv_v3_dimensions(
+                dimensions,
+                obligations[obligation_id],
+                semantics,
+                obligation_id=obligation_id,
+            )
+            dimension_pairs = ((actual, None) for actual in dimensions)
+        else:
+            if len(dimensions) != len(expected_dimensions):
+                raise SharedContractV2Error("bv-empty-campaign", f"BV campaign has no attempted dimensions: {obligation_id}")
+            dimension_pairs = zip(dimensions, expected_dimensions, strict=True)
+        planned_work += len(dimensions)
         supported_attempt_ids: list[str] = []
         expected_resolutions: list[tuple[dict[str, Any], dict[str, Any]]] = []
-        for actual, expected in zip(dimensions, expected_dimensions, strict=True):
+        for actual, expected in dimension_pairs:
             allowed = {"carrier", "transformation", "input_id", "component_id", "supported", "detail", "attempt_id", "disposition"}
-            if not isinstance(actual, dict) or not set(actual) <= allowed or any(actual.get(key) != value for key, value in expected.items()):
+            if (
+                not isinstance(actual, dict)
+                or not set(actual) <= allowed
+                or (
+                    expected is not None
+                    and any(actual.get(key) != value for key, value in expected.items())
+                )
+            ):
                 raise SharedContractV2Error("bv-dimension-invalid", f"BV dimension is bogus or out of order: {obligation_id}")
+            attempted_families.add(actual["transformation"])
             supported = actual.get("supported")
             if supported is True:
                 if not isinstance(actual.get("attempt_id"), str) or not actual["attempt_id"] or actual.get("disposition") not in {"blocked", "bypassed", "safety-stop"} or actual.get("detail") is not None:
@@ -1066,10 +1356,19 @@ def _validate_bv(bv: dict[str, Any], semantics: dict[str, Any], attestation: dic
             elif supported is False:
                 if actual.get("attempt_id") is not None or actual.get("disposition") is not None or not isinstance(actual.get("detail"), str) or not actual["detail"]:
                     raise SharedContractV2Error("bv-dimension-invalid", f"BV unsupported dimension evidence differs: {obligation_id}")
+                unsupported_work += 1
             else:
                 raise SharedContractV2Error("bv-dimension-invalid", f"BV dimension support state is absent: {obligation_id}")
         if campaign.get("attempt_refs") != supported_attempt_ids:
             raise SharedContractV2Error("bv-attempt-accounting-invalid", f"BV attempts do not bind dimensions: {obligation_id}")
+        campaign_attempt_ids = set(supported_attempt_ids)
+        if len(campaign_attempt_ids) != len(supported_attempt_ids) or campaign_attempt_ids & all_attempt_ids:
+            raise SharedContractV2Error(
+                "bv-attempt-accounting-invalid",
+                f"BV attempt IDs are not globally unique: {obligation_id}",
+            )
+        all_attempt_ids.update(campaign_attempt_ids)
+        executed_work += len(supported_attempt_ids)
         resolutions = campaign.get("resolution_refs")
         if not isinstance(resolutions, list) or len(resolutions) != len(expected_resolutions):
             raise SharedContractV2Error("bv-template-resolution-invalid", f"BV resolutions do not bind template attempts: {obligation_id}")
@@ -1117,8 +1416,31 @@ def _validate_bv(bv: dict[str, Any], semantics: dict[str, Any], attestation: dic
             unique_resolutions.append(resolution)
     if bv.get("resolutions") != unique_resolutions:
         raise SharedContractV2Error("bv-template-resolution-invalid", "BV top-level resolutions differ from campaign resolutions")
-    if bv.get("accounting") != _accounting(semantics, work=len(obligations)).model_dump(mode="json"):
+    disposed_work = executed_work + unsupported_work
+    if disposed_work != planned_work:
+        raise SharedContractV2Error(
+            "bv-attempt-accounting-invalid",
+            "BV planned dimensions contain a silent non-executed disposition",
+        )
+    search_bounds = bv.get("search_bounds")
+    if (
+        not isinstance(search_bounds, dict)
+        or search_bounds.get("attempt_budget") != planned_work
+        or search_bounds.get("attempts_executed") != executed_work
+        or search_bounds.get("variant_families_attempted") != sorted(attempted_families)
+    ):
+        raise SharedContractV2Error(
+            "bv-attempt-accounting-invalid",
+            "BV search bounds differ from authenticated campaign dimensions",
+        )
+    accounting = _accounting(
+        semantics,
+        required_work=planned_work,
+        disposed_work=disposed_work,
+    )
+    if bv.get("accounting") != accounting.model_dump(mode="json"):
         raise SharedContractV2Error("bv-accounting-invalid", "BV CoverageAccounting differs")
+    return accounting
 
 
 @dataclass(frozen=True)
@@ -1185,7 +1507,7 @@ def verify_four_result_join(
     )
     bv_locators = dict(locators)
     bv_locators["candidate_bundle"] = bundle
-    _validate_bv(
+    accounting = _validate_bv(
         documents["bypass-validation"],
         semantics,
         attestation,
@@ -1194,7 +1516,6 @@ def verify_four_result_join(
         profile_digest=bv_profile_digest,
     )
     count = len(semantics["obligations"])
-    accounting = _accounting(semantics, work=count)
     verification = PreTranslationVerification(
         all_required_obligations_have_dg_mapping=True,
         all_required_obligations_have_mc_disposition=True,
