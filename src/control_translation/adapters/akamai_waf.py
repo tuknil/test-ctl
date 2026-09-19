@@ -165,14 +165,23 @@ class AkamaiWafAdapter:
         condition_type = condition.get("type")
         if condition_type == "argsPostJSONMatch":
             parameter = condition.get("parameter")
-            if not isinstance(parameter, str) or not parameter.strip():
+            any_field = (
+                condition.get("sourceLocationKind") == "http-body-structured"
+                and condition.get("sourceSelectorType") == "any-field"
+                and condition.get("sourceSelector") == ""
+            )
+            if (not isinstance(parameter, str) or not parameter.strip()) and not any_field:
                 errors.append(
                     f"{prefix}.parameter must identify the JSON field for "
                     "argsPostJSONMatch."
                 )
         header = condition.get("header")
         if condition_type == _HEADER_VALUE_CONDITION:
-            if not isinstance(header, str) or not header.strip():
+            any_header = (
+                condition.get("sourceCarrier") == "header"
+                and condition.get("sourceSelector") == "*"
+            )
+            if (not isinstance(header, str) or not header.strip()) and not any_header:
                 errors.append(
                     f"{prefix}.header must name a real request header for "
                     "requestHeaderValueMatch."
