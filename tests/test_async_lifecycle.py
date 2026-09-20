@@ -86,7 +86,7 @@ def _wait_for_terminal(run_id: str) -> dict:
     deadline = monotonic() + 5
     while monotonic() < deadline:
         response = client.get(f"/v1/control-translation-runs/{run_id}")
-        assert response.status_code == 200
+        assert response.status_code == 200, response.json()
         status = response.json()
         if status["status"] in {"completed", "failed", "canceled"}:
             return status
@@ -306,6 +306,8 @@ def test_queued_cancellation_is_idempotent(monkeypatch):
 
     assert first.status_code == 200
     assert first.json()["status"] == "canceled"
+    assert first.json()["result_id"] is None
+    assert first.json()["completion"] is None
     assert second.json() == first.json()
 
     terminal_result = client.get(
@@ -781,7 +783,9 @@ def test_cancel_race_respects_publication_cutoff(tmp_path, monkeypatch):
     assert lifecycle2.get_lifecycle_result(run_id2) is not None
 
 
-def test_permanent_publication_conflict_terminalizes_prepared_run(tmp_path):
+def test_permanent_publication_conflict_terminalizes_prepared_run(
+    tmp_path, monkeypatch
+):
     lifecycle, sink, repository, worker, claimed, run_id = _split_worker_run(
         tmp_path, "permanent-publication-conflict"
     )
@@ -803,6 +807,8 @@ def test_permanent_publication_conflict_terminalizes_prepared_run(tmp_path):
     assert terminal.status.status == "failed"
     assert terminal.status.failure is not None
     assert terminal.status.failure.code == "publication_conflict"
+    assert terminal.status.result_id is None
+    assert terminal.status.completion is None
     assert terminal.publication_state == "prepared"
     prepared_result = lifecycle.get_lifecycle_result(run_id)
     assert prepared_result is not None
@@ -811,6 +817,18 @@ def test_permanent_publication_conflict_terminalizes_prepared_run(tmp_path):
     assert exposed.status == "failed"
     assert exposed.failure is not None
     assert exposed.failure.code == "publication_conflict"
+    monkeypatch.setattr(api_module, "_REPOSITORY", lifecycle)
+    monkeypatch.setattr(api_module, "_WORKFLOW_LAB_REPOSITORY", lifecycle)
+    monkeypatch.setattr(api_module, "_WORKFLOW_LAB_WORKER", object())
+    for path in (
+        f"/v1/control-translation-runs/{run_id}",
+        f"/v1/workflow-lab/runs/{run_id}",
+    ):
+        response = client.get(path)
+        assert response.status_code == 200, response.json()
+        assert response.json()["status"] == "failed"
+        assert response.json()["result_id"] is None
+        assert response.json()["completion"] is None
     assert repository.claim_lifecycle_run(
         worker_id="replacement", lease_seconds=30, max_attempts=3
     ) is None

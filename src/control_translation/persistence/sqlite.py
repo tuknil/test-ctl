@@ -919,7 +919,7 @@ class SQLiteRunRepository:
                         END,
                         completion_json = CASE
                             WHEN publication_state = 'publication-pending'
-                            THEN prepared_completion_json ELSE completion_json
+                            THEN NULL ELSE completion_json
                         END,
                         progress_phase = CASE
                             WHEN publication_state != 'publication-pending' AND cancel_requested = 1
@@ -1174,14 +1174,19 @@ def _lifecycle_from_row(row: sqlite3.Row) -> LifecycleRun:
             if row["failure_json"]
             else None
         )
-        completion = json.loads(row["completion_json"]) if row["completion_json"] else None
+        terminal_without_publication = row["status"] in {"failed", "canceled"}
+        completion = (
+            None
+            if terminal_without_publication
+            else json.loads(row["completion_json"]) if row["completion_json"] else None
+        )
         status = CapabilityRunStatus(
             request_id=row["request_id"],
             correlation_id=row["correlation_id"],
             run_id=row["run_id"],
             status=row["status"],
             terminal_state=row["terminal_state"],
-            result_id=row["result_id"],
+            result_id=None if terminal_without_publication else row["result_id"],
             created_at=row["created_at"],
             started_at=row["started_at"],
             updated_at=row["updated_at"],

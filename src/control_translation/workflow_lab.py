@@ -286,16 +286,37 @@ class WorkflowLabClient:
                     "size_bytes", "created_at",
                 )
             }
-            self._request(
-                "POST",
-                "/v1/resolver/results/register",
-                json={
-                    "locator": locator,
-                    "object": uploaded,
-                    "json_pointer": "",
-                    "representation": "authoritative-result",
-                },
-            )
+            try:
+                self._request(
+                    "POST",
+                    "/v1/resolver/results/register",
+                    json={
+                        "locator": locator,
+                        "object": uploaded,
+                        "json_pointer": "",
+                        "representation": "authoritative-result",
+                    },
+                )
+            except UpstreamResolutionError as exc:
+                if "authoritative-result enrichment" not in str(exc):
+                    raise
+                try:
+                    existing = self.resolve(locator)
+                except UpstreamResolutionError as resolve_exc:
+                    if "not imported" in str(resolve_exc):
+                        raise WorkflowLabPublicationError(
+                            "publication_ambiguous",
+                            "Workflow Lab registration conflicted but no existing object could be resolved",
+                            retryable=True,
+                        ) from resolve_exc
+                    raise
+                if existing == raw:
+                    return
+                raise WorkflowLabPublicationError(
+                    "publication_conflict",
+                    "Workflow Lab immutable registration contains different bytes",
+                    retryable=False,
+                ) from exc
             if self.resolve(locator) != raw:
                 raise WorkflowLabPublicationError(
                     "readback_integrity", "Workflow Lab result readback differs", retryable=False

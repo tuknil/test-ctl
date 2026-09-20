@@ -143,17 +143,25 @@ def _publication_document() -> dict:
 )
 def test_publication_classifies_absence_and_conflict(mode, retryable, code) -> None:
     uploaded = b""
+    conflicting = b'{"different":true}'
+    locator = None
 
     def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal uploaded
+        nonlocal uploaded, locator
         if request.url.path == "/v1/objects":
             uploaded = request.content
             digest = hashlib.sha256(uploaded).hexdigest()
             return httpx.Response(201, json={"digest": f"sha256:{digest}", "size_bytes": len(uploaded), "media_type": "application/json", "logical_type": "control-translation-authoritative-result"})
         if request.url.path == "/v1/resolver/results/register":
+            locator = json.loads(request.content)["locator"]
             return httpx.Response(409 if mode == "conflict" else 201, json={"status": "registered"})
         if request.url.path == "/v1/resolver/results/resolve":
+            if mode == "conflict":
+                digest = hashlib.sha256(conflicting).hexdigest()
+                return httpx.Response(200, json={"locator": locator, "representation": "authoritative-result", "object": {"digest": f"sha256:{digest}", "size_bytes": len(conflicting)}, "json_pointer": "", "download_path": f"/v1/objects/sha256/{digest}"})
             return httpx.Response(404, json={"detail": "absent"})
+        if request.url.path.startswith("/v1/objects/sha256/"):
+            return httpx.Response(200, content=conflicting)
         raise AssertionError(request.url)
 
     client = WorkflowLabClient("http://workflow-lab.test", timeout_seconds=1, max_bytes=1024 * 1024)
@@ -169,9 +177,10 @@ def test_publication_classifies_absence_and_conflict(mode, retryable, code) -> N
 def test_exact_existing_publication_reconciles_idempotently() -> None:
     uploaded = b""
     locator = None
+    registrations = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal uploaded, locator
+        nonlocal uploaded, locator, registrations
         if request.url.path == "/v1/objects":
             if uploaded and uploaded != request.content:
                 raise AssertionError("publication bytes changed")
@@ -179,8 +188,12 @@ def test_exact_existing_publication_reconciles_idempotently() -> None:
             digest = hashlib.sha256(uploaded).hexdigest()
             return httpx.Response(201, json={"digest": f"sha256:{digest}", "size_bytes": len(uploaded), "media_type": "application/json", "logical_type": "control-translation-authoritative-result"})
         if request.url.path == "/v1/resolver/results/register":
+            registrations += 1
             locator = json.loads(request.content)["locator"]
-            return httpx.Response(201, json={"status": "registered"})
+            return httpx.Response(
+                201 if registrations == 1 else 409,
+                json={"status": "registered"},
+            )
         if request.url.path == "/v1/resolver/results/resolve":
             digest = hashlib.sha256(uploaded).hexdigest()
             return httpx.Response(200, json={"locator": locator, "representation": "authoritative-result", "object": {"digest": f"sha256:{digest}", "size_bytes": len(uploaded)}, "json_pointer": "", "download_path": f"/v1/objects/sha256/{digest}"})
@@ -196,3 +209,4 @@ def test_exact_existing_publication_reconciles_idempotently() -> None:
     first = uploaded
     client.publish(_publication_document())
     assert uploaded == first
+    assert registrations == 2
