@@ -13,6 +13,7 @@ so browser access requires `CORS_ALLOWED_ORIGINS` to name the UI's origin.
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from time import perf_counter
@@ -54,6 +55,8 @@ from control_translation.lifecycle import LifecycleWorker
 from control_translation.persistence import (
     IdempotencyConflictError,
     PersistenceError,
+    SplitRunRepository,
+    SQLiteRunRepository,
     canonical_request_hash,
     create_run_repository,
     normalized_request_digest,
@@ -61,6 +64,12 @@ from control_translation.persistence import (
 from control_translation.shared_contracts_v2 import SharedContractV2Error
 from control_translation.terminal import TerminalState
 from control_translation.upstream_databricks import create_upstream_result_resolver
+from control_translation.workflow_lab import (
+    WorkflowLabClient,
+    WorkflowLabResultSink,
+    WorkflowLabUpstreamResultResolver,
+    workflow_lab_result_ref,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +87,49 @@ _CALLBACK_DISPATCHER = CallbackDispatcher(
     timeout_seconds=_SETTINGS.capability_callback_timeout_seconds,
     poll_interval_seconds=_SETTINGS.capability_callback_poll_interval_seconds,
 )
+_WORKFLOW_LAB_REPOSITORY = None
+_WORKFLOW_LAB_RESOLVER = None
+_WORKFLOW_LAB_WORKER = None
+_WORKFLOW_LAB_ERROR: str | None = None
+if _SETTINGS.workflow_lab_enabled:
+    try:
+        _workflow_lab_client = WorkflowLabClient(
+            _SETTINGS.workflow_lab_url or "",
+            timeout_seconds=_SETTINGS.workflow_lab_timeout_seconds,
+            max_bytes=_SETTINGS.workflow_lab_max_bytes,
+        )
+        _workflow_lab_lifecycle = SQLiteRunRepository(_SETTINGS.workflow_lab_state_path)
+        _workflow_lab_sink = WorkflowLabResultSink(
+            _SETTINGS.workflow_lab_state_path + ".results",
+            _workflow_lab_client,
+        )
+        _WORKFLOW_LAB_REPOSITORY = SplitRunRepository(
+            _workflow_lab_lifecycle,
+            _workflow_lab_sink,
+        )
+        _WORKFLOW_LAB_RESOLVER = WorkflowLabUpstreamResultResolver(_workflow_lab_client)
+        replay_overrides = {}
+        for field, variable in {
+            "openai_api_key": "OPENAI_API_KEY",
+            "azure_openai_endpoint": "AZURE_OPENAI_ENDPOINT",
+            "azure_openai_api_key": "AZURE_OPENAI_API_KEY",
+            "azure_openai_api_version": "AZURE_OPENAI_API_VERSION",
+            "att_inference_base_url": "ATT_INFERENCE_BASE_URL",
+            "att_inference_api_key": "ATT_INFERENCE_API_KEY",
+            "model_name": "MODEL_NAME",
+            "model_provider": "MODEL_PROVIDER",
+        }.items():
+            value = os.getenv(f"WORKFLOW_LAB_{variable}")
+            if value:
+                replay_overrides[field] = value
+        _WORKFLOW_LAB_WORKER = LifecycleWorker(
+            lambda: _WORKFLOW_LAB_REPOSITORY,
+            lambda: _WORKFLOW_LAB_RESOLVER,
+            _SETTINGS.model_copy(update=replay_overrides),
+            result_reference_factory=workflow_lab_result_ref,
+        )
+    except (OSError, ValueError, PersistenceError) as exc:
+        _WORKFLOW_LAB_ERROR = f"{type(exc).__name__}: {exc}"
 
 
 @asynccontextmanager
@@ -102,11 +154,19 @@ async def lifespan(_: FastAPI):
     )
     _LIFECYCLE_WORKER.start()
     _CALLBACK_DISPATCHER.start()
+    if _WORKFLOW_LAB_REPOSITORY is not None and _WORKFLOW_LAB_WORKER is not None:
+        try:
+            _WORKFLOW_LAB_REPOSITORY.initialize()
+            _WORKFLOW_LAB_WORKER.start()
+        except (OSError, PersistenceError):
+            logger.exception("Workflow Lab replay initialization failed")
     try:
         yield
     finally:
         _LIFECYCLE_WORKER.stop()
         _CALLBACK_DISPATCHER.stop()
+        if _WORKFLOW_LAB_WORKER is not None:
+            _WORKFLOW_LAB_WORKER.stop()
 
 app = FastAPI(
     title="control-translation",
@@ -291,6 +351,19 @@ def readiness() -> dict[str, str]:
             detail={"status": "not-ready", "upstream_reader": "unavailable"},
         )
     return {"status": "ready"}
+
+
+@app.get("/v1/workflow-lab/readyz")
+def workflow_lab_readiness():
+    if _WORKFLOW_LAB_REPOSITORY is None or _WORKFLOW_LAB_RESOLVER is None:
+        return _lifecycle_error(
+            503,
+            "workflow_lab_not_ready",
+            _WORKFLOW_LAB_ERROR or "Workflow Lab replay is not enabled.",
+        )
+    if not _WORKFLOW_LAB_REPOSITORY.healthcheck() or not _WORKFLOW_LAB_RESOLVER.healthcheck():
+        return _lifecycle_error(503, "workflow_lab_not_ready", "Workflow Lab replay dependencies are unavailable.")
+    return {"status": "ready", "persistence_backend": "workflow-lab"}
 
 
 @app.get("/inference")
@@ -491,6 +564,32 @@ def _is_retryable_http_status(http_status: int) -> bool:
     return http_status in {408, 425, 429} or http_status >= 500
 
 
+def _request_result_references(payload: InvocationRequest):
+    if isinstance(payload, SharedContractV2InvokeRequest):
+        return [item.result_ref for item in payload.upstream_inputs]
+    references = []
+    if payload.upstream_inputs is not None:
+        references.extend(item.result_ref for item in payload.upstream_inputs)
+    if payload.upstream_result_refs is not None:
+        references.extend(
+            (
+                payload.upstream_result_refs.defense_generation,
+                payload.upstream_result_refs.mitigation_check,
+                payload.upstream_result_refs.bypass_validation,
+            )
+        )
+    return references
+
+
+def _validate_execution_plane(payload: InvocationRequest, expected: str):
+    references = _request_result_references(payload)
+    if expected == "workflow-lab" and not references:
+        return _lifecycle_error(422, "workflow_lab_locators_required", "Workflow Lab replay requires immutable upstream locators.")
+    if any(item.system != expected for item in references):
+        return _lifecycle_error(422, "execution_plane_mismatch", f"This route requires {expected} result references.")
+    return None
+
+
 @app.post(
     "/v1/control-translation-runs",
     response_model=CapabilityRunSubmission,
@@ -510,6 +609,9 @@ def submit_control_translation_run(
     ),
 ):
     """Persist one queued run before signaling the independent worker."""
+    plane_error = _validate_execution_plane(payload, "databricks")
+    if plane_error is not None:
+        return plane_error
     if content_type.split(";", 1)[0].strip().lower() != "application/json":
         return _lifecycle_error(
             400,
@@ -664,6 +766,116 @@ def cancel_control_translation_run(run_id: str):
     return run.status
 
 
+def _require_workflow_lab_runtime():
+    if _WORKFLOW_LAB_REPOSITORY is None or _WORKFLOW_LAB_WORKER is None:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "workflow_lab_not_ready",
+                "detail": _WORKFLOW_LAB_ERROR or "Workflow Lab replay is not enabled.",
+                "retryable": True,
+            },
+        )
+    return _WORKFLOW_LAB_REPOSITORY, _WORKFLOW_LAB_WORKER
+
+
+@app.post(
+    "/v1/workflow-lab/runs",
+    response_model=CapabilityRunSubmission,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def submit_workflow_lab_run(
+    payload: InvocationRequest,
+    content_type: str = Header(alias="Content-Type"),
+    idempotency_key: str = Header(alias="Idempotency-Key", min_length=1),
+    correlation_id: str = Header(alias="X-Correlation-ID", min_length=1),
+):
+    repository, worker = _require_workflow_lab_runtime()
+    if content_type.split(";", 1)[0].strip().lower() != "application/json":
+        return _lifecycle_error(400, "invalid_content_type", "Content-Type must be application/json.")
+    if payload.request_id is None or payload.request_id != idempotency_key:
+        return _lifecycle_error(400, "request_identity_mismatch", "request_id and Idempotency-Key must match.")
+    if payload.correlation_id is None or payload.correlation_id != correlation_id:
+        return _lifecycle_error(400, "correlation_identity_mismatch", "correlation_id and X-Correlation-ID must match.")
+    plane_error = _validate_execution_plane(payload, "workflow-lab")
+    if plane_error is not None:
+        return plane_error
+    effective = (
+        payload.model_copy(update={"idempotency_key": idempotency_key})
+        if isinstance(payload, InvokeRequestEnvelope)
+        else payload
+    )
+    try:
+        created = repository.create_lifecycle_run(
+            effective,
+            idempotency_key=idempotency_key,
+            request_digest=normalized_request_digest(effective),
+        )
+    except IdempotencyConflictError:
+        return _lifecycle_error(409, "idempotency_conflict", "Idempotency-Key is bound to a different request.")
+    except PersistenceError as exc:
+        raise _storage_unavailable(
+            operation="create-workflow-lab-run",
+            exc=exc,
+            request_id=payload.request_id,
+            correlation_id=payload.correlation_id,
+        ) from exc
+    worker.wake()
+    run_status = created.run.status
+    submission = CapabilityRunSubmission(
+        request_id=run_status.request_id,
+        correlation_id=run_status.correlation_id,
+        run_id=run_status.run_id,
+        status=run_status.status,
+        status_url=f"/v1/workflow-lab/runs/{run_status.run_id}",
+        result_url=f"/v1/workflow-lab/runs/{run_status.run_id}/result",
+        accepted_at=run_status.created_at,
+    )
+    return JSONResponse(
+        status_code=(
+            status.HTTP_200_OK
+            if not created.created and run_status.status in {"completed", "failed", "canceled"}
+            else status.HTTP_202_ACCEPTED
+        ),
+        content=submission.model_dump(mode="json"),
+    )
+
+
+@app.get("/v1/workflow-lab/runs/{run_id}", response_model=CapabilityRunStatus)
+def get_workflow_lab_run(run_id: str):
+    repository, _ = _require_workflow_lab_runtime()
+    try:
+        run = repository.get_lifecycle_run(run_id)
+    except PersistenceError as exc:
+        raise _storage_unavailable(operation="get-workflow-lab-run", exc=exc, run_id=run_id) from exc
+    return run.status if run is not None else _lifecycle_error(404, "run_not_found", "Run was not found.")
+
+
+@app.get("/v1/workflow-lab/runs/{run_id}/result")
+def get_workflow_lab_result(run_id: str):
+    repository, _ = _require_workflow_lab_runtime()
+    try:
+        run = repository.get_lifecycle_run(run_id)
+        result = repository.get_lifecycle_result(run_id) if run is not None else None
+    except PersistenceError as exc:
+        raise _storage_unavailable(operation="get-workflow-lab-result", exc=exc, run_id=run_id) from exc
+    if run is None:
+        return _lifecycle_error(404, "run_not_found", "Run was not found.")
+    if run.status.status in {"queued", "running"}:
+        return _lifecycle_error(409, "run_not_terminal", "Run is not terminal.")
+    return result if result is not None else run.status
+
+
+@app.post("/v1/workflow-lab/runs/{run_id}/cancel", response_model=CapabilityRunStatus)
+def cancel_workflow_lab_run(run_id: str):
+    _, worker = _require_workflow_lab_runtime()
+    try:
+        run = worker.cancel_run(run_id)
+    except PersistenceError as exc:
+        raise _storage_unavailable(operation="cancel-workflow-lab-run", exc=exc, run_id=run_id) from exc
+    return run.status if run is not None else _lifecycle_error(404, "run_not_found", "Run was not found.")
+
+
 @app.get("/runs/{run_id}", response_model=ResultEnvelope)
 def get_run(run_id: str) -> ResultEnvelope:
     try:
@@ -804,4 +1016,3 @@ def _log_invocation_result(result: ResultEnvelope, *, source: str) -> None:
         artifact_hash,
         diagnostic_json(result),
     )
-

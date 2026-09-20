@@ -19,6 +19,7 @@ from pydantic import (
     ConfigDict,
     Field,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -582,7 +583,7 @@ class CompletionCallback(StrictRequestModel):
 
 
 class DatabricksResultReference(StrictRequestModel):
-    """Authoritative pointer to one upstream result in Unity Catalog."""
+    """Authoritative result pointer for the selected server-owned plane."""
 
     model_config = ConfigDict(
         extra="forbid",
@@ -590,22 +591,34 @@ class DatabricksResultReference(StrictRequestModel):
         populate_by_name=True,
     )
 
-    system: str
-    catalog: str
-    schema_name: str = Field(alias="schema", serialization_alias="schema")
-    table: str
+    system: Literal["databricks", "workflow-lab"]
+    catalog: str | None = None
+    schema_name: str | None = Field(default=None, alias="schema", serialization_alias="schema")
+    table: str | None = None
+    contract_id: str | None = None
+    namespace: str | None = None
     key: str
 
     @model_validator(mode="after")
     def validate_databricks_reference(self) -> DatabricksResultReference:
-        if self.system.strip().lower() != "databricks":
-            raise ValueError("upstream result references must use Databricks")
-        if not all(
-            value.strip()
-            for value in (self.catalog, self.schema_name, self.table, self.key)
+        if self.system == "databricks":
+            if (
+                not all(value and value.strip() for value in (self.catalog, self.schema_name, self.table, self.key))
+                or self.contract_id is not None
+                or self.namespace is not None
+            ):
+                raise ValueError("Databricks result-reference fields are invalid")
+        elif (
+            self.contract_id != "workflow-lab-result-reference@1.0"
+            or self.namespace != "immutable-results"
+            or any(value is not None for value in (self.catalog, self.schema_name, self.table))
         ):
-            raise ValueError("Databricks result-reference fields cannot be empty")
+            raise ValueError("Workflow Lab result-reference fields are invalid")
         return self
+
+    @model_serializer(mode="wrap")
+    def serialize_reference(self, serializer):
+        return {key: value for key, value in serializer(self).items() if value is not None}
 
 
 class ProofLoopRoutingMetadata(StrictRequestModel):
@@ -750,7 +763,7 @@ class OrchestrationUpstreamInput(StrictRequestModel):
             raise ValueError(
                 f"{self.capability} result_id has an invalid identity"
             )
-        if (
+        if self.result_ref.system == "databricks" and (
             self.result_ref.catalog,
             self.result_ref.schema_name,
             self.result_ref.table,
@@ -844,7 +857,7 @@ class SharedContractV2UpstreamInput(StrictRequestModel):
             raise ValueError(f"{self.capability} result_id has an invalid identity")
         if self.result_ref.key != self.result_id:
             raise ValueError("result_ref.key must equal result_id")
-        if (
+        if self.result_ref.system == "databricks" and (
             self.result_ref.catalog,
             self.result_ref.schema_name,
             self.result_ref.table,

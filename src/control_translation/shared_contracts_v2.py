@@ -331,13 +331,29 @@ def _verify_locator(record: UpstreamRecord, locator: Any, *, capability: str) ->
     context: dict[str, Any] | None = None
     run_result: dict[str, Any] | None = None
     if capability == "check-generation":
-        if document.get("contract_type") != "check-generation-persisted-result" or document.get("contract_version") != "1.0":
-            raise SharedContractV2Error("cg-wrapper-identity-invalid", "expected check-generation-persisted-result@1.0")
-        raw_context = document.get("temporal_context")
         raw_run_result = document.get("run_result")
-        if not isinstance(raw_context, dict) or not isinstance(raw_run_result, dict):
-            raise SharedContractV2Error("cg-wrapper-invalid", "CG wrapper is incomplete")
-        context = raw_context
+        canonical_temporal = (
+            document.get("capability") == "check-generation"
+            and document.get("contract_id") == "check-generation-result@1.0"
+        )
+        if canonical_temporal:
+            if not isinstance(raw_run_result, dict):
+                raise SharedContractV2Error("cg-wrapper-invalid", "CG canonical result is incomplete")
+            context = {
+                "request_id": document.get("request_id"),
+                "correlation_id": document.get("correlation_id"),
+                "upstream_result_refs": document.get("upstream_result_refs"),
+                "inherited_evidence_refs": document.get("evidence_refs") or [],
+                "new_evidence_refs": [],
+                "result_created_at": document.get("created_at"),
+            }
+        else:
+            if document.get("contract_type") != "check-generation-persisted-result" or document.get("contract_version") != "1.0":
+                raise SharedContractV2Error("cg-wrapper-identity-invalid", "expected authenticated Check Generation result")
+            raw_context = document.get("temporal_context")
+            if not isinstance(raw_context, dict) or not isinstance(raw_run_result, dict):
+                raise SharedContractV2Error("cg-wrapper-invalid", "CG wrapper is incomplete")
+            context = raw_context
         run_result = raw_run_result
         expected = {"run_id": locator.run_id}
         if document.get("result_id") != locator.result_id:
@@ -362,7 +378,12 @@ def _verify_locator(record: UpstreamRecord, locator: Any, *, capability: str) ->
         upstream = upstreams[0]
         if not isinstance(upstream, dict):
             raise SharedContractV2Error("cg-wrapper-invalid", "CG upstream lineage is invalid")
-        if document.get("temporal_result_content_sha256") != locator.content_sha256:
+        advertised_digest = (
+            document.get("content_sha256")
+            if canonical_temporal
+            else document.get("temporal_result_content_sha256")
+        )
+        if advertised_digest != locator.content_sha256:
             raise SharedContractV2Error("outer-locator-integrity-failed", "CG wrapper digest differs")
     elif capability != "bypass-validation" and (
         document.get("content_sha256") != locator.content_sha256
@@ -582,7 +603,15 @@ def _validate_bundle(bundle: dict[str, Any], semantics: dict[str, Any], cg: dict
         raise SharedContractV2Error("bound-semantics-mismatch", "DG semantics binding differs")
     locator = binding["locator"]
     exact_cg = cg_raw or canonical_bytes(cg)
-    if strict_json_bytes(exact_cg, context="bound CG result") != cg:
+    decoded_cg = strict_json_bytes(exact_cg, context="bound CG result")
+    bound_cg = decoded_cg.get("run_result", decoded_cg)
+    if isinstance(bound_cg, dict):
+        bound_cg = {
+            key: value
+            for key, value in bound_cg.items()
+            if key != "_verified_characterization_revision_id"
+        }
+    if bound_cg != cg:
         raise SharedContractV2Error("bound-cg-locator-mismatch", "DG bound CG bytes decode differently")
     if locator.get("digest") != "sha256:" + hashlib_sha256(exact_cg).hexdigest() or locator.get("byte_length") != len(exact_cg):
         raise SharedContractV2Error("bound-cg-locator-mismatch", "DG does not bind the exact CG final result")
@@ -755,7 +784,14 @@ def _validate_mc(
             "MC blocked aggregate must report match true",
         )
     provenance = mc.get("input_provenance")
-    if not isinstance(provenance, dict) or provenance.get("route_policy") != "shared-attack-contracts-v2" or provenance.get("verification") != "physical-and-logical-sha256-verified":
+    if (
+        not isinstance(provenance, dict)
+        or provenance.get("route_policy") != "shared-attack-contracts-v2"
+        or provenance.get("verification") not in {
+            "physical-and-logical-sha256-verified",
+            "workflow-lab-physical-and-logical-sha256-verified",
+        }
+    ):
         raise SharedContractV2Error("mc-chain-provenance-mismatch", "MC chain provenance differs")
     for key, capability in (("check_result", "check-generation"), ("defense_result", "defense-generation")):
         if not _same_locator_document(provenance.get(key), locators[capability]):
