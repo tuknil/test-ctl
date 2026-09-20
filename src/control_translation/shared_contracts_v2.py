@@ -17,7 +17,7 @@ from functools import lru_cache
 from hashlib import sha256 as hashlib_sha256
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 import rfc8785
 from jsonschema import Draft202012Validator
@@ -58,7 +58,7 @@ CT_PROFILE_ID = "waf-standard@2"
 SHARED_CONTRACT_VERSION = "2.0"
 SCHEMA_BUNDLE_VERSION = "shared-attack-contracts-phase-1-ct@2026-09-12"
 SCHEMA_BUNDLE_DIGEST = (
-    "sha256:fbc8e62217c6ff269458f16c55b690ff0341cd3a6e4eaca92336532ca001f828"
+    "sha256:b58597c7dfc061d92e7d8c0771ff33d67411e3942c3636e9b3f72357864034b3"
 )
 SCHEMA_IDS = {AMS_SCHEMA_ID, BUNDLE_SCHEMA_ID, "https://schemas.janus.internal/contracts/common/janus-contract-common-1.0.schema.json"}
 MC_RESOLVER_ID = "mc-approved-route-adapter"
@@ -1647,8 +1647,55 @@ def _strict_object(raw: bytes, *, artifact_id: str) -> dict[str, Any]:
     return strict_json_bytes(raw, context=f"DG artifact {artifact_id}")
 
 
+def _semantic_carrier(component: dict[str, Any]) -> tuple[str, str]:
+    location = component.get("location")
+    if not isinstance(location, dict):
+        raise SharedContractV2Error("cannot-express", "component location is absent")
+    kind = location.get("kind")
+    if kind in {"http-query", "http-header", "http-cookie"}:
+        name = location.get("name")
+        if not isinstance(name, str) or not name:
+            raise SharedContractV2Error("cannot-express", "named component selector is absent")
+        return {
+            "http-query": "query",
+            "http-header": "header",
+            "http-cookie": "cookie",
+        }[kind], name
+    if kind == "http-body-structured":
+        selector_type = location.get("selector_type")
+        if selector_type == "any-field":
+            return "body", ""
+        selector = location.get("selector")
+        if not isinstance(selector, str) or not selector:
+            raise SharedContractV2Error("cannot-express", "structured body selector is absent")
+        return "body", selector
+    if kind == "http-body-raw":
+        return "body", ""
+    if kind == "http-path":
+        return "path", ""
+    if kind == "http-method":
+        return "method", ""
+    raise SharedContractV2Error(
+        "cannot-express", f"component location {kind!r} has no Akamai mapping"
+    )
+
+
+def _same_carrier_binding(
+    actual: tuple[Any, Any], expected: tuple[str, str]
+) -> bool:
+    if actual[0] != expected[0] or not isinstance(actual[1], str):
+        return False
+    if actual[0] == "header":
+        return actual[1].casefold() == expected[1].casefold()
+    return actual[1] == expected[1]
+
+
 def _component_condition(
-    rule: dict[str, Any], *, source_artifact_id: str, seen_rule_ids: set[str]
+    rule: dict[str, Any],
+    *,
+    component: dict[str, Any],
+    source_artifact_id: str,
+    seen_rule_ids: set[str],
 ) -> tuple[dict[str, Any], tuple[str, str, str]]:
     rule_id = rule.get("rule_id")
     carrier = rule.get("carrier")
@@ -1657,13 +1704,16 @@ def _component_condition(
     pattern = rule.get("pattern")
     flags = rule.get("flags")
     transformations = rule.get("transformations")
+    expected_carrier, expected_name = _semantic_carrier(component)
     if (
         not isinstance(rule_id, str)
         or not rule_id
         or rule_id in seen_rule_ids
         or carrier not in _CARRIER_CONDITION_TYPES
         or not isinstance(name, str)
-        or (carrier in _CARRIERS_REQUIRING_SELECTOR and not name)
+        or not _same_carrier_binding(
+            (carrier, name), (expected_carrier, expected_name)
+        )
         or not isinstance(component_id, str)
         or not component_id
         or not isinstance(pattern, str)
@@ -1678,8 +1728,13 @@ def _component_condition(
             f"DG rule in {source_artifact_id} cannot map without semantic loss",
         )
     seen_rule_ids.add(rule_id)
+    location = component["location"]
+    location_kind = location["kind"]
+    condition_type = _CARRIER_CONDITION_TYPES[carrier]
+    if location_kind == "http-body-structured":
+        condition_type = "argsPostJSONMatch"
     condition: dict[str, Any] = {
-        "type": _CARRIER_CONDITION_TYPES[carrier],
+        "type": condition_type,
         "positiveMatch": True,
         "valueCase": "i" not in flags,
         "valueWildcard": False,
@@ -1689,13 +1744,16 @@ def _component_condition(
         "sourceComponentId": component_id,
         "sourceCarrier": carrier,
         "sourceSelector": name,
+        "sourceLocationKind": location_kind,
         "transformations": transformations,
     }
-    if carrier == "header":
+    if location.get("selector_type") is not None:
+        condition["sourceSelectorType"] = location["selector_type"]
+    if carrier == "header" and name != "*":
         condition["header"] = name
-    elif carrier in {"query", "body"} and name:
+    elif carrier in {"query", "body"} and name and name != "*":
         condition["parameter"] = name
-    elif carrier == "cookie":
+    elif carrier == "cookie" and name != "*":
         condition["cookieName"] = name
     return condition, (carrier, name, component_id)
 
@@ -1755,7 +1813,11 @@ def _profile_routes(profile_id: str) -> Mapping[str, Mapping[str, str]]:
 
 
 def _resolved_route_conditions(
-    route: dict[str, Any], *, profile_id: str, alternative_id: str
+    route: dict[str, Any],
+    *,
+    profile_id: str,
+    alternative_id: str,
+    path_payload: str | None = None,
 ) -> list[dict[str, Any]]:
     if route.get("kind") == "opaque-path-key":
         path_key = route.get("path_key")
@@ -1776,13 +1838,16 @@ def _resolved_route_conditions(
         raise SharedContractV2Error(
             "cannot-express", f"route alternative {alternative_id} is incomplete"
         )
+    rendered_path = path
+    if path_payload is not None:
+        rendered_path = path.rstrip("/") + "/" + quote(path_payload, safe="")
     return [
         {
             "type": "pathMatch",
             "positiveMatch": True,
             "valueCase": True,
             "valueWildcard": False,
-            "value": [path],
+            "value": [rendered_path],
             "matchOperator": "exact",
             "sourceRoute": route,
         },
@@ -1824,6 +1889,9 @@ def _translate_rule_document(
     rules_by_component: dict[str, dict[str, Any]] = {}
     carrier_keys: list[tuple[str, str, str]] = []
     rule_ids: set[str] = set()
+    semantic_components = _index(
+        semantics["components"], "component_id", "components-invalid"
+    )
     for rule in rules:
         if not isinstance(rule, dict):
             raise SharedContractV2Error(
@@ -1835,8 +1903,16 @@ def _translate_rule_document(
                 "cannot-express",
                 f"DG rule in {source_artifact_id} cannot map without semantic loss",
             )
+        component = semantic_components.get(str(component_id))
+        if component is None:
+            raise SharedContractV2Error(
+                "cannot-express", f"DG rule in {source_artifact_id} has no semantic component"
+            )
         condition, carrier_key = _component_condition(
-            rule, source_artifact_id=source_artifact_id, seen_rule_ids=rule_ids
+            rule,
+            component=component,
+            source_artifact_id=source_artifact_id,
+            seen_rule_ids=rule_ids,
         )
         if carrier_key in carrier_keys:
             raise SharedContractV2Error(
@@ -1847,7 +1923,6 @@ def _translate_rule_document(
         carrier_keys.append(carrier_key)
         rules_by_component[component_id] = condition
     semantic_inputs = _index(semantics["test_inputs"], "input_id", "semantics-inputs-invalid")
-    semantic_components = _index(semantics["components"], "component_id", "components-invalid")
     coverage_keys = {canonical_bytes(item) for item in coverage_alternatives}
     represented_coverage: set[bytes] = set()
     translated: list[tuple[str, dict[str, Any]]] = []
@@ -1875,6 +1950,7 @@ def _translate_rule_document(
         bindings = _index(component_bindings, "component_id", "route-component-bindings-invalid")
         if set(bindings) != set(component_ids):
             raise SharedContractV2Error("cannot-express", "DG route component binding is incomplete")
+        path_payloads: list[str] = []
         for component_id in component_ids:
             component = semantic_components.get(component_id)
             if component is None or component_id not in rules_by_component:
@@ -1887,32 +1963,72 @@ def _translate_rule_document(
             ]
             if bindings[component_id].get("input_refs") != expected_refs or not expected_refs:
                 raise SharedContractV2Error("cannot-express", "DG route binding differs from authenticated CG inputs")
-        conditions = _resolved_route_conditions(
-            route, profile_id=profile_id, alternative_id=alternative_id
-        ) + [deepcopy(rules_by_component[component_id]) for component_id in component_ids]
-        translated.append(
-            (
-                alternative_id,
-                {
-                    "name": f"janus-{document.get('rule_set_id', source_artifact_id)}-{len(translated)}",
-                    "description": "One route-bound Boolean alternative from a verified DG WAF rule set.",
-                    "operation": "AND",
-                    "conditions": conditions,
-                    "sourceArtifactId": source_artifact_id,
-                    "sourceRuleSetId": document.get("rule_set_id"),
-                    "sourceAlternativeId": alternative_id,
-                    "sourceAction": document.get("action"),
-                    "fastLoopNegativeMaterials": document.get("fast_loop_negative_materials", []),
-                },
+            if component["location"].get("kind") == "http-path":
+                for ref in expected_refs:
+                    payload = semantic_inputs[ref["id"]]["input"].get("path_payload")
+                    if route.get("kind") == "opaque-path-key" and (
+                        not isinstance(payload, str) or not payload
+                    ):
+                        raise SharedContractV2Error(
+                            "cannot-express",
+                            "template path component has no exact authenticated path_payload",
+                        )
+                    if isinstance(payload, str) and payload not in path_payloads:
+                        path_payloads.append(payload)
+        variants: list[str | None] = path_payloads or [None]
+        for variant_index, path_payload in enumerate(variants):
+            route_conditions = _resolved_route_conditions(
+                route,
+                profile_id=profile_id,
+                alternative_id=alternative_id,
+                path_payload=path_payload,
             )
-        )
+            component_conditions = [
+                deepcopy(rules_by_component[component_id])
+                for component_id in component_ids
+                if semantic_components[component_id]["location"].get("kind") != "http-path"
+            ]
+            path_components = [
+                component_id
+                for component_id in component_ids
+                if semantic_components[component_id]["location"].get("kind") == "http-path"
+            ]
+            if path_components:
+                route_conditions[0]["sourcePathComponents"] = [
+                    deepcopy(rules_by_component[component_id])
+                    for component_id in path_components
+                ]
+            translated_id = (
+                alternative_id
+                if len(variants) == 1
+                else f"{alternative_id}:path-payload:{variant_index}"
+            )
+            translated.append(
+                (
+                    translated_id,
+                    {
+                        "name": f"janus-{document.get('rule_set_id', source_artifact_id)}-{len(translated)}",
+                        "description": "One route-bound Boolean alternative from a verified DG WAF rule set.",
+                        "operation": "AND",
+                        "conditions": route_conditions + component_conditions,
+                        "sourceArtifactId": source_artifact_id,
+                        "sourceRuleSetId": document.get("rule_set_id"),
+                        "sourceAlternativeId": alternative_id,
+                        "sourceAction": document.get("action"),
+                        "fastLoopNegativeMaterials": document.get("fast_loop_negative_materials", []),
+                    },
+                )
+            )
     if represented_coverage != coverage_keys:
         raise SharedContractV2Error("cannot-express", "DG route alternatives do not cover every Boolean alternative")
     return translated, carrier_keys
 
 
 def _translate_carrier_document(
-    document: dict[str, Any], *, source_artifact_id: str
+    document: dict[str, Any],
+    *,
+    source_artifact_id: str,
+    semantics: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[tuple[str, str, str]]]:
     bindings = document.get("carrier_bindings")
     if not isinstance(bindings, list) or not bindings:
@@ -1922,6 +2038,11 @@ def _translate_carrier_document(
         )
     translated: list[dict[str, Any]] = []
     carrier_keys: list[tuple[str, str, str]] = []
+    semantic_components = (
+        _index(semantics["components"], "component_id", "components-invalid")
+        if semantics is not None
+        else None
+    )
     for binding in bindings:
         if not isinstance(binding, dict):
             raise SharedContractV2Error(
@@ -1930,12 +2051,21 @@ def _translate_carrier_document(
         carrier = binding.get("carrier")
         name = binding.get("name")
         component_id = binding.get("component_id")
+        expected = (
+            _semantic_carrier(semantic_components[component_id])
+            if semantic_components is not None and component_id in semantic_components
+            else None
+        )
         if (
             carrier not in _CARRIER_CONDITION_TYPES
             or not isinstance(name, str)
-            or (carrier in _CARRIERS_REQUIRING_SELECTOR and not name)
             or not isinstance(component_id, str)
             or not component_id
+            or (
+                expected is not None
+                and not _same_carrier_binding((carrier, name), expected)
+            )
+            or (expected is None and carrier in _CARRIERS_REQUIRING_SELECTOR and not name)
         ):
             raise SharedContractV2Error(
                 "cannot-express",
@@ -2005,7 +2135,9 @@ def build_waf_translation_plan(
                 rule_documents.append(translated)
         elif "carrier_bindings" in document:
             _, carriers = _translate_carrier_document(
-                document, source_artifact_id=source_id
+                document,
+                source_artifact_id=source_id,
+                semantics=verified.semantics,
             )
             binding_carriers.update(carriers)
         else:

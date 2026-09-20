@@ -43,6 +43,7 @@ from control_translation.shared_contracts_v2 import (
     _resolved_route_conditions,
     _shared_terminal_state_from_cg,
     _translate_carrier_document,
+    _translate_rule_document,
     _validate_cg,
     _validate_mc,
     build_waf_translation_plan,
@@ -891,6 +892,7 @@ def test_raw_body_artifacts_translate_without_synthetic_selector() -> None:
             "flags": [],
             "transformations": [],
         },
+        component={"location": {"family": "http", "kind": "http-body-raw"}},
         source_artifact_id=artifact_id,
         seen_rule_ids=set(),
     )
@@ -912,6 +914,230 @@ def test_raw_body_artifacts_translate_without_synthetic_selector() -> None:
     assert condition["type"] == "argsPostMatch"
     assert "parameter" not in condition
     assert bindings["carrierBindings"][0]["selector"] == ""
+
+
+@pytest.mark.parametrize(
+    ("location", "carrier", "name", "condition_type", "absent_selector"),
+    [
+        ({"family": "http", "kind": "http-query", "name": "*"}, "query", "*", "uriQueryMatch", "parameter"),
+        ({"family": "http", "kind": "http-header", "name": "*"}, "header", "*", "requestHeaderValueMatch", "header"),
+        ({"family": "http", "kind": "http-cookie", "name": "*"}, "cookie", "*", "cookieMatch", "cookieName"),
+        ({"family": "http", "kind": "http-body-structured", "selector_type": "any-field"}, "body", "", "argsPostJSONMatch", "parameter"),
+        ({"family": "http", "kind": "http-body-raw"}, "body", "", "argsPostMatch", "parameter"),
+    ],
+)
+def test_expanded_carriers_preserve_whole_collection_semantics(
+    location: dict[str, Any],
+    carrier: str,
+    name: str,
+    condition_type: str,
+    absent_selector: str,
+) -> None:
+    condition, key = _component_condition(
+        {
+            "rule_id": "rule:expanded",
+            "carrier": carrier,
+            "name": name,
+            "component_id": "component:expanded",
+            "pattern": "^attack$",
+            "flags": [],
+            "transformations": [],
+        },
+        component={"location": location},
+        source_artifact_id="artifact:expanded",
+        seen_rule_ids=set(),
+    )
+
+    assert key == (carrier, name, "component:expanded")
+    assert condition["type"] == condition_type
+    assert absent_selector not in condition
+    assert condition["sourceLocationKind"] == location["kind"]
+
+
+def test_structured_named_body_preserves_parameter_selector() -> None:
+    condition, _ = _component_condition(
+        {
+            "rule_id": "rule:json-pointer",
+            "carrier": "body",
+            "name": "/nested/probe",
+            "component_id": "component:json-pointer",
+            "pattern": "^attack$",
+            "flags": [],
+            "transformations": [],
+        },
+        component={
+            "location": {
+                "family": "http",
+                "kind": "http-body-structured",
+                "selector_type": "json-pointer",
+                "selector": "/nested/probe",
+            }
+        },
+        source_artifact_id="artifact:json-pointer",
+        seen_rule_ids=set(),
+    )
+
+    assert condition["type"] == "argsPostJSONMatch"
+    assert condition["parameter"] == "/nested/probe"
+    assert condition["sourceSelectorType"] == "json-pointer"
+
+
+@pytest.mark.parametrize(
+    ("location", "expected_carrier"),
+    [
+        ({"family": "http", "kind": "http-query", "name": "*"}, "query"),
+        ({"family": "http", "kind": "http-header", "name": "*"}, "header"),
+        ({"family": "http", "kind": "http-cookie", "name": "*"}, "cookie"),
+        ({"family": "http", "kind": "http-body-structured", "selector_type": "any-field"}, "body-json"),
+        ({"family": "http", "kind": "http-body-raw"}, "body-raw"),
+        ({"family": "http", "kind": "http-path"}, "path"),
+    ],
+)
+def test_expanded_carrier_dimensions_remain_complete_and_independent(
+    location: dict[str, Any], expected_carrier: str
+) -> None:
+    component_id = "component:expanded"
+    input_id = "input:expanded"
+    scope = "semantics:expanded"
+    semantics = {
+        "components": [
+            {
+                "component_id": component_id,
+                "location": location,
+                "input_refs": [
+                    {"kind": "test-input", "scope": scope, "id": input_id}
+                ],
+                "transformations": [],
+            }
+        ],
+        "coverage": {"groups": []},
+    }
+    obligation = {
+        "coverage_ref": {"kind": "component", "scope": scope, "id": component_id},
+        "required_input_refs": [
+            {"kind": "test-input", "scope": scope, "id": input_id}
+        ],
+    }
+
+    dimensions = _expected_bv_dimensions(
+        obligation, semantics, profile_id="waf-bypass@3"
+    )
+
+    assert dimensions
+    assert {
+        (item["input_id"], item["component_id"], item["carrier"])
+        for item in dimensions
+    } == {(input_id, component_id, expected_carrier)}
+    assert len(dimensions) == len(
+        {
+            (
+                item["input_id"],
+                item["component_id"],
+                item["carrier"],
+                item["transformation"],
+            )
+            for item in dimensions
+        }
+    )
+
+
+def test_path_payloads_expand_to_distinct_route_bound_or_alternatives() -> None:
+    scope = "semantics:expanded"
+    refs = [
+        {"kind": "test-input", "scope": scope, "id": "input:path:a"},
+        {"kind": "test-input", "scope": scope, "id": "input:path:b"},
+    ]
+    semantics = {
+        "components": [
+            {
+                "component_id": "component:path",
+                "location": {"family": "http", "kind": "http-path"},
+                "input_refs": refs,
+            },
+            {
+                "component_id": "component:query",
+                "location": {"family": "http", "kind": "http-query", "name": "*"},
+                "input_refs": refs,
+            },
+        ],
+        "test_inputs": [
+            {
+                "input_id": input_id,
+                "input": {
+                    "modality": "http-request-template",
+                    "method": "POST",
+                    "path_key": "public/submit.php",
+                    "path_payload": payload,
+                },
+            }
+            for input_id, payload in (("input:path:a", "a/b"), ("input:path:b", "second value"))
+        ],
+    }
+    document = {
+        "rule_set_id": "rules:expanded",
+        "action": "block",
+        "placement_mode": "route-bound-v1",
+        "coverage_alternatives": [["component:path", "component:query"]],
+        "route_bound_alternatives": [
+            {
+                "alternative_id": "alternative:expanded",
+                "component_ids": ["component:path", "component:query"],
+                "component_bindings": [
+                    {"component_id": "component:path", "input_refs": refs},
+                    {"component_id": "component:query", "input_refs": refs},
+                ],
+                "route": {
+                    "kind": "opaque-path-key",
+                    "method": "POST",
+                    "path_key": "public/submit.php",
+                },
+            }
+        ],
+        "rules": [
+            {
+                "rule_id": "rule:path",
+                "component_id": "component:path",
+                "carrier": "path",
+                "name": "",
+                "pattern": "^(?:a/b|second value)$",
+                "flags": [],
+                "transformations": [],
+            },
+            {
+                "rule_id": "rule:query",
+                "component_id": "component:query",
+                "carrier": "query",
+                "name": "*",
+                "pattern": "^attack$",
+                "flags": [],
+                "transformations": [],
+            },
+        ],
+    }
+
+    translated, carrier_keys = _translate_rule_document(
+        document,
+        source_artifact_id="artifact:expanded",
+        semantics=semantics,
+        profile_id="waf-standard@2",
+    )
+
+    assert len(translated) == 2
+    assert [item[0] for item in translated] == [
+        "alternative:expanded:path-payload:0",
+        "alternative:expanded:path-payload:1",
+    ]
+    assert [item[1]["conditions"][0]["value"] for item in translated] == [
+        ["/public/submit.php/a%2Fb"],
+        ["/public/submit.php/second%20value"],
+    ]
+    assert all(item[1]["operation"] == "AND" for item in translated)
+    assert all(item[1]["conditions"][2]["sourceSelector"] == "*" for item in translated)
+    assert all("parameter" not in item[1]["conditions"][2] for item in translated)
+    assert carrier_keys == [
+        ("path", "", "component:path"),
+        ("query", "*", "component:query"),
+    ]
 
 
 def test_opaque_route_key_resolves_without_becoming_a_literal_path() -> None:

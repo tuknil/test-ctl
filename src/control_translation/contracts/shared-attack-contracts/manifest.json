@@ -3,7 +3,7 @@
   "bundle_version": "shared-attack-contracts-phase-1-ct@2026-09-12",
   "architecture_commit": "dd8c150",
   "digest_profile": "sha256-tab-delimited-schema-catalog-v1",
-  "bundle_digest": "sha256:fbc8e62217c6ff269458f16c55b690ff0341cd3a6e4eaca92336532ca001f828",
+  "bundle_digest": "sha256:b58597c7dfc061d92e7d8c0771ff33d67411e3942c3636e9b3f72357864034b3",
   "schemas": [
     {
       "$id": "https://schemas.janus.internal/contracts/attack-match-semantics/attack-match-semantics-2.0.schema.json",
@@ -20,8 +20,8 @@
     {
       "$id": "https://schemas.janus.internal/contracts/common/janus-contract-common-1.0.schema.json",
       "relative_path": "schemas/common/janus-contract-common-1.0.schema.json",
-      "sha256": "sha256:1faf573573875103c3088e7e32f290ae0f13182d1367d46c84437c8ed1355cbc",
-      "byte_length": 37968
+      "sha256": "sha256:7d90af40dda5c0268033a9674e3a34abb52415e627cf069877d96e1bba9c3880",
+      "byte_length": 38716
     }
   ]
 }
