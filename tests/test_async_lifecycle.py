@@ -29,6 +29,7 @@ from control_translation.persistence import (
     canonical_result_bytes,
     normalized_request_digest,
 )
+from control_translation.workflow_lab import WorkflowLabPublicationError
 
 client = TestClient(app)
 
@@ -778,3 +779,66 @@ def test_cancel_race_respects_publication_cutoff(tmp_path, monkeypatch):
     assert completed.status.status == "completed"
     assert completed.publication_state == "published"
     assert lifecycle2.get_lifecycle_result(run_id2) is not None
+
+
+def test_permanent_publication_conflict_terminalizes_prepared_run(tmp_path):
+    lifecycle, sink, repository, worker, claimed, run_id = _split_worker_run(
+        tmp_path, "permanent-publication-conflict"
+    )
+
+    def conflict(*_args, **_kwargs):
+        sink.publish_calls += 1
+        raise WorkflowLabPublicationError(
+            "publication_conflict", "immutable publication conflicts", retryable=False
+        )
+
+    sink.save_completed_run = conflict
+    try:
+        worker._process(claimed, Event())
+    except WorkflowLabPublicationError as exc:
+        worker._persist_attempt_failure(claimed, exc)
+
+    terminal = lifecycle.get_lifecycle_run(run_id)
+    assert terminal is not None
+    assert terminal.status.status == "failed"
+    assert terminal.status.failure is not None
+    assert terminal.status.failure.code == "publication_conflict"
+    assert terminal.publication_state == "prepared"
+    assert repository.claim_lifecycle_run(
+        worker_id="replacement", lease_seconds=30, max_attempts=3
+    ) is None
+
+
+def test_transient_publication_is_bounded_and_preserves_prepared_bytes(tmp_path):
+    lifecycle, sink, repository, worker, claimed, run_id = _split_worker_run(
+        tmp_path, "transient-publication-exhaustion"
+    )
+
+    def ambiguous(*_args, **_kwargs):
+        raise WorkflowLabPublicationError(
+            "publication_ambiguous", "publication outcome is ambiguous", retryable=True
+        )
+
+    sink.save_completed_run = ambiguous
+    try:
+        worker._process(claimed, Event())
+    except WorkflowLabPublicationError as exc:
+        worker._persist_attempt_failure(claimed, exc)
+    prepared = lifecycle.get_prepared_publication(run_id)
+    assert prepared is not None
+    with sqlite3.connect(lifecycle.database_path) as connection:
+        connection.execute(
+            "UPDATE capability_run_lifecycle SET attempt_number=3, lease_expires_at=? WHERE run_id=?",
+            ("2000-01-01T00:00:00+00:00", run_id),
+        )
+
+    assert repository.claim_lifecycle_run(
+        worker_id="replacement", lease_seconds=30, max_attempts=3
+    ) is None
+    terminal = lifecycle.get_lifecycle_run(run_id)
+    assert terminal is not None
+    assert terminal.status.status == "failed"
+    assert terminal.status.failure is not None
+    assert terminal.status.failure.code == "publication_attempts_exhausted"
+    assert terminal.publication_state == "prepared"
+    assert lifecycle.get_prepared_publication(run_id).canonical_result == prepared.canonical_result

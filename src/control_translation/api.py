@@ -433,6 +433,9 @@ def invoke_endpoint(payload: InvokeAPIRequest) -> ResultEnvelope:
             }
         )
     )
+    plane_error = _validate_execution_plane(effective_request, "databricks")
+    if plane_error is not None:
+        return plane_error
     request_hash = canonical_request_hash(effective_request)
     effective_idempotency_key = (
         effective_request.request_id

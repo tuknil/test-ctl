@@ -7,7 +7,11 @@ import pytest
 from control_translation.api import app
 from control_translation.contracts import DatabricksResultReference
 from control_translation.upstream import UpstreamResolutionError
-from control_translation.workflow_lab import WorkflowLabClient, workflow_lab_result_ref
+from control_translation.workflow_lab import (
+    WorkflowLabClient,
+    WorkflowLabPublicationError,
+    workflow_lab_result_ref,
+)
 
 
 def test_result_reference_preserves_production_shape() -> None:
@@ -98,3 +102,97 @@ def test_client_rejects_duplicate_json_resolution() -> None:
     client.client = httpx.Client(transport=httpx.MockTransport(handler))
     with pytest.raises(UpstreamResolutionError, match="strict JSON"):
         client.resolve({})
+
+
+@pytest.mark.parametrize(
+    ("timeout", "maximum"),
+    [(301, 1024), (1, 256 * 1024 * 1024 + 1)],
+)
+def test_client_rejects_excessive_replay_limits(timeout: float, maximum: int) -> None:
+    with pytest.raises(ValueError, match="allowed range"):
+        WorkflowLabClient(
+            "http://workflow-lab.test",
+            timeout_seconds=timeout,
+            max_bytes=maximum,
+        )
+
+
+def _publication_document() -> dict:
+    return {
+        "capability": "control-translation",
+        "contract_id": "control-translation-result@2.0",
+        "request_id": "request-1",
+        "correlation_id": "correlation-1",
+        "run_id": "run-1",
+        "result_id": "control-translation-result:1",
+        "terminal_state": "translated",
+        "status": "completed",
+        "result_ref": workflow_lab_result_ref("control-translation-result:1").model_dump(mode="json"),
+        "content_sha256": "sha256:" + "1" * 64,
+        "size_bytes": 1,
+        "created_at": "2026-09-20T00:00:00Z",
+    }
+
+
+@pytest.mark.parametrize(
+    ("mode", "retryable", "code"),
+    [
+        ("absent", True, "publication_ambiguous"),
+        ("conflict", False, "publication_conflict"),
+    ],
+)
+def test_publication_classifies_absence_and_conflict(mode, retryable, code) -> None:
+    uploaded = b""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal uploaded
+        if request.url.path == "/v1/objects":
+            uploaded = request.content
+            digest = hashlib.sha256(uploaded).hexdigest()
+            return httpx.Response(201, json={"digest": f"sha256:{digest}", "size_bytes": len(uploaded), "media_type": "application/json", "logical_type": "control-translation-authoritative-result"})
+        if request.url.path == "/v1/resolver/results/register":
+            return httpx.Response(409 if mode == "conflict" else 201, json={"status": "registered"})
+        if request.url.path == "/v1/resolver/results/resolve":
+            return httpx.Response(404, json={"detail": "absent"})
+        raise AssertionError(request.url)
+
+    client = WorkflowLabClient("http://workflow-lab.test", timeout_seconds=1, max_bytes=1024 * 1024)
+    client.client.close()
+    client.client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    with pytest.raises(WorkflowLabPublicationError) as raised:
+        client.publish(_publication_document())
+    assert raised.value.code == code
+    assert raised.value.retryable is retryable
+
+
+def test_exact_existing_publication_reconciles_idempotently() -> None:
+    uploaded = b""
+    locator = None
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal uploaded, locator
+        if request.url.path == "/v1/objects":
+            if uploaded and uploaded != request.content:
+                raise AssertionError("publication bytes changed")
+            uploaded = request.content
+            digest = hashlib.sha256(uploaded).hexdigest()
+            return httpx.Response(201, json={"digest": f"sha256:{digest}", "size_bytes": len(uploaded), "media_type": "application/json", "logical_type": "control-translation-authoritative-result"})
+        if request.url.path == "/v1/resolver/results/register":
+            locator = json.loads(request.content)["locator"]
+            return httpx.Response(201, json={"status": "registered"})
+        if request.url.path == "/v1/resolver/results/resolve":
+            digest = hashlib.sha256(uploaded).hexdigest()
+            return httpx.Response(200, json={"locator": locator, "representation": "authoritative-result", "object": {"digest": f"sha256:{digest}", "size_bytes": len(uploaded)}, "json_pointer": "", "download_path": f"/v1/objects/sha256/{digest}"})
+        if request.url.path.startswith("/v1/objects/sha256/"):
+            return httpx.Response(200, content=uploaded)
+        raise AssertionError(request.url)
+
+    client = WorkflowLabClient("http://workflow-lab.test", timeout_seconds=1, max_bytes=1024 * 1024)
+    client.client.close()
+    client.client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    client.publish(_publication_document())
+    first = uploaded
+    client.publish(_publication_document())
+    assert uploaded == first

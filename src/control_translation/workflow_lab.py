@@ -32,6 +32,16 @@ from control_translation.upstream_databricks import (
 
 logger = logging.getLogger(__name__)
 _OBJECT_PATH = re.compile(r"^/v1/objects/sha256/([a-f0-9]{64})$")
+_MAX_WORKFLOW_LAB_BYTES = 256 * 1024 * 1024
+_MAX_WORKFLOW_LAB_TIMEOUT_SECONDS = 300.0
+
+
+class WorkflowLabPublicationError(PersistenceError):
+    def __init__(self, code: str, detail: str, *, retryable: bool) -> None:
+        super().__init__(detail)
+        self.code = code
+        self.detail = detail
+        self.retryable = retryable
 
 
 def workflow_lab_result_ref(result_id: str) -> DatabricksResultReference:
@@ -90,8 +100,13 @@ class WorkflowLabClient:
             or parsed.fragment
         ):
             raise ValueError("WORKFLOW_LAB_URL must be an absolute credential-free HTTP URL")
-        if timeout_seconds <= 0 or max_bytes <= 0:
-            raise ValueError("Workflow Lab timeout and byte limit must be positive")
+        if (
+            timeout_seconds <= 0
+            or timeout_seconds > _MAX_WORKFLOW_LAB_TIMEOUT_SECONDS
+            or max_bytes <= 0
+            or max_bytes > _MAX_WORKFLOW_LAB_BYTES
+        ):
+            raise ValueError("Workflow Lab timeout or byte limit is outside the allowed range")
         self.base_url = str(parsed).rstrip("/")
         self.max_bytes = max_bytes
         self.client = httpx.Client(
@@ -111,7 +126,20 @@ class WorkflowLabClient:
             if attempt:
                 time.sleep(0.25 * attempt)
             try:
-                response = self.client.request(method, self.base_url + path, **kwargs)
+                with self.client.stream(method, self.base_url + path, **kwargs) as streamed:
+                    content = bytearray()
+                    for chunk in streamed.iter_bytes():
+                        content.extend(chunk)
+                        if len(content) > self.max_bytes:
+                            raise UpstreamResolutionError(
+                                "Workflow Lab response exceeds the configured byte limit"
+                            )
+                    response = httpx.Response(
+                        streamed.status_code,
+                        headers=streamed.headers,
+                        content=bytes(content),
+                        request=streamed.request,
+                    )
             except httpx.RequestError as exc:
                 last = exc
                 continue
@@ -124,8 +152,6 @@ class WorkflowLabClient:
                 raise UpstreamResolutionError("Workflow Lab case requires authoritative-result enrichment")
             if not 200 <= response.status_code < 300:
                 raise UpstreamResolutionError(f"Workflow Lab returned HTTP {response.status_code}")
-            if len(response.content) > self.max_bytes:
-                raise UpstreamResolutionError("Workflow Lab response exceeds the configured byte limit")
             return response
         raise ConnectionError("Workflow Lab is unavailable") from last
 
@@ -226,48 +252,73 @@ class WorkflowLabClient:
         return raw
 
     def publish(self, canonical_result: dict[str, Any]) -> None:
-        raw = json.dumps(
-            canonical_result,
-            ensure_ascii=False,
-            allow_nan=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode()
-        if len(raw) > self.max_bytes:
-            raise PersistenceError("Control Translation result exceeds Workflow Lab byte limit")
-        uploaded = _strict_object(
+        try:
+            raw = json.dumps(
+                canonical_result,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode()
+            if len(raw) > self.max_bytes:
+                raise WorkflowLabPublicationError(
+                    "result_oversized", "Control Translation result exceeds Workflow Lab byte limit", retryable=False
+                )
+            uploaded = _strict_object(
+                self._request(
+                    "POST",
+                    "/v1/objects?logical_type=control-translation-authoritative-result",
+                    content=raw,
+                    headers={"Content-Type": "application/json"},
+                ).content,
+                "Workflow Lab upload",
+            )
+            digest = f"sha256:{hashlib.sha256(raw).hexdigest()}"
+            if uploaded.get("digest") != digest or uploaded.get("size_bytes") != len(raw):
+                raise WorkflowLabPublicationError(
+                    "upload_integrity", "Workflow Lab upload identity differs", retryable=False
+                )
+            locator = {
+                key: canonical_result[key]
+                for key in (
+                    "capability", "contract_id", "request_id", "correlation_id", "run_id",
+                    "result_id", "terminal_state", "status", "result_ref", "content_sha256",
+                    "size_bytes", "created_at",
+                )
+            }
             self._request(
                 "POST",
-                "/v1/objects?logical_type=control-translation-authoritative-result",
-                content=raw,
-                headers={"Content-Type": "application/json"},
-            ).content,
-            "Workflow Lab upload",
-        )
-        digest = f"sha256:{hashlib.sha256(raw).hexdigest()}"
-        if uploaded.get("digest") != digest or uploaded.get("size_bytes") != len(raw):
-            raise PersistenceError("Workflow Lab upload identity differs")
-        locator = {
-            key: canonical_result[key]
-            for key in (
-                "capability", "contract_id", "request_id", "correlation_id", "run_id",
-                "result_id", "terminal_state", "status", "result_ref", "content_sha256",
-                "size_bytes", "created_at",
+                "/v1/resolver/results/register",
+                json={
+                    "locator": locator,
+                    "object": uploaded,
+                    "json_pointer": "",
+                    "representation": "authoritative-result",
+                },
             )
-        }
-        self._request(
-            "POST",
-            "/v1/resolver/results/register",
-            json={
-                "locator": locator,
-                "object": uploaded,
-                "json_pointer": "",
-                "representation": "authoritative-result",
-            },
-        )
-        if self.resolve(locator) == raw:
-            return
-        raise PersistenceError("Workflow Lab result readback differs")
+            if self.resolve(locator) != raw:
+                raise WorkflowLabPublicationError(
+                    "readback_integrity", "Workflow Lab result readback differs", retryable=False
+                )
+        except WorkflowLabPublicationError:
+            raise
+        except ConnectionError as exc:
+            raise WorkflowLabPublicationError(
+                "publication_ambiguous", "Workflow Lab publication outcome is ambiguous", retryable=True
+            ) from exc
+        except UpstreamResolutionError as exc:
+            detail = str(exc)
+            conflict = (
+                "HTTP 409" in detail
+                or "different immutable" in detail
+                or "authoritative-result enrichment" in detail
+            )
+            absent = "not imported" in detail
+            raise WorkflowLabPublicationError(
+                "publication_conflict" if conflict else "publication_ambiguous" if absent else "publication_integrity",
+                "Workflow Lab publication conflicts with immutable state" if conflict else detail,
+                retryable=absent,
+            ) from exc
 
 
 class WorkflowLabUpstreamResultResolver:

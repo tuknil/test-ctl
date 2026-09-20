@@ -530,9 +530,34 @@ class SQLiteRunRepository:
             detail="Worker lease expired and the bounded attempt limit was reached.",
             retryable=False,
         ).model_dump_json()
+        publication_exhausted = RunFailure(
+            code="publication_attempts_exhausted",
+            detail="Result publication could not be reconciled within the bounded attempt limit.",
+            retryable=False,
+        ).model_dump_json()
         try:
             with self._connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    """
+                    UPDATE capability_run_lifecycle
+                    SET status = 'failed', terminal_state = 'malfunction',
+                        failure_json = ?, progress_phase = 'failed',
+                        progress_message = ?, completed_at = ?, updated_at = ?,
+                        worker_id = NULL, lease_expires_at = NULL,
+                        publication_state = 'prepared'
+                    WHERE status = 'running' AND publication_state = 'publication-pending'
+                      AND lease_expires_at < ? AND attempt_number >= ?
+                    """,
+                    (
+                        publication_exhausted,
+                        "Publication attempts exhausted.",
+                        now,
+                        now,
+                        now,
+                        max_attempts,
+                    ),
+                )
                 connection.execute(
                     """
                     UPDATE capability_run_lifecycle
@@ -573,6 +598,7 @@ class SQLiteRunRepository:
                                         WHERE (
                                                 publication_state = 'publication-pending'
                                                 AND status = 'running' AND lease_expires_at < ?
+                                                AND attempt_number < ?
                                             ) OR (
                                                 cancel_requested = 0 AND attempt_number < ?
                                                 AND (
@@ -583,7 +609,7 @@ class SQLiteRunRepository:
                     ORDER BY created_at, run_id
                     LIMIT 1
                     """,
-                                        (now, max_attempts, now),
+                    (now, max_attempts, max_attempts, now),
                 ).fetchone()
                 if row is None:
                     connection.commit()
@@ -906,7 +932,7 @@ class SQLiteRunRepository:
                         completed_at = ?, updated_at = ?, worker_id = NULL,
                         lease_expires_at = NULL,
                         publication_state = CASE
-                            WHEN publication_state = 'publication-pending' THEN 'published'
+                            WHEN publication_state = 'publication-pending' THEN 'prepared'
                             ELSE publication_state
                         END
                                         WHERE run_id = ? AND status = 'running' AND worker_id = ?

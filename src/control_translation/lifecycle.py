@@ -33,6 +33,7 @@ from control_translation.persistence import (
 from control_translation.shared_contracts_v2 import SharedContractV2Error
 from control_translation.terminal import TerminalState
 from control_translation.upstream import UpstreamResultResolver
+from control_translation.workflow_lab import WorkflowLabPublicationError
 
 logger = logging.getLogger(__name__)
 
@@ -205,6 +206,25 @@ class LifecycleWorker:
             repository = self._repository()
             prepared = repository.get_prepared_publication(run.status.run_id)
             if prepared is not None and prepared.publication_state == "publication-pending":
+                if isinstance(exc, WorkflowLabPublicationError) and not exc.retryable:
+                    failure = RunFailure(
+                        code=exc.code,
+                        detail=exc.detail,
+                        retryable=False,
+                    )
+                    repository.fail_lifecycle_run(
+                        run.status.run_id,
+                        worker_id=self._worker_id,
+                        attempt_number=run.attempt_number,
+                        failure=failure,
+                        result=prepared.canonical_result,
+                    )
+                    logger.error(
+                        "Permanent Workflow Lab publication failure terminalized run_id=%s code=%s",
+                        run.status.run_id,
+                        exc.code,
+                    )
+                    return
                 logger.warning(
                     "Publication remains pending for recovery run_id=%s attempt=%s error_type=%s",
                     run.status.run_id,
