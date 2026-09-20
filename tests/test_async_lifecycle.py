@@ -804,6 +804,13 @@ def test_permanent_publication_conflict_terminalizes_prepared_run(tmp_path):
     assert terminal.status.failure is not None
     assert terminal.status.failure.code == "publication_conflict"
     assert terminal.publication_state == "prepared"
+    prepared_result = lifecycle.get_lifecycle_result(run_id)
+    assert prepared_result is not None
+    exposed = api_module._terminal_lifecycle_result(terminal, prepared_result)
+    assert isinstance(exposed, CapabilityRunStatus)
+    assert exposed.status == "failed"
+    assert exposed.failure is not None
+    assert exposed.failure.code == "publication_conflict"
     assert repository.claim_lifecycle_run(
         worker_id="replacement", lease_seconds=30, max_attempts=3
     ) is None

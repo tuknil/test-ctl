@@ -750,9 +750,7 @@ def get_control_translation_run_result(run_id: str):
         return _lifecycle_error(404, "run_not_found", "Run was not found.")
     if run.status.status in {"queued", "running"}:
         return _lifecycle_error(409, "run_not_terminal", "Run is not terminal.")
-    if result is None:
-        return run.status
-    return result
+    return _terminal_lifecycle_result(run, result)
 
 
 @app.post(
@@ -866,7 +864,14 @@ def get_workflow_lab_result(run_id: str):
         return _lifecycle_error(404, "run_not_found", "Run was not found.")
     if run.status.status in {"queued", "running"}:
         return _lifecycle_error(409, "run_not_terminal", "Run is not terminal.")
-    return result if result is not None else run.status
+    return _terminal_lifecycle_result(run, result)
+
+
+def _terminal_lifecycle_result(run, result: dict | None):
+    """Expose canonical result bytes only after authoritative completion."""
+    if run.status.status != "completed" or result is None:
+        return run.status
+    return result
 
 
 @app.post("/v1/workflow-lab/runs/{run_id}/cancel", response_model=CapabilityRunStatus)
