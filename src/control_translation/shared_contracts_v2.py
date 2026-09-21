@@ -48,6 +48,11 @@ from control_translation.upstream import (
     UpstreamTransportError,
 )
 
+
+def _path_segment_escape(value: str) -> str:
+    """Match Go net/url.PathEscape used by the authoritative MC resolver."""
+    return quote(value, safe="$&+,:=@")
+
 SCHEMA_ROOT = Path(__file__).resolve().parent / "contracts" / "shared-attack-contracts"
 BV_PROFILE_ROOT = SCHEMA_ROOT / "profiles"
 AMS_SCHEMA_ID = "https://schemas.janus.internal/contracts/attack-match-semantics/attack-match-semantics-2.0.schema.json"
@@ -696,7 +701,7 @@ def _expected_template_resolution(
                 "mc-template-resolution-invalid",
                 f"CG path payload is invalid: {item['input_id']}",
             )
-        path = path.rstrip("/") + "/" + quote(path_payload, safe="")
+        path = path.rstrip("/") + "/" + _path_segment_escape(path_payload)
     rendered.update(
         modality="http-request",
         scheme=route["scheme"],
@@ -1885,7 +1890,7 @@ def _resolved_route_conditions(
         )
     rendered_path = path
     if path_payload is not None:
-        rendered_path = path.rstrip("/") + "/" + quote(path_payload, safe="")
+        rendered_path = path.rstrip("/") + "/" + _path_segment_escape(path_payload)
     return [
         {
             "type": "pathMatch",

