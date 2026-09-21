@@ -1078,6 +1078,18 @@ def _v3_challenge_attribution(
             "bv-dimension-invalid", "BV challenge attribution shape differs"
         )
     challenge_label = fields[0].removeprefix("challenge:")
+    transformation = fields[3].removeprefix("transformation:")
+    if challenge_label == "source:authenticated-representation":
+        producer_chains = {
+            label.split("|", 1)[1] if label.startswith("grammar:") else label
+            for label in producer_attributions
+        }
+        if transformation not in producer_chains:
+            raise SharedContractV2Error(
+                "bv-dimension-invalid",
+                "BV authenticated source transformation is not producer-derived",
+            )
+        return
     matching_ids = [
         challenge_id
         for challenge_id in challenges
@@ -1137,7 +1149,6 @@ def _v3_challenge_attribution(
         raise SharedContractV2Error(
             "bv-dimension-invalid", "BV challenge is inapplicable to its declared slot"
         )
-    transformation = fields[3].removeprefix("transformation:")
     if actual.get("supported") is False:
         if transformation != "unsupported":
             raise SharedContractV2Error(
