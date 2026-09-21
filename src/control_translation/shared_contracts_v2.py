@@ -1080,14 +1080,10 @@ def _v3_challenge_attribution(
     challenge_label = fields[0].removeprefix("challenge:")
     transformation = fields[3].removeprefix("transformation:")
     if challenge_label == "source:authenticated-representation":
-        producer_chains = {
-            label.split("|", 1)[1] if label.startswith("grammar:") else label
-            for label in producer_attributions
-        }
-        if transformation not in producer_chains:
+        if transformation != "baseline:authenticated-source":
             raise SharedContractV2Error(
                 "bv-dimension-invalid",
-                "BV authenticated source transformation is not producer-derived",
+                "BV authenticated source representation has an unexpected transformation",
             )
         return
     matching_ids = [
