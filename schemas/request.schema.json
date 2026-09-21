@@ -108,23 +108,75 @@
     },
     "DatabricksResultReference": {
       "additionalProperties": false,
-      "description": "Authoritative pointer to one upstream result in Unity Catalog.",
+      "description": "Authoritative result pointer for the selected server-owned plane.",
       "properties": {
         "system": {
+          "enum": [
+            "databricks",
+            "workflow-lab"
+          ],
           "title": "System",
           "type": "string"
         },
         "catalog": {
-          "title": "Catalog",
-          "type": "string"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Catalog"
         },
         "schema": {
-          "title": "Schema",
-          "type": "string"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Schema"
         },
         "table": {
-          "title": "Table",
-          "type": "string"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Table"
+        },
+        "contract_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Contract Id"
+        },
+        "namespace": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Namespace"
         },
         "key": {
           "title": "Key",
@@ -133,9 +185,6 @@
       },
       "required": [
         "system",
-        "catalog",
-        "schema",
-        "table",
         "key"
       ],
       "title": "DatabricksResultReference",
@@ -1001,7 +1050,10 @@
           "type": "string"
         },
         "profile_id": {
-          "enum": ["waf-standard@1", "waf-standard@2"],
+          "enum": [
+            "waf-standard@1",
+            "waf-standard@2"
+          ],
           "title": "Profile Id",
           "type": "string"
         },

@@ -1436,6 +1436,24 @@ def test_v2_lifecycle_state_is_compact_and_request_rehydrates(tmp_path) -> None:
     assert len(serialized.encode()) < 16 * 1024
 
 
+def test_production_invoke_rejects_workflow_lab_references_before_resolution() -> None:
+    request, _ = _chain()
+    document = request.model_dump(mode="json", by_alias=True)
+    for item in document["upstream_inputs"]:
+        item["result_ref"] = {
+            "system": "workflow-lab",
+            "contract_id": "workflow-lab-result-reference@1.0",
+            "namespace": "immutable-results",
+            "key": item["result_id"],
+        }
+    replay_request = SharedContractV2InvokeRequest.model_validate(document)
+
+    response = api_module.invoke_endpoint(replay_request)
+
+    assert response.status_code == 422
+    assert b"execution_plane_mismatch" in response.body
+
+
 def test_v2_result_contract_rejects_partial_or_unknown_mapping() -> None:
     _, _, result = _translated_v2()
     document = result.structured_result.model_dump(mode="json")
