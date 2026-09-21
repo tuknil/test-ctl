@@ -922,6 +922,18 @@ def _component_carrier(component: dict[str, Any]) -> str:
     }.get(component["location"].get("kind"), "unsupported")
 
 
+def _component_target_label(component: dict[str, Any]) -> str:
+    location = component["location"]
+    kind = str(location["kind"])
+    if kind in {"http-query", "http-header", "http-cookie"}:
+        return f"{kind}:{location['name']}:{location.get('occurrence', 0)}"
+    if kind == "http-body-structured":
+        return f"{kind}:{location['selector']}"
+    if kind == "http-path":
+        return "http-path:path-payload"
+    return kind
+
+
 def _expected_grammar_labels(component: dict[str, Any]) -> list[str]:
     grammar = component.get("grammar")
     if not isinstance(grammar, dict):
@@ -1052,11 +1064,15 @@ def _v3_challenge_attribution(
 ) -> None:
     fields = attribution.split("|")
     if (
-        len(fields) != 4
+        len(fields) not in {4, 5}
         or not fields[0].startswith("challenge:")
         or fields[1] != f"component:{actual['component_id']}"
         or fields[2] != f"carrier:{actual['carrier']}"
         or not fields[3].startswith("transformation:")
+        or (
+            len(fields) == 5
+            and fields[4] != f"target:{_component_target_label(component)}"
+        )
     ):
         raise SharedContractV2Error(
             "bv-dimension-invalid", "BV challenge attribution shape differs"
