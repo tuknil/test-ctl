@@ -928,10 +928,24 @@ def _component_target_label(component: dict[str, Any]) -> str:
     if kind in {"http-query", "http-header", "http-cookie"}:
         return f"{kind}:{location['name']}:{location.get('occurrence', 0)}"
     if kind == "http-body-structured":
+        if location.get("selector_type") == "any-field":
+            return "http-body-structured:*"
         return f"{kind}:{location['selector']}"
     if kind == "http-path":
         return "http-path:path-payload"
     return kind
+
+
+def _component_target_label_matches(component: dict[str, Any], label: str) -> bool:
+    location = component["location"]
+    kind = str(location["kind"])
+    if kind in {"http-query", "http-header", "http-cookie"} and location.get("name") == "*":
+        prefix = f"{kind}:"
+        name, separator, occurrence = label.removeprefix(prefix).rpartition(":")
+        return label.startswith(prefix) and bool(separator and name) and occurrence.isdecimal()
+    if kind == "http-body-structured" and location.get("selector_type") == "any-field":
+        return label.startswith("http-body-structured:/")
+    return label == _component_target_label(component)
 
 
 def _expected_grammar_labels(component: dict[str, Any]) -> list[str]:
@@ -1071,16 +1085,23 @@ def _v3_challenge_attribution(
         or not fields[3].startswith("transformation:")
         or (
             len(fields) == 5
-            and fields[4] != f"target:{_component_target_label(component)}"
+            and not _component_target_label_matches(
+                component, fields[4].removeprefix("target:")
+            )
         )
     ):
         raise SharedContractV2Error(
-            "bv-dimension-invalid", "BV challenge attribution shape differs"
+            "bv-dimension-invalid", f"BV challenge attribution shape differs: {attribution}"
         )
     challenge_label = fields[0].removeprefix("challenge:")
     transformation = fields[3].removeprefix("transformation:")
     if challenge_label == "source:authenticated-representation":
-        if transformation != "baseline:authenticated-source":
+        producer_chains = {
+            label.split("|", 1)[1] if label.startswith("grammar:") else label
+            for label in producer_attributions
+        }
+        producer_chains.add("baseline:authenticated-source")
+        if transformation not in producer_chains:
             raise SharedContractV2Error(
                 "bv-dimension-invalid",
                 "BV authenticated source representation has an unexpected transformation",
@@ -1166,6 +1187,8 @@ def _v3_challenge_attribution(
         label.split("|", 1)[1] if label.startswith("grammar:") else label
         for label in producer_attributions
     }
+    if component.get("transformations"):
+        producer_chains.add("baseline:authenticated-source")
     if transformation not in producer_chains:
         raise SharedContractV2Error(
             "bv-dimension-invalid", "BV challenge transformation is not producer-derived"
@@ -1190,6 +1213,11 @@ def _validate_bv_v3_dimensions(
             expected["carrier"],
         )
         producer_by_target.setdefault(target, set()).add(expected["transformation"])
+    transformed_targets = {
+        target
+        for target in producer_by_target
+        if components[target[1]].get("transformations")
+    }
     profile_challenges = _bv_profile("waf-bypass@3").get("positive_challenges")
     if not isinstance(profile_challenges, list):
         raise SharedContractV2Error(
@@ -1201,6 +1229,7 @@ def _validate_bv_v3_dimensions(
     observed_producers: dict[tuple[str, str, str], set[str]] = {
         target: set() for target in producer_by_target
     }
+    observed_authenticated_source: set[tuple[str, str, str]] = set()
     for actual in dimensions:
         if not isinstance(actual, dict):
             raise SharedContractV2Error(
@@ -1278,8 +1307,14 @@ def _validate_bv_v3_dimensions(
                     f"BV attribution is duplicated across dimensions: {obligation_id}",
                 )
             seen_attributions.add(attribution_key)
-            if attribution in producer_attributions:
-                observed_producers[target].add(attribution)
+            producer_attribution = attribution
+            base_attribution, separator, target_label = producer_attribution.rpartition(
+                "|target:"
+            )
+            if separator and _component_target_label_matches(component, target_label):
+                producer_attribution = base_attribution
+            if producer_attribution in producer_attributions:
+                observed_producers[target].add(producer_attribution)
                 continue
             _v3_challenge_attribution(
                 attribution,
@@ -1288,8 +1323,18 @@ def _validate_bv_v3_dimensions(
                 producer_attributions=producer_attributions,
                 challenges=challenges,
             )
+            if attribution.startswith("challenge:source:authenticated-representation|"):
+                observed_authenticated_source.add(target)
     if any(
-        observed_producers[target] != expected
+        (
+            target in transformed_targets
+            and target not in observed_authenticated_source
+            and observed_producers[target] != expected
+        )
+        or (
+            target not in transformed_targets
+            and observed_producers[target] != expected
+        )
         for target, expected in producer_by_target.items()
     ):
         raise SharedContractV2Error(
@@ -1325,15 +1370,22 @@ def _validate_bv_resolution(
         raise SharedContractV2Error("bv-template-resolution-invalid", f"BV template resolution identity differs: {obligation_id}")
     rendered = resolution.get("rendered_request")
     expected_rendered = base["rendered_request"]
-    if not isinstance(rendered, dict) or set(rendered) != set(expected_rendered):
+    location_kind = component["location"].get("kind")
+    expected_keys = set(expected_rendered)
+    if location_kind == "http-path":
+        expected_keys.add("path_payload")
+    if not isinstance(rendered, dict) or set(rendered) != expected_keys:
         raise SharedContractV2Error("bv-template-resolution-invalid", f"BV rendered request shape differs: {obligation_id}")
     mutable_field = {
         "http-query": "query", "http-header": "headers", "http-cookie": "cookies",
         "http-method": "method", "http-path": "path", "http-body-raw": "body",
         "http-body-structured": "body",
-    }.get(component["location"].get("kind"))
+    }.get(location_kind)
+    mutable_fields = {mutable_field}
+    if location_kind == "http-path":
+        mutable_fields.add("path_payload")
     if mutable_field is None or any(
-        rendered[key] != value for key, value in expected_rendered.items() if key != mutable_field
+        rendered[key] != value for key, value in expected_rendered.items() if key not in mutable_fields
     ):
         raise SharedContractV2Error("bv-template-resolution-invalid", f"BV changed a nonselected template field: {obligation_id}")
 
@@ -1778,15 +1830,22 @@ def _component_condition(
     flags = rule.get("flags")
     transformations = rule.get("transformations")
     expected_carrier, expected_name = _semantic_carrier(component)
+    location = component["location"]
+    carrier_binding_matches = _same_carrier_binding(
+        (carrier, name), (expected_carrier, expected_name)
+    ) or (
+        location.get("kind") == "http-body-structured"
+        and location.get("selector_type") == "any-field"
+        and carrier == "body"
+        and name == "*"
+    )
     if (
         not isinstance(rule_id, str)
         or not rule_id
         or rule_id in seen_rule_ids
         or carrier not in _CARRIER_CONDITION_TYPES
         or not isinstance(name, str)
-        or not _same_carrier_binding(
-            (carrier, name), (expected_carrier, expected_name)
-        )
+        or not carrier_binding_matches
         or not isinstance(component_id, str)
         or not component_id
         or not isinstance(pattern, str)
@@ -1798,10 +1857,11 @@ def _component_condition(
     ):
         raise SharedContractV2Error(
             "cannot-express",
-            f"DG rule in {source_artifact_id} cannot map without semantic loss",
+            f"DG rule {rule_id!r} in {source_artifact_id} cannot map without semantic loss "
+            f"(carrier={carrier!r}, name={name!r}, component={component_id!r}, "
+            f"expected_carrier={expected_carrier!r}, expected_name={expected_name!r})",
         )
     seen_rule_ids.add(rule_id)
-    location = component["location"]
     location_kind = location["kind"]
     condition_type = _CARRIER_CONDITION_TYPES[carrier]
     if location_kind == "http-body-structured":
@@ -2129,6 +2189,18 @@ def _translate_carrier_document(
             if semantic_components is not None and component_id in semantic_components
             else None
         )
+        component = (
+            semantic_components.get(component_id)
+            if semantic_components is not None and isinstance(component_id, str)
+            else None
+        )
+        any_field_binding = (
+            isinstance(component, dict)
+            and component.get("location", {}).get("kind") == "http-body-structured"
+            and component.get("location", {}).get("selector_type") == "any-field"
+            and carrier == "body"
+            and name == "*"
+        )
         if (
             carrier not in _CARRIER_CONDITION_TYPES
             or not isinstance(name, str)
@@ -2137,6 +2209,7 @@ def _translate_carrier_document(
             or (
                 expected is not None
                 and not _same_carrier_binding((carrier, name), expected)
+                and not any_field_binding
             )
             or (expected is None and carrier in _CARRIERS_REQUIRING_SELECTOR and not name)
         ):
