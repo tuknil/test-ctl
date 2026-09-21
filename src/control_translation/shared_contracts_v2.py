@@ -1864,6 +1864,8 @@ def _component_condition(
     seen_rule_ids.add(rule_id)
     location_kind = location["kind"]
     condition_type = _CARRIER_CONDITION_TYPES[carrier]
+    if carrier == "header" and name == "*":
+        condition_type = "requestHeaderMatch"
     if location_kind == "http-body-structured":
         condition_type = "argsPostJSONMatch"
     condition: dict[str, Any] = {
@@ -2009,13 +2011,20 @@ def _translate_rule_document(
             "cannot-express",
             f"DG artifact {source_artifact_id} has no expressible WAF rules",
         )
-    if document.get("placement_mode") != "route-bound-v1":
+    placement_mode = document.get("placement_mode")
+    if placement_mode not in {None, "", "route-bound-v1"}:
         raise SharedContractV2Error(
-            "cannot-express", f"DG artifact {source_artifact_id} lacks route-bound placement"
+            "cannot-express", f"DG artifact {source_artifact_id} uses an unknown placement mode"
         )
     route_alternatives = document.get("route_bound_alternatives")
     coverage_alternatives = document.get("coverage_alternatives")
-    if not isinstance(route_alternatives, list) or not route_alternatives or not isinstance(coverage_alternatives, list):
+    if not isinstance(coverage_alternatives, list) or not coverage_alternatives:
+        raise SharedContractV2Error(
+            "cannot-express", f"DG artifact {source_artifact_id} lacks Boolean alternatives"
+        )
+    if placement_mode == "route-bound-v1" and (
+        not isinstance(route_alternatives, list) or not route_alternatives
+    ):
         raise SharedContractV2Error(
             "cannot-express", f"DG artifact {source_artifact_id} lacks route-bound alternatives"
         )
@@ -2055,6 +2064,38 @@ def _translate_rule_document(
             )
         carrier_keys.append(carrier_key)
         rules_by_component[component_id] = condition
+    if placement_mode in {None, ""}:
+        translated: list[tuple[str, dict[str, Any]]] = []
+        seen_coverage: set[bytes] = set()
+        for index, component_ids in enumerate(coverage_alternatives):
+            key = canonical_bytes(component_ids)
+            if (
+                not isinstance(component_ids, list)
+                or not component_ids
+                or key in seen_coverage
+                or any(component_id not in rules_by_component for component_id in component_ids)
+            ):
+                raise SharedContractV2Error(
+                    "cannot-express", "DG endpoint-independent coverage alternative is invalid"
+                )
+            seen_coverage.add(key)
+            translated.append(
+                (
+                    f"endpoint-independent:{index}",
+                    {
+                        "name": f"janus-{document.get('rule_set_id', source_artifact_id)}-{index}",
+                        "description": "One endpoint-independent Boolean alternative from a verified DG WAF rule set.",
+                        "operation": "AND",
+                        "conditions": [deepcopy(rules_by_component[item]) for item in component_ids],
+                        "sourceArtifactId": source_artifact_id,
+                        "sourceRuleSetId": document.get("rule_set_id"),
+                        "sourceAlternativeId": f"endpoint-independent:{index}",
+                        "sourceAction": document.get("action"),
+                        "fastLoopNegativeMaterials": document.get("fast_loop_negative_materials", []),
+                    },
+                )
+            )
+        return translated, carrier_keys
     semantic_inputs = _index(semantics["test_inputs"], "input_id", "semantics-inputs-invalid")
     coverage_keys = {canonical_bytes(item) for item in coverage_alternatives}
     represented_coverage: set[bytes] = set()
@@ -2320,8 +2361,8 @@ def build_waf_translation_plan(
     }
     proposal = TranslationProposal(
         candidate_content=primary_candidate_content,
-        translation_label="exact",
-        justification="Every verified DG WAF rule, carrier, selector, and pattern is preserved.",
+        translation_label="equivalent",
+        justification="Every verified DG Boolean alternative, carrier, selector, pattern, and ordered transformation is preserved without fixture route narrowing.",
         translation_assumptions=[],
         limitations=list(candidate.get("limitations", [])),
     )

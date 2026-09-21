@@ -921,7 +921,7 @@ def test_raw_body_artifacts_translate_without_synthetic_selector() -> None:
     ("location", "carrier", "name", "condition_type", "absent_selector"),
     [
         ({"family": "http", "kind": "http-query", "name": "*"}, "query", "*", "uriQueryMatch", "parameter"),
-        ({"family": "http", "kind": "http-header", "name": "*"}, "header", "*", "requestHeaderValueMatch", "header"),
+        ({"family": "http", "kind": "http-header", "name": "*"}, "header", "*", "requestHeaderMatch", "header"),
         ({"family": "http", "kind": "http-cookie", "name": "*"}, "cookie", "*", "cookieMatch", "cookieName"),
         ({"family": "http", "kind": "http-body-structured", "selector_type": "any-field"}, "body", "", "argsPostJSONMatch", "parameter"),
         ({"family": "http", "kind": "http-body-raw"}, "body", "", "argsPostMatch", "parameter"),
@@ -1139,6 +1139,27 @@ def test_path_payloads_expand_to_distinct_route_bound_or_alternatives() -> None:
         ("path", "", "component:path"),
         ("query", "*", "component:query"),
     ]
+
+    endpoint_independent = deepcopy(document)
+    endpoint_independent.pop("placement_mode")
+    endpoint_independent.pop("route_bound_alternatives")
+    generalized, generalized_keys = _translate_rule_document(
+        endpoint_independent,
+        source_artifact_id="artifact:expanded",
+        semantics=semantics,
+        profile_id="waf-standard@2",
+    )
+    assert generalized_keys == carrier_keys
+    assert len(generalized) == 1
+    conditions = generalized[0][1]["conditions"]
+    assert [condition["type"] for condition in conditions] == [
+        "pathMatch",
+        "uriQueryMatch",
+    ]
+    assert conditions[0]["value"] == ["^(?:a/b|second value)$"]
+    assert all("sourceRoute" not in condition for condition in conditions)
+    assert all("sourcePathComponents" not in condition for condition in conditions)
+    assert generalized[0][1]["operation"] == "AND"
 
 
 def test_opaque_route_key_resolves_without_becoming_a_literal_path() -> None:
