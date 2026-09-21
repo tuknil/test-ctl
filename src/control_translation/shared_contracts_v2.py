@@ -1432,6 +1432,9 @@ def _validate_bv(bv: dict[str, Any], semantics: dict[str, Any], attestation: dic
     executed_work = 0
     unsupported_work = 0
     attempted_families: set[str] = set()
+    planned_governed_families: set[str] = set()
+    executed_governed_families: set[str] = set()
+    unsupported_governed_families: set[str] = set()
     all_attempt_ids: set[str] = set()
     for obligation_id, campaign in campaigns.items():
         dimensions = campaign.get("attempted_dimensions")
@@ -1465,8 +1468,17 @@ def _validate_bv(bv: dict[str, Any], semantics: dict[str, Any], attestation: dic
             ):
                 raise SharedContractV2Error("bv-dimension-invalid", f"BV dimension is bogus or out of order: {obligation_id}")
             attempted_families.add(actual["transformation"])
+            family = actual.get("family")
+            if family is not None and (not isinstance(family, str) or not family):
+                raise SharedContractV2Error(
+                    "bv-dimension-invalid", f"BV governed family is invalid: {obligation_id}"
+                )
+            if isinstance(family, str):
+                planned_governed_families.add(family)
             supported = actual.get("supported")
             if supported is True:
+                if isinstance(family, str):
+                    executed_governed_families.add(family)
                 if not isinstance(actual.get("attempt_id"), str) or not actual["attempt_id"] or actual.get("disposition") not in {"blocked", "bypassed", "safety-stop"} or actual.get("detail") is not None:
                     raise SharedContractV2Error("bv-dimension-invalid", f"BV supported dimension evidence differs: {obligation_id}")
                 if actual["disposition"] == "bypassed":
@@ -1479,6 +1491,8 @@ def _validate_bv(bv: dict[str, Any], semantics: dict[str, Any], attestation: dic
                 if item["input"].get("modality") == "http-request-template":
                     expected_resolutions.append((item, components[actual["component_id"]]))
             elif supported is False:
+                if isinstance(family, str):
+                    unsupported_governed_families.add(family)
                 if actual.get("attempt_id") is not None or actual.get("disposition") is not None or not isinstance(actual.get("detail"), str) or not actual["detail"]:
                     raise SharedContractV2Error("bv-dimension-invalid", f"BV unsupported dimension evidence differs: {obligation_id}")
                 unsupported_work += 1
@@ -1548,16 +1562,38 @@ def _validate_bv(bv: dict[str, Any], semantics: dict[str, Any], attestation: dic
             "BV planned dimensions contain a silent non-executed disposition",
         )
     search_bounds = bv.get("search_bounds")
+    expected_attempted = sorted(attempted_families)
+    if planned_governed_families:
+        expected_attempted = sorted(executed_governed_families)
     if (
         not isinstance(search_bounds, dict)
         or search_bounds.get("attempt_budget") != planned_work
         or search_bounds.get("attempts_executed") != executed_work
-        or search_bounds.get("variant_families_attempted") != sorted(attempted_families)
+        or search_bounds.get("variant_families_attempted") != expected_attempted
     ):
         raise SharedContractV2Error(
             "bv-attempt-accounting-invalid",
             "BV search bounds differ from authenticated campaign dimensions",
         )
+    if planned_governed_families:
+        enabled = ["baseline", "case-normalization", "encoding", "semantic-domain"]
+        governed = {
+            "variant_families_requested": enabled,
+            "variant_families_enabled": enabled,
+            "variant_families_planned": sorted(planned_governed_families),
+            "variant_families_generated": sorted(executed_governed_families),
+            "variant_families_executed": sorted(executed_governed_families),
+            "variant_families_budget_skipped": [],
+            "variant_families_unsupported": sorted(unsupported_governed_families),
+            "variant_families_out_of_scope": sorted(
+                set(enabled) - planned_governed_families
+            ),
+        }
+        if any(search_bounds.get(key) != value for key, value in governed.items()):
+            raise SharedContractV2Error(
+                "bv-attempt-accounting-invalid",
+                "BV governed family accounting differs from authenticated dimensions",
+            )
     accounting = _accounting(
         semantics,
         required_work=planned_work,
