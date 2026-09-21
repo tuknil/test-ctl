@@ -40,6 +40,7 @@ from control_translation.shared_contracts_v2 import (
     _bv_profile,
     _component_condition,
     _expected_bv_dimensions,
+    _expected_template_resolution,
     _resolved_route_conditions,
     _shared_terminal_state_from_cg,
     _translate_carrier_document,
@@ -1234,6 +1235,39 @@ def test_mc_d78824c_template_resolution_and_case_evidence_are_verified() -> None
             _locators(request),
         )
     assert raised.value.code == "mc-template-resolution-invalid"
+
+
+def test_mc_path_template_resolution_appends_the_encoded_semantic_payload() -> None:
+    item = {
+        "input_id": "input:path",
+        "input": {
+            "modality": "http-request-template",
+            "method": "GET",
+            "path_key": "inventory-item-detail",
+            "path_payload": r"\x24\x7battack\x7d",
+            "query": [],
+            "headers": [],
+            "cookies": [],
+            "body": {"state": "absent"},
+        },
+    }
+
+    resolution = _expected_template_resolution(
+        item,
+        resolver_id="mc-approved-route-adapter",
+        profile_id="waf-standard@2",
+        profile_digest="sha256:" + "a" * 64,
+        route={
+            "scheme": "https",
+            "authority": "approved-mc-target.internal",
+            "path": "/inventory/items/42",
+        },
+    )
+
+    assert resolution["rendered_request"]["path"] == (
+        "/inventory/items/42/%5Cx24%5Cx7battack%5Cx7d"
+    )
+    assert "path_payload" not in resolution["rendered_request"]
 
 
 def test_bv_ddb49be_root_dimensions_match_cg_semantics_and_profile() -> None:

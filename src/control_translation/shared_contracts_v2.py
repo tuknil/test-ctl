@@ -688,11 +688,20 @@ def _expected_template_resolution(
     template = item["input"]
     rendered = deepcopy(template)
     rendered.pop("path_key", None)
+    path_payload = rendered.pop("path_payload", None)
+    path = route["path"]
+    if path_payload is not None:
+        if not isinstance(path_payload, str) or not path_payload:
+            raise SharedContractV2Error(
+                "mc-template-resolution-invalid",
+                f"CG path payload is invalid: {item['input_id']}",
+            )
+        path = path.rstrip("/") + "/" + quote(path_payload, safe="")
     rendered.update(
         modality="http-request",
         scheme=route["scheme"],
         authority=route["authority"],
-        path=route["path"],
+        path=path,
     )
     return {
         "template_id": item["input_id"],
