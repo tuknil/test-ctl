@@ -18,6 +18,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from control_translation import api as api_module
 from control_translation import capability
+from control_translation.adapters.akamai_waf import AkamaiWafAdapter
 from control_translation.config import Settings, get_settings
 from control_translation.contracts import (
     ControlTranslationResult,
@@ -1361,6 +1362,30 @@ def test_structured_any_field_maps_to_wildcard_body_selector() -> None:
     assert carrier == ("body", "*", "component:any-field")
     assert condition["type"] == "argsPostJSONMatch"
     assert condition["sourceSelector"] == "*"
+
+
+def test_akamai_syntax_accepts_authenticated_any_header_condition() -> None:
+    document = {
+        "rules": [
+            {
+                "name": "wildcard-header",
+                "operation": "AND",
+                "conditions": [
+                    {
+                        "type": "requestHeaderValueMatch",
+                        "positiveMatch": True,
+                        "value": ["attack"],
+                        "sourceCarrier": "header",
+                        "sourceSelector": "*",
+                    }
+                ],
+            }
+        ]
+    }
+
+    validation = AkamaiWafAdapter().validate_syntax(json.dumps(document))
+    assert validation.valid is True
+    assert validation.errors == []
 
 
 def test_bv_ddb49be_root_dimensions_match_cg_semantics_and_profile() -> None:

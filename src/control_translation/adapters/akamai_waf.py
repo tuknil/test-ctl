@@ -186,7 +186,10 @@ class AkamaiWafAdapter:
                     f"{prefix}.header must name a real request header for "
                     "requestHeaderValueMatch."
                 )
-            elif header.strip().lower() in _SYNTHETIC_REQUEST_HEADERS:
+            elif (
+                isinstance(header, str)
+                and header.strip().lower() in _SYNTHETIC_REQUEST_HEADERS
+            ):
                 errors.append(
                     f"{prefix}.header {header!r} is synthetic; use pathMatch for "
                     "URI paths or an argsPost condition for request bodies."
