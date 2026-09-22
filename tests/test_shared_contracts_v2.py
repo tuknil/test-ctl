@@ -40,17 +40,17 @@ from control_translation.shared_contracts_v2 import (
     SharedContractV2Error,
     _bv_profile,
     _component_condition,
-    _expected_template_resolution,
     _escape_path_payload,
     _expected_bv_dimensions,
+    _expected_template_resolution,
     _resolved_route_conditions,
     _shared_terminal_state_from_cg,
     _translate_carrier_document,
     _translate_rule_document,
-    _validate_v3_challenge_target,
     _v3_challenge_attribution,
     _validate_cg,
     _validate_mc,
+    _validate_v3_challenge_target,
     build_waf_translation_plan,
     canonical_bytes,
     digest,
@@ -355,9 +355,14 @@ def _chain(*, current_profiles: bool = False) -> tuple[SharedContractV2InvokeReq
                 )
                 continue
             attempt_id = f"bv-attempt:{campaign['obligation_id']}:{index}"
+            wire_digest = "sha256:" + sha256(attempt_id.encode()).hexdigest()
             dimensions.append(
                 {
                     **expected,
+                    "wire_value_sha256": wire_digest,
+                    "wire_value_size_bytes": len(attempt_id),
+                    "baseline_value_sha256": wire_digest,
+                    "wire_encoding_chain": [],
                     "supported": True,
                     "attempt_id": attempt_id,
                     "disposition": "blocked",
@@ -375,6 +380,20 @@ def _chain(*, current_profiles: bool = False) -> tuple[SharedContractV2InvokeReq
         )
     candidate = bundle["primary_candidate"]
     bv_result_id = "bypass-validation-result:shared-42"
+    bv_accounting = _load("bypass-validation-expanded-work-accounting.json")
+    planned_dimensions = sum(
+        len(campaign["attempted_dimensions"]) for campaign in campaigns
+    )
+    disposed_dimensions = sum(
+        len(campaign["attempt_refs"])
+        + sum(not item.get("supported", True) for item in campaign["attempted_dimensions"])
+        for campaign in campaigns
+    )
+    bv_accounting.update(
+        required_work_item_count=planned_dimensions,
+        disposed_work_item_count=disposed_dimensions,
+        unaccounted_required_work_item_count=planned_dimensions - disposed_dimensions,
+    )
     bv_document = {
         "contract_id": "bypass-validation@2.0",
         "profile_id": "waf-bypass@3" if current_profiles else "waf-bypass@2",
@@ -423,7 +442,7 @@ def _chain(*, current_profiles: bool = False) -> tuple[SharedContractV2InvokeReq
         "campaign_results": campaigns,
         "counterexamples": [],
         "feedback": [],
-        "accounting": _load("bypass-validation-expanded-work-accounting.json"),
+        "accounting": bv_accounting,
         "limitations": [],
         "prose_summary": "Every required obligation campaign completed without an attributable bypass.",
         "produced_at": CREATED_AT,
@@ -780,7 +799,7 @@ def test_current_bv_accepts_real_regex_challenge_dimension() -> None:
 
     verified = resolve_and_verify_four_result_join(request, FakeResolver(records))
 
-    assert verified.accounting.required_work_item_count == 20
+    assert verified.accounting.required_work_item_count == 28
 
 
 def test_current_bv_accepts_deduplicated_multi_attribution_label() -> None:
@@ -799,6 +818,38 @@ def test_current_bv_accepts_deduplicated_multi_attribution_label() -> None:
         + producer_label.split("|", 1)[-1]
     )
     _sync_bv_dimension_accounting(records)
+    request = _resign_record(request, records, "bypass-validation")
+
+    verified = resolve_and_verify_four_result_join(request, FakeResolver(records))
+
+    assert verified.verification.all_required_obligations_have_required_bv_disposition
+
+
+def test_current_bv_accepts_authenticated_governed_family_labels() -> None:
+    request, records = _chain(current_profiles=True)
+    bv = records["bypass-validation"].result
+    for campaign in bv["campaign_results"]:
+        for dimension in campaign["attempted_dimensions"]:
+            dimension["family"] = "baseline"
+    bounds = bv["search_bounds"]
+    enabled = ["baseline", "case-normalization", "encoding", "semantic-domain"]
+    bounds.update(
+        {
+            "variant_families_requested": enabled,
+            "variant_families_enabled": enabled,
+            "variant_families_attempted": ["baseline"],
+            "variant_families_planned": ["baseline"],
+            "variant_families_generated": ["baseline"],
+            "variant_families_executed": ["baseline"],
+            "variant_families_budget_skipped": [],
+            "variant_families_unsupported": [],
+            "variant_families_out_of_scope": [
+                "case-normalization",
+                "encoding",
+                "semantic-domain",
+            ],
+        }
+    )
     request = _resign_record(request, records, "bypass-validation")
 
     verified = resolve_and_verify_four_result_join(request, FakeResolver(records))
@@ -839,8 +890,8 @@ def test_current_bv_accepts_unsupported_approved_challenge() -> None:
 
     verified = resolve_and_verify_four_result_join(request, FakeResolver(records))
 
-    assert verified.accounting.required_work_item_count == 20
-    assert verified.accounting.disposed_work_item_count == 20
+    assert verified.accounting.required_work_item_count == 28
+    assert verified.accounting.disposed_work_item_count == 28
 
 
 @pytest.mark.parametrize(
@@ -1144,6 +1195,27 @@ def test_path_payloads_expand_to_distinct_route_bound_or_alternatives() -> None:
         ("query", "*", "component:query"),
     ]
 
+    endpoint_independent = deepcopy(document)
+    endpoint_independent.pop("placement_mode")
+    endpoint_independent.pop("route_bound_alternatives")
+    generalized, generalized_keys = _translate_rule_document(
+        endpoint_independent,
+        source_artifact_id="artifact:expanded",
+        semantics=semantics,
+        profile_id="waf-standard@2",
+    )
+    assert generalized_keys == carrier_keys
+    assert len(generalized) == 1
+    conditions = generalized[0][1]["conditions"]
+    assert [condition["type"] for condition in conditions] == [
+        "pathMatch",
+        "uriQueryMatch",
+    ]
+    assert conditions[0]["value"] == ["^(?:a/b|second value)$"]
+    assert all("sourceRoute" not in condition for condition in conditions)
+    assert all("sourcePathComponents" not in condition for condition in conditions)
+    assert generalized[0][1]["operation"] == "AND"
+
 
 def test_opaque_route_key_resolves_without_becoming_a_literal_path() -> None:
     conditions = _resolved_route_conditions(
@@ -1241,6 +1313,56 @@ def test_mc_d78824c_template_resolution_and_case_evidence_are_verified() -> None
     assert raised.value.code == "mc-template-resolution-invalid"
 
 
+def test_mc_path_template_resolution_appends_the_encoded_semantic_payload() -> None:
+    item = {
+        "input_id": "input:path",
+        "input": {
+            "modality": "http-request-template",
+            "method": "GET",
+            "path_key": "inventory-item-detail",
+            "path_payload": r"\x24\x7battack\x7d",
+            "query": [],
+            "headers": [],
+            "cookies": [],
+            "body": {"state": "absent"},
+        },
+    }
+
+    resolution = _expected_template_resolution(
+        item,
+        resolver_id="mc-approved-route-adapter",
+        profile_id="waf-standard@2",
+        profile_digest="sha256:" + "a" * 64,
+        route={
+            "scheme": "https",
+            "authority": "approved-mc-target.internal",
+            "path": "/inventory/items/42",
+        },
+    )
+
+    assert resolution["rendered_request"]["path"] == (
+        "/inventory/items/42/%5Cx24%5Cx7battack%5Cx7d"
+    )
+    assert "path_payload" not in resolution["rendered_request"]
+
+    item["input"]["path_payload"] = "${${::-j}${::-n}${::-d}${::-i}:ldap://foo/bar}"
+    resolution = _expected_template_resolution(
+        item,
+        resolver_id="mc-approved-route-adapter",
+        profile_id="waf-standard@2",
+        profile_digest="sha256:" + "a" * 64,
+        route={
+            "scheme": "https",
+            "authority": "approved-mc-target.internal",
+            "path": "/inventory/items/42",
+        },
+    )
+    assert resolution["rendered_request"]["path"] == (
+        "/inventory/items/42/$%7B$%7B::-j%7D$%7B::-n%7D$%7B::-d%7D"
+        "$%7B::-i%7D:ldap:%2F%2Ffoo%2Fbar%7D"
+    )
+
+
 def test_mc_template_resolution_preserves_encoded_path_payload() -> None:
     fixture_path = FIXTURES / "workflow-lab-mc-path-payload-resolution.json"
     raw = fixture_path.read_bytes()
@@ -1326,8 +1448,10 @@ def test_bv_v3_challenge_target_rejects_unbound_concrete_carrier() -> None:
 
 def test_bv_v3_profile_challenge_accepts_authenticated_source_chain() -> None:
     producer = {
-        "challenge:source:authenticated-representation|component:component:test"
-        "|carrier:path|transformation:baseline:authenticated-source"
+        (
+            "challenge:source:authenticated-representation|component:component:test"
+            "|carrier:path|transformation:baseline:authenticated-source"
+        )
     }
     _v3_challenge_attribution(
         "challenge:enum-alternate:slot:test:0|component:component:test"
@@ -2465,7 +2589,9 @@ def test_expected_bv_dimensions_include_complete_grammar_product() -> None:
     )
 
     labels = [item["transformation"] for item in dimensions]
-    assert len(labels) == 2 * len(_bv_profile("waf-bypass@3")["bypass_dimensions"]["header"])
+    assert len(labels) == 2 * (
+        1 + len(_bv_profile("waf-bypass@3")["bypass_dimensions"]["header"])
+    )
     assert any(label.startswith("grammar:sample|") for label in labels)
     assert any(label.startswith("grammar:product:1|") for label in labels)
 

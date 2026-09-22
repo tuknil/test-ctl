@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from hashlib import sha256
 import json
+import sys
+from datetime import UTC, datetime
+from hashlib import sha256
 from types import ModuleType
 from typing import Any
-import sys
 
 import pytest
 
@@ -16,16 +16,16 @@ from control_translation.contracts import (
     InvokeRequestEnvelope,
     TargetContext,
 )
+from control_translation.lifecycle import build_lifecycle_result
 from control_translation.persistence import (
     DatabricksRunRepository,
     PersistenceError,
-    SQLiteRunRepository,
     SplitRunRepository,
-    canonical_result_bytes,
+    SQLiteRunRepository,
     canonical_request_hash,
+    canonical_result_bytes,
     create_run_repository,
 )
-from control_translation.lifecycle import build_lifecycle_result
 from control_translation.providers.fixtures import get_fixture_pattern
 
 
@@ -131,7 +131,7 @@ def test_save_maps_contract_to_existing_databricks_table():
         ),
     )
     repository = _repository(queue)
-    started_at = datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc)
+    started_at = datetime(2026, 1, 2, 3, 4, tzinfo=UTC)
 
     repository.save_completed_run(
         request,
@@ -185,7 +185,7 @@ def test_save_rejects_an_immutable_result_collision():
             request,
             result,
             request_hash=canonical_request_hash(request),
-            started_at=datetime.now(timezone.utc),
+            started_at=datetime.now(UTC),
         )
 
 
@@ -216,7 +216,7 @@ def test_async_save_hashes_the_exact_canonical_result():
         request,
         result,
         request_hash=canonical_request_hash(request),
-        started_at=datetime.now(timezone.utc),
+        started_at=datetime.now(UTC),
         canonical_result=canonical_result,
     )
 
@@ -266,7 +266,7 @@ def test_async_save_uses_canonical_status_and_terminal_state(terminal_state):
         request,
         result,
         request_hash=canonical_request_hash(request),
-        started_at=datetime.now(timezone.utc),
+        started_at=datetime.now(UTC),
         canonical_result=canonical_result,
     )
 
@@ -302,7 +302,7 @@ def test_async_save_rejects_noncanonical_scalar_readback():
             request,
             result,
             request_hash=canonical_request_hash(request),
-            started_at=datetime.now(timezone.utc),
+            started_at=datetime.now(UTC),
             canonical_result=canonical_result,
         )
 
@@ -429,9 +429,8 @@ def test_sql_failure_logs_metadata_without_parameter_values(caplog):
 
     with caplog.at_level(
         "INFO", logger="control_translation.persistence.databricks"
-    ):
-        with pytest.raises(PersistenceError, match="idempotency state"):
-            repository.get_by_idempotency_key("raw-query-parameter-secret")
+    ), pytest.raises(PersistenceError, match="idempotency state"):
+        repository.get_by_idempotency_key("raw-query-parameter-secret")
 
     assert "statement_type=SELECT" in caplog.text
     assert "parameter_count=1" in caplog.text
