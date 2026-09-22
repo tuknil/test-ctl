@@ -1797,7 +1797,7 @@ def _semantic_carrier(component: dict[str, Any]) -> tuple[str, str]:
     if kind == "http-body-structured":
         selector_type = location.get("selector_type")
         if selector_type == "any-field":
-            return "body", ""
+            return "body", "*"
         selector = location.get("selector")
         if not isinstance(selector, str) or not selector:
             raise SharedContractV2Error("cannot-express", "structured body selector is absent")

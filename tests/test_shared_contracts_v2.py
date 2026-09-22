@@ -925,7 +925,7 @@ def test_raw_body_artifacts_translate_without_synthetic_selector() -> None:
         ({"family": "http", "kind": "http-query", "name": "*"}, "query", "*", "uriQueryMatch", "parameter"),
         ({"family": "http", "kind": "http-header", "name": "*"}, "header", "*", "requestHeaderValueMatch", "header"),
         ({"family": "http", "kind": "http-cookie", "name": "*"}, "cookie", "*", "cookieMatch", "cookieName"),
-        ({"family": "http", "kind": "http-body-structured", "selector_type": "any-field"}, "body", "", "argsPostJSONMatch", "parameter"),
+        ({"family": "http", "kind": "http-body-structured", "selector_type": "any-field"}, "body", "*", "argsPostJSONMatch", "parameter"),
         ({"family": "http", "kind": "http-body-raw"}, "body", "", "argsPostMatch", "parameter"),
     ],
 )
@@ -1334,6 +1334,33 @@ def test_bv_v3_profile_challenge_accepts_authenticated_source_chain() -> None:
             }
         },
     )
+
+
+def test_structured_any_field_maps_to_wildcard_body_selector() -> None:
+    condition, carrier = _component_condition(
+        {
+            "rule_id": "rule:any-field",
+            "component_id": "component:any-field",
+            "carrier": "body",
+            "name": "*",
+            "pattern": "attack",
+            "flags": [],
+            "transformations": [],
+        },
+        component={
+            "component_id": "component:any-field",
+            "location": {
+                "kind": "http-body-structured",
+                "selector_type": "any-field",
+            },
+        },
+        source_artifact_id="artifact:any-field",
+        seen_rule_ids=set(),
+    )
+
+    assert carrier == ("body", "*", "component:any-field")
+    assert condition["type"] == "argsPostJSONMatch"
+    assert condition["sourceSelector"] == "*"
 
 
 def test_bv_ddb49be_root_dimensions_match_cg_semantics_and_profile() -> None:
