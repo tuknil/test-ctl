@@ -177,11 +177,7 @@ class AkamaiWafAdapter:
                 )
         header = condition.get("header")
         if condition_type == _HEADER_VALUE_CONDITION:
-            any_header = (
-                condition.get("sourceCarrier") == "header"
-                and condition.get("sourceSelector") == "*"
-            )
-            if (not isinstance(header, str) or not header.strip()) and not any_header:
+            if not isinstance(header, str) or not header.strip():
                 errors.append(
                     f"{prefix}.header must name a real request header for "
                     "requestHeaderValueMatch."

@@ -697,8 +697,7 @@ def _expected_template_resolution(
                 "mc-template-resolution-invalid",
                 "MC template path_payload is invalid",
             )
-        # Match Go net/url.PathEscape used by the authoritative MC producer.
-        path = path.rstrip("/") + "/" + quote(path_payload, safe="$&+:-=@")
+        path = path.rstrip("/") + "/" + _escape_path_payload(path_payload)
     rendered.update(
         modality="http-request",
         scheme=route["scheme"],
@@ -1776,6 +1775,11 @@ _CARRIER_CONDITION_TYPES = {
 _CARRIERS_REQUIRING_SELECTOR = frozenset({"header", "cookie"})
 
 
+def _escape_path_payload(value: str) -> str:
+    """Match the authoritative Go net/url.PathEscape path-segment encoding."""
+    return quote(value, safe="$&+:-=@")
+
+
 def _strict_object(raw: bytes, *, artifact_id: str) -> dict[str, Any]:
     return strict_json_bytes(raw, context=f"DG artifact {artifact_id}")
 
@@ -1864,6 +1868,8 @@ def _component_condition(
     location = component["location"]
     location_kind = location["kind"]
     condition_type = _CARRIER_CONDITION_TYPES[carrier]
+    if carrier == "header" and name == "*":
+        condition_type = "requestHeaderMatch"
     if location_kind == "http-body-structured":
         condition_type = "argsPostJSONMatch"
     condition: dict[str, Any] = {
@@ -1973,7 +1979,7 @@ def _resolved_route_conditions(
         )
     rendered_path = path
     if path_payload is not None:
-        rendered_path = path.rstrip("/") + "/" + quote(path_payload, safe="")
+        rendered_path = path.rstrip("/") + "/" + _escape_path_payload(path_payload)
     return [
         {
             "type": "pathMatch",

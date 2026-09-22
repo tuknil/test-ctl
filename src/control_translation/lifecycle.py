@@ -599,6 +599,7 @@ def build_lifecycle_result(
         ).model_dump(mode="json", by_alias=True),
         "evidence_refs": evidence_refs,
         "prose": structured.prose_summary,
+        "outcome_reason": structured.outcome_reason.model_dump(mode="json"),
         "primary_candidate": primary_candidate,
         "artifacts": artifacts,
         "inference": result.inference,

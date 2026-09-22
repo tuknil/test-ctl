@@ -41,6 +41,7 @@ from control_translation.shared_contracts_v2 import (
     _bv_profile,
     _component_condition,
     _expected_template_resolution,
+    _escape_path_payload,
     _expected_bv_dimensions,
     _resolved_route_conditions,
     _shared_terminal_state_from_cg,
@@ -924,7 +925,7 @@ def test_raw_body_artifacts_translate_without_synthetic_selector() -> None:
     ("location", "carrier", "name", "condition_type", "absent_selector"),
     [
         ({"family": "http", "kind": "http-query", "name": "*"}, "query", "*", "uriQueryMatch", "parameter"),
-        ({"family": "http", "kind": "http-header", "name": "*"}, "header", "*", "requestHeaderValueMatch", "header"),
+        ({"family": "http", "kind": "http-header", "name": "*"}, "header", "*", "requestHeaderMatch", "header"),
         ({"family": "http", "kind": "http-cookie", "name": "*"}, "cookie", "*", "cookieMatch", "cookieName"),
         ({"family": "http", "kind": "http-body-structured", "selector_type": "any-field"}, "body", "*", "argsPostJSONMatch", "parameter"),
         ({"family": "http", "kind": "http-body-raw"}, "body", "", "argsPostMatch", "parameter"),
@@ -1256,6 +1257,25 @@ def test_mc_template_resolution_preserves_encoded_path_payload() -> None:
     )
 
     assert resolution == fixture["expected_resolution"]
+    route_conditions = _resolved_route_conditions(
+        {
+            "kind": "opaque-path-key",
+            "method": fixture["item"]["input"]["method"],
+            "path_key": fixture["item"]["input"]["path_key"],
+        },
+        profile_id=fixture["profile_id"],
+        alternative_id="alternative:path-payload",
+        path_payload=fixture["item"]["input"]["path_payload"],
+    )
+    assert route_conditions[0]["value"] == [
+        fixture["expected_resolution"]["rendered_request"]["path"]
+    ]
+
+
+def test_go_compatible_path_payload_escape_boundaries() -> None:
+    assert _escape_path_payload("$&+:-=@/ %2Fé") == (
+        "$&+:-=@%2F%20%252F%C3%A9"
+    )
 
 
 @pytest.mark.parametrize(
@@ -1372,7 +1392,7 @@ def test_akamai_syntax_accepts_authenticated_any_header_condition() -> None:
                 "operation": "AND",
                 "conditions": [
                     {
-                        "type": "requestHeaderValueMatch",
+                        "type": "requestHeaderMatch",
                         "positiveMatch": True,
                         "value": ["attack"],
                         "sourceCarrier": "header",
@@ -1394,6 +1414,11 @@ def test_akamai_syntax_accepts_authenticated_any_header_condition() -> None:
     validation = AkamaiWafAdapter().validate_syntax(json.dumps(document))
     assert validation.valid is True
     assert validation.errors == []
+
+    invalid = json.loads(json.dumps(document))
+    invalid["rules"][0]["conditions"][0]["type"] = "requestHeaderValueMatch"
+    invalid_validation = AkamaiWafAdapter().validate_syntax(json.dumps(invalid))
+    assert invalid_validation.valid is False
 
 
 def test_bv_ddb49be_root_dimensions_match_cg_semantics_and_profile() -> None:
@@ -1515,6 +1540,16 @@ def test_unmappable_required_artifact_returns_typed_cannot_express_without_parti
     assert result.structured_result.translated_directives == []
     assert result.structured_result.translation_mappings == []
     assert result.inference["llm_invoked"] is False
+    lifecycle = build_lifecycle_result(result, request, get_settings())
+    assert lifecycle["terminal_state"] == "not-translatable"
+    assert lifecycle["outcome_reason"] == {
+        "code": "unsupported-feature",
+        "detail": "required carrier cannot map to the target",
+    }
+    assert lifecycle["primary_candidate"] is None
+    assert lifecycle["artifacts"] == {}
+    assert lifecycle["translated_directives"] == []
+    assert lifecycle["translation_mappings"] == []
 
 
 def test_capability_verification_failure_stops_before_translation_plan(
