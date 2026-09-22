@@ -13,7 +13,6 @@ from control_translation.adapters.base import TargetAdapter
 from control_translation.adapters.edr_s1 import EdrS1Adapter
 from control_translation.adapters.firewall_generic import FirewallGenericAdapter
 
-
 ADAPTER_REGISTRY: dict[str, TargetAdapter] = {
     "akamai-waf": AkamaiWafAdapter(),
     "firewall-generic": FirewallGenericAdapter(),

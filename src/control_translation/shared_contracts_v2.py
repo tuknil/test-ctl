@@ -1537,6 +1537,10 @@ def _validate_bv(bv: dict[str, Any], semantics: dict[str, Any], attestation: dic
                 "input_id",
                 "component_id",
                 "family",
+                "wire_value_sha256",
+                "wire_value_size_bytes",
+                "baseline_value_sha256",
+                "wire_encoding_chain",
                 "supported",
                 "detail",
                 "attempt_id",
@@ -1565,6 +1569,32 @@ def _validate_bv(bv: dict[str, Any], semantics: dict[str, Any], attestation: dic
                     executed_governed_families.add(family)
                 if not isinstance(actual.get("attempt_id"), str) or not actual["attempt_id"] or actual.get("disposition") not in {"blocked", "bypassed", "safety-stop"} or actual.get("detail") is not None:
                     raise SharedContractV2Error("bv-dimension-invalid", f"BV supported dimension evidence differs: {obligation_id}")
+                wire_digest = actual.get("wire_value_sha256")
+                baseline_digest = actual.get("baseline_value_sha256")
+                wire_size = actual.get("wire_value_size_bytes")
+                wire_chain = actual.get("wire_encoding_chain")
+                if (
+                    not isinstance(wire_digest, str)
+                    or not re.fullmatch(r"sha256:[a-f0-9]{64}", wire_digest)
+                    or not isinstance(baseline_digest, str)
+                    or not re.fullmatch(r"sha256:[a-f0-9]{64}", baseline_digest)
+                    or not isinstance(wire_size, int)
+                    or isinstance(wire_size, bool)
+                    or wire_size < 0
+                    or not isinstance(wire_chain, list)
+                    or any(not isinstance(step, str) or not step for step in wire_chain)
+                ):
+                    raise SharedContractV2Error(
+                        "bv-dimension-invalid",
+                        f"BV wire-value evidence differs: {obligation_id}",
+                    )
+                if family == "encoding" and (
+                    not wire_chain or wire_digest == baseline_digest
+                ):
+                    raise SharedContractV2Error(
+                        "bv-dimension-invalid",
+                        f"BV encoding dimension is an identity/no-op: {obligation_id}",
+                    )
                 if actual["disposition"] == "bypassed":
                     raise SharedContractV2Error(
                         "bv-translation-outcome-invalid",

@@ -868,14 +868,18 @@ def _compact_structured_jndi_regex(source: str) -> _Match:
         lossy=True,
         transport_forms_explicit=True,
         limitations=(
-            "The exact Defense Generation raw, percent-encoded, and UTF-8 hex "
-            "JNDI branches were compacted after bounded regex expansion exceeded "
-            "the Akamai value limit; representation framing, any validated "
-            "carrier prefix, and explicit ldap/rmi alternatives are preserved.",
-            "The compacted Akamai wildcards require a nonempty authority but "
-            "broaden DG's hostname, IPv4, IPv6, port, resource-character, and "
-            "length grammar. Percent and hex wildcards do not enforce byte "
-            "validity. Operator review of collateral impact is required.",
+            (
+                "The exact Defense Generation raw, percent-encoded, and UTF-8 hex "
+                "JNDI branches were compacted after bounded regex expansion exceeded "
+                "the Akamai value limit; representation framing, any validated "
+                "carrier prefix, and explicit ldap/rmi alternatives are preserved."
+            ),
+            (
+                "The compacted Akamai wildcards require a nonempty authority but "
+                "broaden DG's hostname, IPv4, IPv6, port, resource-character, and "
+                "length grammar. Percent and hex wildcards do not enforce byte "
+                "validity. Operator review of collateral impact is required."
+            ),
         ),
     )
 

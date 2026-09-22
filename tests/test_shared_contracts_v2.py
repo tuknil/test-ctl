@@ -355,9 +355,14 @@ def _chain(*, current_profiles: bool = False) -> tuple[SharedContractV2InvokeReq
                 )
                 continue
             attempt_id = f"bv-attempt:{campaign['obligation_id']}:{index}"
+            wire_digest = "sha256:" + sha256(attempt_id.encode()).hexdigest()
             dimensions.append(
                 {
                     **expected,
+                    "wire_value_sha256": wire_digest,
+                    "wire_value_size_bytes": len(attempt_id),
+                    "baseline_value_sha256": wire_digest,
+                    "wire_encoding_chain": [],
                     "supported": True,
                     "attempt_id": attempt_id,
                     "disposition": "blocked",
