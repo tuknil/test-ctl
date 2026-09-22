@@ -380,6 +380,20 @@ def _chain(*, current_profiles: bool = False) -> tuple[SharedContractV2InvokeReq
         )
     candidate = bundle["primary_candidate"]
     bv_result_id = "bypass-validation-result:shared-42"
+    bv_accounting = _load("bypass-validation-expanded-work-accounting.json")
+    planned_dimensions = sum(
+        len(campaign["attempted_dimensions"]) for campaign in campaigns
+    )
+    disposed_dimensions = sum(
+        len(campaign["attempt_refs"])
+        + sum(not item.get("supported", True) for item in campaign["attempted_dimensions"])
+        for campaign in campaigns
+    )
+    bv_accounting.update(
+        required_work_item_count=planned_dimensions,
+        disposed_work_item_count=disposed_dimensions,
+        unaccounted_required_work_item_count=planned_dimensions - disposed_dimensions,
+    )
     bv_document = {
         "contract_id": "bypass-validation@2.0",
         "profile_id": "waf-bypass@3" if current_profiles else "waf-bypass@2",
@@ -428,7 +442,7 @@ def _chain(*, current_profiles: bool = False) -> tuple[SharedContractV2InvokeReq
         "campaign_results": campaigns,
         "counterexamples": [],
         "feedback": [],
-        "accounting": _load("bypass-validation-expanded-work-accounting.json"),
+        "accounting": bv_accounting,
         "limitations": [],
         "prose_summary": "Every required obligation campaign completed without an attributable bypass.",
         "produced_at": CREATED_AT,
@@ -785,7 +799,7 @@ def test_current_bv_accepts_real_regex_challenge_dimension() -> None:
 
     verified = resolve_and_verify_four_result_join(request, FakeResolver(records))
 
-    assert verified.accounting.required_work_item_count == 20
+    assert verified.accounting.required_work_item_count == 28
 
 
 def test_current_bv_accepts_deduplicated_multi_attribution_label() -> None:
@@ -876,8 +890,8 @@ def test_current_bv_accepts_unsupported_approved_challenge() -> None:
 
     verified = resolve_and_verify_four_result_join(request, FakeResolver(records))
 
-    assert verified.accounting.required_work_item_count == 20
-    assert verified.accounting.disposed_work_item_count == 20
+    assert verified.accounting.required_work_item_count == 28
+    assert verified.accounting.disposed_work_item_count == 28
 
 
 @pytest.mark.parametrize(
@@ -2575,7 +2589,9 @@ def test_expected_bv_dimensions_include_complete_grammar_product() -> None:
     )
 
     labels = [item["transformation"] for item in dimensions]
-    assert len(labels) == 2 * len(_bv_profile("waf-bypass@3")["bypass_dimensions"]["header"])
+    assert len(labels) == 2 * (
+        1 + len(_bv_profile("waf-bypass@3")["bypass_dimensions"]["header"])
+    )
     assert any(label.startswith("grammar:sample|") for label in labels)
     assert any(label.startswith("grammar:product:1|") for label in labels)
 

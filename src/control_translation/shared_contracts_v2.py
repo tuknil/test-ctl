@@ -1037,6 +1037,8 @@ def _expected_bv_dimensions(obligation: dict[str, Any], semantics: dict[str, Any
                         step["operation"] for step in transformations
                     )
                 )
+            elif profile_id == "waf-bypass@3":
+                chain_labels.append("baseline:identity")
             for index, chain in enumerate(profile["bypass_dimensions"].get(carrier, [])):
                 bv_label = f"bv:{carrier}:{index}:" + ":".join(step["operation"] for step in chain)
                 chain_labels.append(bv_label)
