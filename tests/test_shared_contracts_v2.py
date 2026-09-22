@@ -18,6 +18,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from control_translation import api as api_module
 from control_translation import capability
+from control_translation.adapters.akamai_waf import AkamaiWafAdapter
 from control_translation.config import Settings, get_settings
 from control_translation.contracts import (
     ControlTranslationResult,
@@ -39,14 +40,17 @@ from control_translation.shared_contracts_v2 import (
     SharedContractV2Error,
     _bv_profile,
     _component_condition,
+    _escape_path_payload,
     _expected_bv_dimensions,
     _expected_template_resolution,
     _resolved_route_conditions,
     _shared_terminal_state_from_cg,
     _translate_carrier_document,
     _translate_rule_document,
+    _v3_challenge_attribution,
     _validate_cg,
     _validate_mc,
+    _validate_v3_challenge_target,
     build_waf_translation_plan,
     canonical_bytes,
     digest,
@@ -955,7 +959,7 @@ def test_raw_body_artifacts_translate_without_synthetic_selector() -> None:
         ({"family": "http", "kind": "http-query", "name": "*"}, "query", "*", "uriQueryMatch", "parameter"),
         ({"family": "http", "kind": "http-header", "name": "*"}, "header", "*", "requestHeaderMatch", "header"),
         ({"family": "http", "kind": "http-cookie", "name": "*"}, "cookie", "*", "cookieMatch", "cookieName"),
-        ({"family": "http", "kind": "http-body-structured", "selector_type": "any-field"}, "body", "", "argsPostJSONMatch", "parameter"),
+        ({"family": "http", "kind": "http-body-structured", "selector_type": "any-field"}, "body", "*", "argsPostJSONMatch", "parameter"),
         ({"family": "http", "kind": "http-body-raw"}, "body", "", "argsPostMatch", "parameter"),
     ],
 )
@@ -1340,6 +1344,188 @@ def test_mc_path_template_resolution_appends_the_encoded_semantic_payload() -> N
     )
 
 
+def test_mc_template_resolution_preserves_encoded_path_payload() -> None:
+    fixture_path = FIXTURES / "workflow-lab-mc-path-payload-resolution.json"
+    raw = fixture_path.read_bytes()
+    expected_digest = fixture_path.with_suffix(".json.sha256").read_text().split()[0]
+    assert sha256(raw).hexdigest() == expected_digest
+    fixture = json.loads(raw)
+
+    resolution = _expected_template_resolution(
+        fixture["item"],
+        resolver_id=fixture["resolver_id"],
+        profile_id=fixture["profile_id"],
+        profile_digest=fixture["profile_digest"],
+        route=fixture["route"],
+    )
+
+    assert resolution == fixture["expected_resolution"]
+    route_conditions = _resolved_route_conditions(
+        {
+            "kind": "opaque-path-key",
+            "method": fixture["item"]["input"]["method"],
+            "path_key": fixture["item"]["input"]["path_key"],
+        },
+        profile_id=fixture["profile_id"],
+        alternative_id="alternative:path-payload",
+        path_payload=fixture["item"]["input"]["path_payload"],
+    )
+    assert route_conditions[0]["value"] == [
+        fixture["expected_resolution"]["rendered_request"]["path"]
+    ]
+
+
+def test_go_compatible_path_payload_escape_boundaries() -> None:
+    assert _escape_path_payload("$&+:-=@/ %2Fé") == (
+        "$&+:-=@%2F%20%252F%C3%A9"
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "carrier", "location"),
+    [
+        ("target:http-path:path-payload", "path", {"kind": "http-path"}),
+        (
+            "target:http-header:X-Janus-Test:0",
+            "header",
+            {"kind": "http-header", "name": "*"},
+        ),
+        (
+            "target:http-query:janus_test:0",
+            "query",
+            {"kind": "http-query", "name": "*"},
+        ),
+        (
+            "target:http-cookie:janus_test:0",
+            "cookie",
+            {"kind": "http-cookie", "name": "*"},
+        ),
+        (
+            "target:http-body-structured:/janus_test",
+            "body-json",
+            {"kind": "http-body-structured", "selector_type": "any-field"},
+        ),
+    ],
+)
+def test_bv_v3_challenge_targets_preserve_concrete_carrier_attribution(
+    field: str, carrier: str, location: dict[str, str]
+) -> None:
+    _validate_v3_challenge_target(
+        field,
+        actual={"carrier": carrier},
+        component={"location": location},
+    )
+
+
+def test_bv_v3_challenge_target_rejects_unbound_concrete_carrier() -> None:
+    with pytest.raises(SharedContractV2Error) as raised:
+        _validate_v3_challenge_target(
+            "target:http-header:X-Invented:0",
+            actual={"carrier": "header"},
+            component={"location": {"kind": "http-header", "name": "X-Exact"}},
+        )
+    assert raised.value.code == "bv-dimension-invalid"
+
+
+def test_bv_v3_profile_challenge_accepts_authenticated_source_chain() -> None:
+    producer = {
+        (
+            "challenge:source:authenticated-representation|component:component:test"
+            "|carrier:path|transformation:baseline:authenticated-source"
+        )
+    }
+    _v3_challenge_attribution(
+        "challenge:enum-alternate:slot:test:0|component:component:test"
+        "|carrier:path|transformation:baseline:authenticated-source",
+        actual={"component_id": "component:test", "carrier": "path"},
+        component={
+            "grammar": {
+                "slots": [
+                    {
+                        "slot_id": "slot:test",
+                        "value_type": "scheme",
+                        "allowed_domain": {"kind": "enum", "values": ["ldap"]},
+                    }
+                ]
+            }
+        },
+        producer_attributions=producer,
+        challenges={
+            "enum-alternate": {
+                "carriers": ["path"],
+                "maximum_values": 2,
+                "value_types": ["scheme"],
+                "domain_kinds": ["enum"],
+                "strategy": "domain",
+            }
+        },
+    )
+
+
+def test_structured_any_field_maps_to_wildcard_body_selector() -> None:
+    condition, carrier = _component_condition(
+        {
+            "rule_id": "rule:any-field",
+            "component_id": "component:any-field",
+            "carrier": "body",
+            "name": "*",
+            "pattern": "attack",
+            "flags": [],
+            "transformations": [],
+        },
+        component={
+            "component_id": "component:any-field",
+            "location": {
+                "kind": "http-body-structured",
+                "selector_type": "any-field",
+            },
+        },
+        source_artifact_id="artifact:any-field",
+        seen_rule_ids=set(),
+    )
+
+    assert carrier == ("body", "*", "component:any-field")
+    assert condition["type"] == "argsPostJSONMatch"
+    assert condition["sourceSelector"] == "*"
+
+
+def test_akamai_syntax_accepts_authenticated_any_header_condition() -> None:
+    document = {
+        "rules": [
+            {
+                "name": "wildcard-header",
+                "operation": "AND",
+                "conditions": [
+                    {
+                        "type": "requestHeaderMatch",
+                        "positiveMatch": True,
+                        "value": ["attack"],
+                        "sourceCarrier": "header",
+                        "sourceSelector": "*",
+                    },
+                    {
+                        "type": "argsPostJSONMatch",
+                        "positiveMatch": True,
+                        "value": ["attack"],
+                        "sourceLocationKind": "http-body-structured",
+                        "sourceSelectorType": "any-field",
+                        "sourceSelector": "*",
+                    }
+                ],
+            }
+        ]
+    }
+
+    validation = AkamaiWafAdapter().validate_syntax(json.dumps(document))
+    assert validation.valid is True
+    assert validation.errors == []
+
+    invalid = json.loads(json.dumps(document))
+    invalid["rules"][0]["conditions"][0]["type"] = "requestHeaderValueMatch"
+    invalid_validation = AkamaiWafAdapter().validate_syntax(json.dumps(invalid))
+    assert invalid_validation.valid is False
+
+
 def test_bv_ddb49be_root_dimensions_match_cg_semantics_and_profile() -> None:
     request, records = _chain()
     semantics = records["check-generation"].result["run_result"]["attack_match_semantics"]
@@ -1459,6 +1645,16 @@ def test_unmappable_required_artifact_returns_typed_cannot_express_without_parti
     assert result.structured_result.translated_directives == []
     assert result.structured_result.translation_mappings == []
     assert result.inference["llm_invoked"] is False
+    lifecycle = build_lifecycle_result(result, request, get_settings())
+    assert lifecycle["terminal_state"] == "not-translatable"
+    assert lifecycle["outcome_reason"] == {
+        "code": "unsupported-feature",
+        "detail": "required carrier cannot map to the target",
+    }
+    assert lifecycle["primary_candidate"] is None
+    assert lifecycle["artifacts"] == {}
+    assert lifecycle["translated_directives"] == []
+    assert lifecycle["translation_mappings"] == []
 
 
 def test_capability_verification_failure_stops_before_translation_plan(

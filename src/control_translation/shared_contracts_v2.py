@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import re
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
@@ -47,11 +48,6 @@ from control_translation.upstream import (
     UpstreamResultResolver,
     UpstreamTransportError,
 )
-
-
-def _path_segment_escape(value: str) -> str:
-    """Match Go net/url.PathEscape used by the authoritative MC resolver."""
-    return quote(value, safe="$&+,:=@")
 
 SCHEMA_ROOT = Path(__file__).resolve().parent / "contracts" / "shared-attack-contracts"
 BV_PROFILE_ROOT = SCHEMA_ROOT / "profiles"
@@ -699,9 +695,9 @@ def _expected_template_resolution(
         if not isinstance(path_payload, str) or not path_payload:
             raise SharedContractV2Error(
                 "mc-template-resolution-invalid",
-                f"CG path payload is invalid: {item['input_id']}",
+                "MC template path_payload is invalid",
             )
-        path = path.rstrip("/") + "/" + _path_segment_escape(path_payload)
+        path = path.rstrip("/") + "/" + _escape_path_payload(path_payload)
     rendered.update(
         modality="http-request",
         scheme=route["scheme"],
@@ -1034,7 +1030,13 @@ def _expected_bv_dimensions(obligation: dict[str, Any], semantics: dict[str, Any
             chain_labels: list[str] = []
             transformations = list(component["transformations"])
             if transformations:
-                chain_labels.append("cg:" + ":".join(step["operation"] for step in transformations))
+                chain_labels.append(
+                    "baseline:authenticated-source"
+                    if profile_id == "waf-bypass@3"
+                    else "cg:" + ":".join(
+                        step["operation"] for step in transformations
+                    )
+                )
             for index, chain in enumerate(profile["bypass_dimensions"].get(carrier, [])):
                 bv_label = f"bv:{carrier}:{index}:" + ":".join(step["operation"] for step in chain)
                 chain_labels.append(bv_label)
@@ -1048,7 +1050,9 @@ def _expected_bv_dimensions(obligation: dict[str, Any], semantics: dict[str, Any
             if not chain_labels:
                 chain_labels.append("baseline:identity")
             grammar_labels = (
-                _expected_grammar_labels(component)
+                ["source:authenticated-representation"]
+                if profile_id == "waf-bypass@3" and transformations
+                else _expected_grammar_labels(component)
                 if profile_id == "waf-bypass@3"
                 else ["grammar:exact"]
             )
@@ -1057,6 +1061,12 @@ def _expected_bv_dimensions(obligation: dict[str, Any], semantics: dict[str, Any
                     label = (
                         chain_label
                         if grammar_label == "grammar:exact"
+                        else (
+                            "challenge:source:authenticated-representation"
+                            f"|component:{component_id}|carrier:{carrier}"
+                            f"|transformation:{chain_label}"
+                        )
+                        if grammar_label == "source:authenticated-representation"
                         else f"{grammar_label}|{chain_label}"
                     )
                     expected.append({
@@ -1183,16 +1193,78 @@ def _v3_challenge_attribution(
                 "bv-dimension-invalid", "BV representation challenge transformation differs"
             )
         return
-    producer_chains = {
-        label.split("|", 1)[1] if label.startswith("grammar:") else label
-        for label in producer_attributions
-    }
-    if component.get("transformations"):
-        producer_chains.add("baseline:authenticated-source")
+    producer_chains: set[str] = set()
+    for label in producer_attributions:
+        if label.startswith("grammar:"):
+            producer_chains.add(label.split("|", 1)[1])
+            continue
+        if label.startswith("challenge:source:authenticated-representation|"):
+            source_fields = label.split("|")
+            if len(source_fields) == 4 and source_fields[3].startswith(
+                "transformation:"
+            ):
+                producer_chains.add(
+                    source_fields[3].removeprefix("transformation:")
+                )
+                continue
+        producer_chains.add(label)
     if transformation not in producer_chains:
         raise SharedContractV2Error(
             "bv-dimension-invalid", "BV challenge transformation is not producer-derived"
         )
+
+
+def _validate_v3_challenge_target(
+    field: str,
+    *,
+    actual: dict[str, Any],
+    component: dict[str, Any],
+) -> None:
+    if not field.startswith("target:"):
+        raise SharedContractV2Error(
+            "bv-dimension-invalid", "BV challenge target attribution is malformed"
+        )
+    target = field.removeprefix("target:")
+    location = component.get("location")
+    if not isinstance(location, dict):
+        raise SharedContractV2Error(
+            "bv-dimension-invalid", "BV challenge component location is absent"
+        )
+    kind = location.get("kind")
+    if (
+        kind == "http-path"
+        and actual.get("carrier") == "path"
+        and target == "http-path:path-payload"
+    ):
+        return
+    named = {
+        "http-query": "query",
+        "http-header": "header",
+        "http-cookie": "cookie",
+    }
+    if kind in named and location.get("name") == "*":
+        prefix = f"{kind}:"
+        if target.startswith(prefix):
+            name, separator, occurrence = target.removeprefix(prefix).rpartition(":")
+            if (
+                separator
+                and name
+                and occurrence.isdigit()
+                and str(int(occurrence)) == occurrence
+                and actual.get("carrier") == named[kind]
+            ):
+                return
+    if (
+        kind == "http-body-structured"
+        and location.get("selector_type") == "any-field"
+        and actual.get("carrier") == "body-json"
+        and target.startswith("http-body-structured:/")
+        and not re.search(r"~(?![01])", target.removeprefix("http-body-structured:"))
+    ):
+        return
+    raise SharedContractV2Error(
+        "bv-dimension-invalid", "BV challenge target attribution differs"
+    )
 
 
 def _validate_bv_v3_dimensions(
@@ -1307,17 +1379,19 @@ def _validate_bv_v3_dimensions(
                     f"BV attribution is duplicated across dimensions: {obligation_id}",
                 )
             seen_attributions.add(attribution_key)
-            producer_attribution = attribution
-            base_attribution, separator, target_label = producer_attribution.rpartition(
-                "|target:"
-            )
-            if separator and _component_target_label_matches(component, target_label):
-                producer_attribution = base_attribution
-            if producer_attribution in producer_attributions:
-                observed_producers[target].add(producer_attribution)
+            base_attribution = attribution
+            if "|target:" in attribution:
+                base_attribution, target_field = attribution.rsplit("|", 1)
+                _validate_v3_challenge_target(
+                    target_field,
+                    actual=actual,
+                    component=component,
+                )
+            if base_attribution in producer_attributions:
+                observed_producers[target].add(base_attribution)
                 continue
             _v3_challenge_attribution(
-                attribution,
+                base_attribution,
                 actual=actual,
                 component=component,
                 producer_attributions=producer_attributions,
@@ -1814,6 +1888,11 @@ _CARRIER_CONDITION_TYPES = {
 _CARRIERS_REQUIRING_SELECTOR = frozenset({"header", "cookie"})
 
 
+def _escape_path_payload(value: str) -> str:
+    """Match the authoritative Go net/url.PathEscape path-segment encoding."""
+    return quote(value, safe="$&+:-=@")
+
+
 def _strict_object(raw: bytes, *, artifact_id: str) -> dict[str, Any]:
     return strict_json_bytes(raw, context=f"DG artifact {artifact_id}")
 
@@ -1835,7 +1914,7 @@ def _semantic_carrier(component: dict[str, Any]) -> tuple[str, str]:
     if kind == "http-body-structured":
         selector_type = location.get("selector_type")
         if selector_type == "any-field":
-            return "body", ""
+            return "body", "*"
         selector = location.get("selector")
         if not isinstance(selector, str) or not selector:
             raise SharedContractV2Error("cannot-express", "structured body selector is absent")
@@ -2021,7 +2100,7 @@ def _resolved_route_conditions(
         )
     rendered_path = path
     if path_payload is not None:
-        rendered_path = path.rstrip("/") + "/" + _path_segment_escape(path_payload)
+        rendered_path = path.rstrip("/") + "/" + _escape_path_payload(path_payload)
     return [
         {
             "type": "pathMatch",

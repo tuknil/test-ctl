@@ -45,6 +45,12 @@
       "byte_length": 930
     },
     {
+      "name": "workflow-lab-mc-path-payload-resolution.json",
+      "source": "non-sensitive semantic equivalent of retained Workflow Lab execution:5474b2f4-d7a5-4e19-8dbd-6a8adb985df3",
+      "sha256": "sha256:211ac66c7a625293b35fbdc7d104ab9c1f356f082e757555ca78a468f8ee7438",
+      "byte_length": 1881
+    },
+    {
       "name": "waf-rule-carriers.json",
       "source": "mitigation-check/api/testdata/shared-attack-contracts-v2/waf-rule-carriers.json",
       "sha256": "sha256:4ceb2071f42b5b7bc4cf449b5929055c9d73b12d9fbda792e9a22a8b9d5c7e64",
