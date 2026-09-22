@@ -1005,7 +1005,13 @@ def _expected_bv_dimensions(obligation: dict[str, Any], semantics: dict[str, Any
             chain_labels: list[str] = []
             transformations = list(component["transformations"])
             if transformations:
-                chain_labels.append("cg:" + ":".join(step["operation"] for step in transformations))
+                chain_labels.append(
+                    "baseline:authenticated-source"
+                    if profile_id == "waf-bypass@3"
+                    else "cg:" + ":".join(
+                        step["operation"] for step in transformations
+                    )
+                )
             for index, chain in enumerate(profile["bypass_dimensions"].get(carrier, [])):
                 bv_label = f"bv:{carrier}:{index}:" + ":".join(step["operation"] for step in chain)
                 chain_labels.append(bv_label)
@@ -1019,7 +1025,9 @@ def _expected_bv_dimensions(obligation: dict[str, Any], semantics: dict[str, Any
             if not chain_labels:
                 chain_labels.append("baseline:identity")
             grammar_labels = (
-                _expected_grammar_labels(component)
+                ["source:authenticated-representation"]
+                if profile_id == "waf-bypass@3" and transformations
+                else _expected_grammar_labels(component)
                 if profile_id == "waf-bypass@3"
                 else ["grammar:exact"]
             )
@@ -1028,6 +1036,12 @@ def _expected_bv_dimensions(obligation: dict[str, Any], semantics: dict[str, Any
                     label = (
                         chain_label
                         if grammar_label == "grammar:exact"
+                        else (
+                            "challenge:source:authenticated-representation"
+                            f"|component:{component_id}|carrier:{carrier}"
+                            f"|transformation:{chain_label}"
+                        )
+                        if grammar_label == "source:authenticated-representation"
                         else f"{grammar_label}|{chain_label}"
                     )
                     expected.append({
@@ -1048,10 +1062,8 @@ def _v3_challenge_attribution(
     challenges: dict[str, dict[str, Any]],
 ) -> None:
     fields = attribution.split("|")
-    if len(fields) == 5:
-        _validate_v3_challenge_target(fields[4], actual=actual, component=component)
     if (
-        len(fields) not in {4, 5}
+        len(fields) != 4
         or not fields[0].startswith("challenge:")
         or fields[1] != f"component:{actual['component_id']}"
         or fields[2] != f"carrier:{actual['carrier']}"
@@ -1307,11 +1319,19 @@ def _validate_bv_v3_dimensions(
                     f"BV attribution is duplicated across dimensions: {obligation_id}",
                 )
             seen_attributions.add(attribution_key)
-            if attribution in producer_attributions:
-                observed_producers[target].add(attribution)
+            base_attribution = attribution
+            if "|target:" in attribution:
+                base_attribution, target_field = attribution.rsplit("|", 1)
+                _validate_v3_challenge_target(
+                    target_field,
+                    actual=actual,
+                    component=component,
+                )
+            if base_attribution in producer_attributions:
+                observed_producers[target].add(base_attribution)
                 continue
             _v3_challenge_attribution(
-                attribution,
+                base_attribution,
                 actual=actual,
                 component=component,
                 producer_attributions=producer_attributions,
