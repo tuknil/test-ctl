@@ -1457,7 +1457,17 @@ def _validate_bv(bv: dict[str, Any], semantics: dict[str, Any], attestation: dic
         supported_attempt_ids: list[str] = []
         expected_resolutions: list[tuple[dict[str, Any], dict[str, Any]]] = []
         for actual, expected in dimension_pairs:
-            allowed = {"carrier", "transformation", "input_id", "component_id", "supported", "detail", "attempt_id", "disposition"}
+            allowed = {
+                "carrier",
+                "transformation",
+                "input_id",
+                "component_id",
+                "family",
+                "supported",
+                "detail",
+                "attempt_id",
+                "disposition",
+            }
             if (
                 not isinstance(actual, dict)
                 or not set(actual) <= allowed

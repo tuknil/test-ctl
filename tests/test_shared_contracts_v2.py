@@ -802,6 +802,38 @@ def test_current_bv_accepts_deduplicated_multi_attribution_label() -> None:
     assert verified.verification.all_required_obligations_have_required_bv_disposition
 
 
+def test_current_bv_accepts_authenticated_governed_family_labels() -> None:
+    request, records = _chain(current_profiles=True)
+    bv = records["bypass-validation"].result
+    for campaign in bv["campaign_results"]:
+        for dimension in campaign["attempted_dimensions"]:
+            dimension["family"] = "baseline"
+    bounds = bv["search_bounds"]
+    enabled = ["baseline", "case-normalization", "encoding", "semantic-domain"]
+    bounds.update(
+        {
+            "variant_families_requested": enabled,
+            "variant_families_enabled": enabled,
+            "variant_families_attempted": ["baseline"],
+            "variant_families_planned": ["baseline"],
+            "variant_families_generated": ["baseline"],
+            "variant_families_executed": ["baseline"],
+            "variant_families_budget_skipped": [],
+            "variant_families_unsupported": [],
+            "variant_families_out_of_scope": [
+                "case-normalization",
+                "encoding",
+                "semantic-domain",
+            ],
+        }
+    )
+    request = _resign_record(request, records, "bypass-validation")
+
+    verified = resolve_and_verify_four_result_join(request, FakeResolver(records))
+
+    assert verified.verification.all_required_obligations_have_required_bv_disposition
+
+
 def test_current_bv_accepts_unsupported_approved_challenge() -> None:
     request, records = _chain(current_profiles=True)
     campaign = next(
