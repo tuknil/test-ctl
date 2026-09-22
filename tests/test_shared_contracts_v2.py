@@ -46,6 +46,7 @@ from control_translation.shared_contracts_v2 import (
     _translate_carrier_document,
     _translate_rule_document,
     _validate_v3_challenge_target,
+    _v3_challenge_attribution,
     _validate_cg,
     _validate_mc,
     build_waf_translation_plan,
@@ -1300,6 +1301,39 @@ def test_bv_v3_challenge_target_rejects_unbound_concrete_carrier() -> None:
             component={"location": {"kind": "http-header", "name": "X-Exact"}},
         )
     assert raised.value.code == "bv-dimension-invalid"
+
+
+def test_bv_v3_profile_challenge_accepts_authenticated_source_chain() -> None:
+    producer = {
+        "challenge:source:authenticated-representation|component:component:test"
+        "|carrier:path|transformation:baseline:authenticated-source"
+    }
+    _v3_challenge_attribution(
+        "challenge:enum-alternate:slot:test:0|component:component:test"
+        "|carrier:path|transformation:baseline:authenticated-source",
+        actual={"component_id": "component:test", "carrier": "path"},
+        component={
+            "grammar": {
+                "slots": [
+                    {
+                        "slot_id": "slot:test",
+                        "value_type": "scheme",
+                        "allowed_domain": {"kind": "enum", "values": ["ldap"]},
+                    }
+                ]
+            }
+        },
+        producer_attributions=producer,
+        challenges={
+            "enum-alternate": {
+                "carriers": ["path"],
+                "maximum_values": 2,
+                "value_types": ["scheme"],
+                "domain_kinds": ["enum"],
+                "strategy": "domain",
+            }
+        },
+    )
 
 
 def test_bv_ddb49be_root_dimensions_match_cg_semantics_and_profile() -> None:

@@ -1150,10 +1150,21 @@ def _v3_challenge_attribution(
                 "bv-dimension-invalid", "BV representation challenge transformation differs"
             )
         return
-    producer_chains = {
-        label.split("|", 1)[1] if label.startswith("grammar:") else label
-        for label in producer_attributions
-    }
+    producer_chains: set[str] = set()
+    for label in producer_attributions:
+        if label.startswith("grammar:"):
+            producer_chains.add(label.split("|", 1)[1])
+            continue
+        if label.startswith("challenge:source:authenticated-representation|"):
+            source_fields = label.split("|")
+            if len(source_fields) == 4 and source_fields[3].startswith(
+                "transformation:"
+            ):
+                producer_chains.add(
+                    source_fields[3].removeprefix("transformation:")
+                )
+                continue
+        producer_chains.add(label)
     if transformation not in producer_chains:
         raise SharedContractV2Error(
             "bv-dimension-invalid", "BV challenge transformation is not producer-derived"
