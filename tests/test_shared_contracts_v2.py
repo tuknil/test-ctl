@@ -39,6 +39,7 @@ from control_translation.shared_contracts_v2 import (
     SharedContractV2Error,
     _bv_profile,
     _component_condition,
+    _expected_template_resolution,
     _expected_bv_dimensions,
     _resolved_route_conditions,
     _shared_terminal_state_from_cg,
@@ -1234,6 +1235,24 @@ def test_mc_d78824c_template_resolution_and_case_evidence_are_verified() -> None
             _locators(request),
         )
     assert raised.value.code == "mc-template-resolution-invalid"
+
+
+def test_mc_template_resolution_preserves_encoded_path_payload() -> None:
+    fixture_path = FIXTURES / "workflow-lab-mc-path-payload-resolution.json"
+    raw = fixture_path.read_bytes()
+    expected_digest = fixture_path.with_suffix(".json.sha256").read_text().split()[0]
+    assert sha256(raw).hexdigest() == expected_digest
+    fixture = json.loads(raw)
+
+    resolution = _expected_template_resolution(
+        fixture["item"],
+        resolver_id=fixture["resolver_id"],
+        profile_id=fixture["profile_id"],
+        profile_digest=fixture["profile_digest"],
+        route=fixture["route"],
+    )
+
+    assert resolution == fixture["expected_resolution"]
 
 
 def test_bv_ddb49be_root_dimensions_match_cg_semantics_and_profile() -> None:
