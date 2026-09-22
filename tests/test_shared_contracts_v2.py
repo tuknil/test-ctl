@@ -1377,6 +1377,14 @@ def test_akamai_syntax_accepts_authenticated_any_header_condition() -> None:
                         "value": ["attack"],
                         "sourceCarrier": "header",
                         "sourceSelector": "*",
+                    },
+                    {
+                        "type": "argsPostJSONMatch",
+                        "positiveMatch": True,
+                        "value": ["attack"],
+                        "sourceLocationKind": "http-body-structured",
+                        "sourceSelectorType": "any-field",
+                        "sourceSelector": "*",
                     }
                 ],
             }

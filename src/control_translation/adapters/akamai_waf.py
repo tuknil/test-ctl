@@ -168,7 +168,7 @@ class AkamaiWafAdapter:
             any_field = (
                 condition.get("sourceLocationKind") == "http-body-structured"
                 and condition.get("sourceSelectorType") == "any-field"
-                and condition.get("sourceSelector") == ""
+                and condition.get("sourceSelector") in {"", "*"}
             )
             if (not isinstance(parameter, str) or not parameter.strip()) and not any_field:
                 errors.append(
