@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import re
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
@@ -1047,8 +1048,10 @@ def _v3_challenge_attribution(
     challenges: dict[str, dict[str, Any]],
 ) -> None:
     fields = attribution.split("|")
+    if len(fields) == 5:
+        _validate_v3_challenge_target(fields[4], actual=actual, component=component)
     if (
-        len(fields) != 4
+        len(fields) not in {4, 5}
         or not fields[0].startswith("challenge:")
         or fields[1] != f"component:{actual['component_id']}"
         or fields[2] != f"carrier:{actual['carrier']}"
@@ -1143,6 +1146,59 @@ def _v3_challenge_attribution(
         raise SharedContractV2Error(
             "bv-dimension-invalid", "BV challenge transformation is not producer-derived"
         )
+
+
+def _validate_v3_challenge_target(
+    field: str,
+    *,
+    actual: dict[str, Any],
+    component: dict[str, Any],
+) -> None:
+    if not field.startswith("target:"):
+        raise SharedContractV2Error(
+            "bv-dimension-invalid", "BV challenge target attribution is malformed"
+        )
+    target = field.removeprefix("target:")
+    location = component.get("location")
+    if not isinstance(location, dict):
+        raise SharedContractV2Error(
+            "bv-dimension-invalid", "BV challenge component location is absent"
+        )
+    kind = location.get("kind")
+    if (
+        kind == "http-path"
+        and actual.get("carrier") == "path"
+        and target == "http-path:path-payload"
+    ):
+        return
+    named = {
+        "http-query": "query",
+        "http-header": "header",
+        "http-cookie": "cookie",
+    }
+    if kind in named and location.get("name") == "*":
+        prefix = f"{kind}:"
+        if target.startswith(prefix):
+            name, separator, occurrence = target.removeprefix(prefix).rpartition(":")
+            if (
+                separator
+                and name
+                and occurrence.isdigit()
+                and str(int(occurrence)) == occurrence
+                and actual.get("carrier") == named[kind]
+            ):
+                return
+    if (
+        kind == "http-body-structured"
+        and location.get("selector_type") == "any-field"
+        and actual.get("carrier") == "body-json"
+        and target.startswith("http-body-structured:/")
+        and not re.search(r"~(?![01])", target.removeprefix("http-body-structured:"))
+    ):
+        return
+    raise SharedContractV2Error(
+        "bv-dimension-invalid", "BV challenge target attribution differs"
+    )
 
 
 def _validate_bv_v3_dimensions(

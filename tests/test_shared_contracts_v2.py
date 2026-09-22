@@ -45,6 +45,7 @@ from control_translation.shared_contracts_v2 import (
     _shared_terminal_state_from_cg,
     _translate_carrier_document,
     _translate_rule_document,
+    _validate_v3_challenge_target,
     _validate_cg,
     _validate_mc,
     build_waf_translation_plan,
@@ -1253,6 +1254,52 @@ def test_mc_template_resolution_preserves_encoded_path_payload() -> None:
     )
 
     assert resolution == fixture["expected_resolution"]
+
+
+@pytest.mark.parametrize(
+    ("field", "carrier", "location"),
+    [
+        ("target:http-path:path-payload", "path", {"kind": "http-path"}),
+        (
+            "target:http-header:X-Janus-Test:0",
+            "header",
+            {"kind": "http-header", "name": "*"},
+        ),
+        (
+            "target:http-query:janus_test:0",
+            "query",
+            {"kind": "http-query", "name": "*"},
+        ),
+        (
+            "target:http-cookie:janus_test:0",
+            "cookie",
+            {"kind": "http-cookie", "name": "*"},
+        ),
+        (
+            "target:http-body-structured:/janus_test",
+            "body-json",
+            {"kind": "http-body-structured", "selector_type": "any-field"},
+        ),
+    ],
+)
+def test_bv_v3_challenge_targets_preserve_concrete_carrier_attribution(
+    field: str, carrier: str, location: dict[str, str]
+) -> None:
+    _validate_v3_challenge_target(
+        field,
+        actual={"carrier": carrier},
+        component={"location": location},
+    )
+
+
+def test_bv_v3_challenge_target_rejects_unbound_concrete_carrier() -> None:
+    with pytest.raises(SharedContractV2Error) as raised:
+        _validate_v3_challenge_target(
+            "target:http-header:X-Invented:0",
+            actual={"carrier": "header"},
+            component={"location": {"kind": "http-header", "name": "X-Exact"}},
+        )
+    assert raised.value.code == "bv-dimension-invalid"
 
 
 def test_bv_ddb49be_root_dimensions_match_cg_semantics_and_profile() -> None:
