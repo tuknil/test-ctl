@@ -47,8 +47,8 @@
     {
       "name": "workflow-lab-mc-path-payload-resolution.json",
       "source": "non-sensitive semantic equivalent of retained Workflow Lab execution:5474b2f4-d7a5-4e19-8dbd-6a8adb985df3",
-      "sha256": "sha256:c22fe619d80babc357fe671b7ac3abc0275faad41aadf76493ac2f40df51c9cf",
-      "byte_length": 1759
+      "sha256": "sha256:211ac66c7a625293b35fbdc7d104ab9c1f356f082e757555ca78a468f8ee7438",
+      "byte_length": 1881
     },
     {
       "name": "waf-rule-carriers.json",

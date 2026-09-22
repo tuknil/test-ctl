@@ -696,7 +696,8 @@ def _expected_template_resolution(
                 "mc-template-resolution-invalid",
                 "MC template path_payload is invalid",
             )
-        path = path.rstrip("/") + "/" + quote(path_payload, safe="")
+        # Match Go net/url.PathEscape used by the authoritative MC producer.
+        path = path.rstrip("/") + "/" + quote(path_payload, safe="$&+:-=@")
     rendered.update(
         modality="http-request",
         scheme=route["scheme"],
