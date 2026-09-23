@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"strings"
 	"time"
 
 	"github.com/ATT-CSO/control-translation/go-api/internal/contracts"
@@ -34,6 +33,8 @@ type LifecycleRun struct {
 	Progress        contracts.RunProgress
 }
 
+func now() time.Time { return time.Now().UTC() }
+
 // CreateLifecycleRun persists a queued run, or returns the existing one when
 // the idempotency key repeats with the same normalized request digest.
 func (s *Store) CreateLifecycleRun(
@@ -56,16 +57,16 @@ func (s *Store) CreateLifecycleRun(
 	if err != nil {
 		return nil, false, storeError("encode-lifecycle-request", err)
 	}
-	now := nowText()
+	timestamp := now()
 	_, err = s.db.Exec(`
 		INSERT INTO capability_run_lifecycle(
 			run_id, request_id, correlation_id, idempotency_key, request_digest,
 			request_json, status, progress_phase, progress_percent, progress_message,
 			cancel_requested, attempt_number, created_at, accepted_at, updated_at)
-		VALUES (?,?,?,?,?,?,'queued','queued',0,?,0,0,?,?,?)`,
+		VALUES ($1,$2,$3,$4,$5,$6::jsonb,'queued','queued',0,$7,FALSE,0,$8,$8,$8)`,
 		runID, *envelope.RequestID, *envelope.CorrelationID, *envelope.IdempotencyKey,
 		requestDigest, string(requestJSON),
-		"Run accepted and queued for durable processing.", now, now, now)
+		"Run accepted and queued for durable processing.", timestamp)
 	if err != nil {
 		if isUniqueViolation(err) {
 			// A concurrent retry committed the same key first.
@@ -86,56 +87,63 @@ func (s *Store) CreateLifecycleRun(
 
 // GetLifecycleRun reads one lifecycle run by run id.
 func (s *Store) GetLifecycleRun(runID string) (*LifecycleRun, error) {
-	return s.scanLifecycle(s.db.QueryRow(lifecycleSelect+" WHERE run_id = ?", runID))
+	return s.scanLifecycle(s.db.QueryRow(
+		"SELECT "+lifecycleColumns+" FROM capability_run_lifecycle WHERE run_id = $1", runID))
 }
 
 // GetLifecycleRunByKey reads one lifecycle run by idempotency key.
 func (s *Store) GetLifecycleRunByKey(key string) (*LifecycleRun, error) {
-	return s.scanLifecycle(s.db.QueryRow(lifecycleSelect+" WHERE idempotency_key = ?", key))
+	return s.scanLifecycle(s.db.QueryRow(
+		"SELECT "+lifecycleColumns+" FROM capability_run_lifecycle WHERE idempotency_key = $1", key))
 }
 
-const lifecycleSelect = `
-	SELECT run_id, request_id, correlation_id, idempotency_key, request_digest,
-	       request_json, status, terminal_state, result_id, completion_json, failure_json,
-	       progress_phase, progress_percent, progress_message, cancel_requested,
-	       attempt_number, created_at, accepted_at, started_at, updated_at, completed_at
-	FROM capability_run_lifecycle`
+// The column list is shared between the reads and the claim's RETURNING, so
+// the two cannot drift into scanning different shapes.
+const lifecycleColumns = `
+	run_id, request_id, correlation_id, idempotency_key, request_digest,
+	request_json, status, terminal_state, result_id, completion_json, failure_json,
+	progress_phase, progress_percent, progress_message, cancel_requested,
+	attempt_number, created_at, accepted_at, started_at, updated_at, completed_at`
 
-func (s *Store) scanLifecycle(row *sql.Row) (*LifecycleRun, error) {
+// rowScanner is satisfied by both *sql.Row and *sql.Rows.
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func (s *Store) scanLifecycle(row rowScanner) (*LifecycleRun, error) {
 	var (
-		run                              LifecycleRun
-		requestJSON                      string
-		terminalState, resultID          sql.NullString
-		resultJSON, failureJSON          sql.NullString
-		progressPercent                  sql.NullInt64
-		cancelRequested                  int
-		createdAt, acceptedAt, updatedAt string
-		startedAt, completedAt           sql.NullString
+		run                     LifecycleRun
+		requestJSON             []byte
+		terminalState, resultID sql.NullString
+		completionJSON          []byte
+		failureJSON             []byte
+		progressPercent         sql.NullInt64
+		startedAt, completedAt  sql.NullTime
 	)
 	err := row.Scan(&run.RunID, &run.RequestID, &run.CorrelationID, &run.IdempotencyKey,
 		&run.RequestDigest, &requestJSON, &run.Status, &terminalState, &resultID,
-		&resultJSON, &failureJSON, &run.Progress.Phase, &progressPercent,
-		&run.Progress.Message, &cancelRequested, &run.Attempt,
-		&createdAt, &acceptedAt, &startedAt, &updatedAt, &completedAt)
+		&completionJSON, &failureJSON, &run.Progress.Phase, &progressPercent,
+		&run.Progress.Message, &run.CancelRequested, &run.Attempt,
+		&run.CreatedAt, &run.AcceptedAt, &startedAt, &run.UpdatedAt, &completedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, storeError("read-lifecycle-run", err)
 	}
-	if err := json.Unmarshal([]byte(requestJSON), &run.Request); err != nil {
+	if err := json.Unmarshal(requestJSON, &run.Request); err != nil {
 		return nil, storeError("decode-lifecycle-request", err)
 	}
-	run.CancelRequested = cancelRequested == 1
-	run.CreatedAt = parseTimeValue(createdAt).Time
-	run.AcceptedAt = parseTimeValue(acceptedAt).Time
-	run.UpdatedAt = parseTimeValue(updatedAt).Time
+	// timestamptz comes back in the session time zone; the contract is UTC.
+	run.CreatedAt = run.CreatedAt.UTC()
+	run.AcceptedAt = run.AcceptedAt.UTC()
+	run.UpdatedAt = run.UpdatedAt.UTC()
 	if startedAt.Valid {
-		value := parseTimeValue(startedAt.String).Time
+		value := startedAt.Time.UTC()
 		run.StartedAt = &value
 	}
 	if completedAt.Valid {
-		value := parseTimeValue(completedAt.String).Time
+		value := completedAt.Time.UTC()
 		run.CompletedAt = &value
 	}
 	if terminalState.Valid {
@@ -148,16 +156,16 @@ func (s *Store) scanLifecycle(row *sql.Row) (*LifecycleRun, error) {
 		percent := int(progressPercent.Int64)
 		run.Progress.Percent = &percent
 	}
-	if resultJSON.Valid {
+	if len(completionJSON) > 0 {
 		var completion contracts.CanonicalCompletion
-		if err := json.Unmarshal([]byte(resultJSON.String), &completion); err != nil {
+		if err := json.Unmarshal(completionJSON, &completion); err != nil {
 			return nil, storeError("decode-lifecycle-completion", err)
 		}
 		run.Completion = &completion
 	}
-	if failureJSON.Valid {
+	if len(failureJSON) > 0 {
 		var failure contracts.RunFailure
-		if err := json.Unmarshal([]byte(failureJSON.String), &failure); err != nil {
+		if err := json.Unmarshal(failureJSON, &failure); err != nil {
 			return nil, storeError("decode-lifecycle-failure", err)
 		}
 		run.Failure = &failure
@@ -168,53 +176,49 @@ func (s *Store) scanLifecycle(row *sql.Row) (*LifecycleRun, error) {
 // ClaimNextQueuedRun leases one queued run to a worker, or returns nil when
 // the queue is empty. Expired leases are reclaimed by the same statement, so a
 // crashed worker's run is picked up on the next poll.
+//
+// The claim is one statement. FOR UPDATE SKIP LOCKED makes concurrent pollers
+// step over a row another transaction already holds instead of blocking on it
+// or claiming it twice, and RETURNING hands back the row that was actually
+// claimed -- so the worker never has to ask "which run did I just take?", a
+// question with no safe answer once more than one replica is running.
 func (s *Store) ClaimNextQueuedRun(workerID string, leaseSeconds int, maxAttempts int) (*LifecycleRun, error) {
-	now := time.Now().UTC()
-	nowValue := now.Format(timeLayout)
-	leaseExpiry := now.Add(time.Duration(leaseSeconds) * time.Second).Format(timeLayout)
+	timestamp := now()
+	leaseExpiry := timestamp.Add(time.Duration(leaseSeconds) * time.Second)
 
-	result, err := s.db.Exec(`
-		UPDATE capability_run_lifecycle
-		SET status = 'running', worker_id = ?, lease_expires_at = ?, last_heartbeat_at = ?,
-		    attempt_number = attempt_number + 1, started_at = COALESCE(started_at, ?),
-		    updated_at = ?, progress_phase = 'running',
-		    progress_message = 'Translation in progress.'
-		WHERE run_id = (
-			SELECT run_id FROM capability_run_lifecycle
-			WHERE (status = 'queued' OR (status = 'running' AND lease_expires_at < ?))
-			  AND attempt_number < ?
-			ORDER BY created_at ASC LIMIT 1
-		)`, workerID, leaseExpiry, nowValue, nowValue, nowValue, nowValue, maxAttempts)
-	if err != nil {
-		return nil, storeError("claim-lifecycle-run", err)
-	}
-	if affected, _ := result.RowsAffected(); affected == 0 {
-		return nil, nil
-	}
-	return s.scanLifecycle(s.db.QueryRow(lifecycleSelect + " WHERE worker_id = '" + escape(workerID) +
-		"' AND status = 'running' ORDER BY updated_at DESC LIMIT 1"))
-}
+	row := s.db.QueryRow(`
+		WITH claimed AS (
+			-- Aliased so the RETURNING list below, which names the queue's own
+			-- columns, cannot collide with the CTE's run_id.
+			SELECT run_id AS claimed_run_id FROM capability_run_lifecycle
+			WHERE (status = 'queued' OR (status = 'running' AND lease_expires_at < $3))
+			  AND attempt_number < $4
+			ORDER BY created_at ASC
+			LIMIT 1
+			FOR UPDATE SKIP LOCKED
+		)
+		UPDATE capability_run_lifecycle AS lifecycle
+		SET status = 'running', worker_id = $1, lease_expires_at = $2,
+		    last_heartbeat_at = $3, attempt_number = lifecycle.attempt_number + 1,
+		    started_at = COALESCE(lifecycle.started_at, $3), updated_at = $3,
+		    progress_phase = 'running', progress_message = 'Translation in progress.'
+		FROM claimed
+		WHERE lifecycle.run_id = claimed.claimed_run_id
+		RETURNING `+lifecycleColumns,
+		workerID, leaseExpiry, timestamp, maxAttempts)
 
-func escape(value string) string {
-	out := make([]rune, 0, len(value))
-	for _, char := range value {
-		if char == '\'' {
-			out = append(out, '\'')
-		}
-		out = append(out, char)
-	}
-	return string(out)
+	// scanLifecycle reports an empty queue as (nil, nil): no row was claimed.
+	return s.scanLifecycle(row)
 }
 
 // Heartbeat extends a worker's lease while translation is still running.
 func (s *Store) Heartbeat(runID, workerID string, leaseSeconds int) error {
-	now := time.Now().UTC()
+	timestamp := now()
 	_, err := s.db.Exec(`
 		UPDATE capability_run_lifecycle
-		SET lease_expires_at = ?, last_heartbeat_at = ?, updated_at = ?
-		WHERE run_id = ? AND worker_id = ? AND status = 'running'`,
-		now.Add(time.Duration(leaseSeconds)*time.Second).Format(timeLayout),
-		now.Format(timeLayout), now.Format(timeLayout), runID, workerID)
+		SET lease_expires_at = $1, last_heartbeat_at = $2, updated_at = $2
+		WHERE run_id = $3 AND worker_id = $4 AND status = 'running'`,
+		timestamp.Add(time.Duration(leaseSeconds)*time.Second), timestamp, runID, workerID)
 	if err != nil {
 		return storeError("heartbeat-lifecycle-run", err)
 	}
@@ -234,15 +238,15 @@ func (s *Store) CompleteLifecycleRun(
 	if err != nil {
 		return storeError("encode-lifecycle-completion", err)
 	}
-	now := nowText()
+	timestamp := now()
 	if _, err := s.db.Exec(`
 		UPDATE capability_run_lifecycle
-		SET status = 'completed', terminal_state = ?, result_id = ?,
-		    completion_json = ?, progress_phase = 'completed', progress_percent = 100,
+		SET status = 'completed', terminal_state = $1, result_id = $2,
+		    completion_json = $3::jsonb, progress_phase = 'completed', progress_percent = 100,
 		    progress_message = 'Translation completed.', worker_id = NULL,
-		    lease_expires_at = NULL, updated_at = ?, completed_at = ?
-		WHERE run_id = ? AND worker_id = ?`,
-		terminalState, resultID, string(completionJSON), now, now, runID, workerID,
+		    lease_expires_at = NULL, updated_at = $4, completed_at = $4
+		WHERE run_id = $5 AND worker_id = $6`,
+		terminalState, resultID, string(completionJSON), timestamp, runID, workerID,
 	); err != nil {
 		return storeError("complete-lifecycle-run", err)
 	}
@@ -260,17 +264,17 @@ func (s *Store) FailLifecycleRun(runID string, failure contracts.RunFailure, req
 	if requeue {
 		status, phase = "queued", "queued"
 	}
-	now := nowText()
+	timestamp := now()
 	var completedAt any
 	if !requeue {
-		completedAt = now
+		completedAt = timestamp
 	}
 	_, err = s.db.Exec(`
 		UPDATE capability_run_lifecycle
-		SET status = ?, failure_json = ?, progress_phase = ?, progress_message = ?,
-		    worker_id = NULL, lease_expires_at = NULL, updated_at = ?, completed_at = ?
-		WHERE run_id = ?`,
-		status, string(failureJSON), phase, failure.Detail, now, completedAt, runID)
+		SET status = $1, failure_json = $2::jsonb, progress_phase = $3, progress_message = $4,
+		    worker_id = NULL, lease_expires_at = NULL, updated_at = $5, completed_at = $6
+		WHERE run_id = $7`,
+		status, string(failureJSON), phase, failure.Detail, timestamp, completedAt, runID)
 	if err != nil {
 		return storeError("fail-lifecycle-run", err)
 	}
@@ -287,13 +291,13 @@ func (s *Store) RequestCancellation(runID string) (*LifecycleRun, error) {
 	if run.Status == "completed" || run.Status == "failed" || run.Status == "canceled" {
 		return run, nil
 	}
-	now := nowText()
+	timestamp := now()
 	if _, err := s.db.Exec(`
 		UPDATE capability_run_lifecycle
-		SET cancel_requested = 1, status = 'canceled', progress_phase = 'canceled',
+		SET cancel_requested = TRUE, status = 'canceled', progress_phase = 'canceled',
 		    progress_message = 'Run canceled before completion.', worker_id = NULL,
-		    lease_expires_at = NULL, updated_at = ?, completed_at = ?
-		WHERE run_id = ? AND status IN ('queued', 'running')`, now, now, runID); err != nil {
+		    lease_expires_at = NULL, updated_at = $1, completed_at = $1
+		WHERE run_id = $2 AND status IN ('queued', 'running')`, timestamp, runID); err != nil {
 		return nil, storeError("cancel-lifecycle-run", err)
 	}
 	return s.GetLifecycleRun(runID)
@@ -306,17 +310,4 @@ func NormalizedRequestDigest(envelope contracts.InvokeRequestEnvelope) string {
 	copied := envelope
 	copied.IdempotencyKey = nil
 	return store.CanonicalRequestHash(copied)
-}
-
-func parseTimeValue(text string) contracts.Time {
-	for _, layout := range []string{timeLayout, time.RFC3339Nano, time.RFC3339} {
-		if parsed, err := time.Parse(layout, text); err == nil {
-			return contracts.Time{Time: parsed.UTC()}
-		}
-	}
-	return contracts.Time{Time: time.Time{}}
-}
-
-func isUniqueViolation(err error) bool {
-	return err != nil && strings.Contains(strings.ToLower(err.Error()), "unique constraint")
 }

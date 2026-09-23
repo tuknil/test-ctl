@@ -30,8 +30,8 @@ import (
 // two leaves the run claimable again, and the results write is a MERGE keyed
 // on result_id, so the retry cannot produce a duplicate row.
 //
-// One writer only: the service is pinned to a single replica while the queue
-// is a local SQLite file.
+// Several workers may run at once: the queue is Postgres and a run is claimed
+// with FOR UPDATE SKIP LOCKED, so two replicas cannot take the same one.
 type Worker struct {
 	settings   config.Settings
 	repository *store.Repository

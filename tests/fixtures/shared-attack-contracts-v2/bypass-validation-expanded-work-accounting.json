@@ -1,0 +1,12 @@
+{
+  "required_obligation_count": 6,
+  "accounted_obligation_count": 6,
+  "unaccounted_required_obligation_count": 0,
+  "source_member_count": 9,
+  "represented_source_member_count": 6,
+  "unsupported_source_member_count": 3,
+  "unaccounted_source_member_count": 0,
+  "required_work_item_count": 19,
+  "disposed_work_item_count": 19,
+  "unaccounted_required_work_item_count": 0
+}

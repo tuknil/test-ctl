@@ -13,16 +13,33 @@ asynchronous lifecycle.
 
 ## Run it
 
+The tests need a Postgres, because the lifecycle queue is one and its
+behaviour under test is the database's own. Start it from compose:
+
+```bash
+docker compose --profile go up -d postgres
+```
+
 ```bash
 cd go-api && go test ./... && go run ./cmd/api
 ```
 
-Databricks is the only backend, so `/ready` fails until it is configured:
+Tests look for `TEST_DATABASE_URL`, falling back to the compose service above,
+and each one runs in a schema of its own. When no server is reachable they
+**skip** rather than fail — so a green run with no database is a run that
+tested nothing. After changing this package, check that it actually ran:
 
 ```bash
-DATABRICKS_SERVER_HOSTNAME=... DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/... \
-DATABRICKS_CLIENT_ID=... DATABRICKS_CLIENT_SECRET=... \
-DATABASE_PATH=./data/lifecycle.db \
+go test ./internal/lifecycle/ -v | grep -c -- "--- SKIP"
+```
+
+Databricks and Postgres are both required, so `/ready` fails until they are
+configured. Locally, with an ordinary password and the service creating its own
+schema:
+
+```bash
+DATABRICKS_DSN='token:...@adb-....azuredatabricks.net:443/sql/1.0/warehouses/...' \
+DATABASE_URL='postgres://control_translation:control_translation@127.0.0.1:55432/control_translation?sslmode=disable' \
 CORS_ALLOWED_ORIGINS=http://127.0.0.1:8080 go run ./cmd/api
 ```
 
@@ -218,16 +235,47 @@ decision.
 
 ## Persistence
 
-The split follows the Python service: **SQLite coordinates, Databricks
-stores.**
+**Postgres coordinates, Databricks stores.**
 
-The lifecycle queue is a local SQLite file at `DATABASE_PATH` — the one piece
-of local state — because a Delta table has no row locks and makes a poor queue.
-Its schema and `schema_migrations` bookkeeping match migration 2 of
-`src/control_translation/persistence/migrations.py`. Mount it on durable
-storage and run exactly one replica; `SERVICE_REPLICA_COUNT != 1` fails
-readiness. Losing the file forgets in-flight runs, but any result already
-written to Databricks survives.
+The lifecycle queue is a Postgres database — because a Delta table has no row
+locks and makes a poor queue. The service keeps no local state: the queue is shared and the
+results are in Databricks, so a replica can be replaced or scaled at will.
+
+A run is claimed in one statement, with `FOR UPDATE SKIP LOCKED` picking the
+row and `RETURNING` handing back the one that was actually claimed. A
+concurrent poller steps over a row another transaction holds instead of
+blocking on it or taking it twice, so `SERVICE_REPLICA_COUNT` is no longer
+pinned to 1 — that limit existed only because the queue used to be a local
+file.
+
+**`DATABASE_URL` is the whole connection, and the only setting for it** — host,
+port, database, user, password and `sslmode`, in one string, the way
+`DATABRICKS_DSN` is one string:
+
+```
+postgres://<user>:<password>@<host>:5432/<database>?sslmode=require
+```
+
+It is used as the operator wrote it. The only thing added is an
+`application_name`, so a session holding a queue lock is identifiable in
+`pg_stat_activity`, and one already in the URL is left alone. Validation checks
+only what a connection cannot be made without: that it parses, uses the
+`postgres://` scheme, and names a host and a database. The URL carries a
+password, so it is never echoed into a configuration error — not even a
+complaint about some other setting.
+
+`sslmode` is deliberately not policed. It is the operator's to choose, so a
+local container over loopback can use `sslmode=disable`; use `require` or
+stronger for anything that is not loopback, because the password travels in
+this connection. Azure Database for PostgreSQL enforces TLS server-side
+regardless.
+
+**The schema needs no setting either.** On startup the service runs
+`CREATE TABLE IF NOT EXISTS`. If the role holds no DDL rights — a managed
+database whose schema someone else applies — that statement fails, and the
+service then checks whether the table is there anyway; if it is, there was
+nothing to do. Only a role that cannot create the table *and* cannot find it
+is a startup failure. Both postures work with nothing configured.
 
 Everything durable and shareable goes to Databricks. The write is a `MERGE` that inserts only
 when the `result_id` is absent, so a retry can never overwrite a published
@@ -351,7 +399,7 @@ way: that pairing is genuinely invalid.
 | Fixture doer | An unmappable rule is `cannot-express`, not a template. |
 | `firewall-generic` and `edr-s1` adapters | Those targets are `scope-declined`; see below. |
 | Orchestration callbacks | The `X-Janus-Callback-*` header group is validated all-or-none, then ignored. Polling is the delivery mechanism. |
-| SQLite as a *result* store | It coordinates the queue only; results go to Databricks. |
+| Postgres as a *result* store | It coordinates the queue only; results go to Databricks. |
 | The other three deterministic Akamai paths | JSON-body-field, anchored-literal, and proven-form-body. The rows they read from are still fetched; only those alternative compilations are gone, so a rule that used to take one of them now goes through the general compiler or declines. |
 
 The full-parity version, before this cut, is archived at
@@ -366,9 +414,18 @@ committed, so that archive is the only copy.
   the same time and was diffed byte-for-byte across both.
 - The HTTP surface, the upstream reader, the result store, and the full
   asynchronous lifecycle are exercised end to end against an in-process fake
-  workspace (`internal/store/storetest`) and a real temporary SQLite queue —
-  including six lineage-failure cases, the approved-table check, idempotency
-  and conflict, cancellation, and the attempt-exhaustion path.
+  workspace (`internal/store/storetest`) and a real Postgres — including six
+  lineage-failure cases, the approved-table check, idempotency and conflict,
+  cancellation, and the attempt-exhaustion path.
+- The queue's concurrency is tested against a real server rather than reasoned
+  about: more workers than runs claim simultaneously, and every run must be
+  claimed exactly once. Separately, four independent OS processes were run
+  against one queue of 1000 runs — 1000 claims, 1000 distinct, none taken
+  twice.
+- **Nothing has been run against a managed Postgres.** Every check above is
+  against `postgres:16-alpine` on loopback. A managed instance differs in the
+  two places this code touches: TLS, and whether the connecting role may
+  create the table.
 - **Nothing here has been run against a live Databricks workspace.** The SQL
   and the table shape are taken from the Python service, which is a code
   reading rather than a test. The transport is now the vendor driver the
@@ -389,7 +446,7 @@ internal/capability   gate order and result assembly
 internal/databricks   DSN handling and the shared *sql.DB helpers
 internal/upstream     proof-loop lineage validation and the three-table read
 internal/store        Databricks persistence for immutable results
-internal/lifecycle    the SQLite queue behind the asynchronous routes
+internal/lifecycle    the Postgres queue behind the asynchronous routes
 internal/httpapi      routes and CORS
 internal/jsonx        insertion-ordered JSON, for byte parity with Python
 ```

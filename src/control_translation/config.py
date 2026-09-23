@@ -62,6 +62,11 @@ class Settings(BaseModel):
     capability_callback_poll_interval_seconds: float = 1.0
     default_target_technology: str = "akamai-waf"
     default_target_policy_context_id: str = "akamai-policy:example:rev-17"
+    workflow_lab_enabled: bool = False
+    workflow_lab_url: str | None = None
+    workflow_lab_state_path: str = "/app/data/workflow-lab/control_translation.db"
+    workflow_lab_timeout_seconds: float = 30.0
+    workflow_lab_max_bytes: int = 256 * 1024 * 1024
 
     @property
     def is_live(self) -> bool:
@@ -261,5 +266,18 @@ def get_settings() -> Settings:
         ),
         default_target_policy_context_id=os.getenv(
             "DEFAULT_TARGET_POLICY_CONTEXT_ID", "akamai-policy:example:rev-17"
+        ),
+        workflow_lab_enabled=os.getenv("WORKFLOW_LAB_ENABLED", "false").strip().lower()
+        in {"1", "true", "yes", "on"},
+        workflow_lab_url=os.getenv("WORKFLOW_LAB_URL") or None,
+        workflow_lab_state_path=os.getenv(
+            "WORKFLOW_LAB_STATE_PATH",
+            "/app/data/workflow-lab/control_translation.db",
+        ),
+        workflow_lab_timeout_seconds=float(
+            os.getenv("WORKFLOW_LAB_TIMEOUT_SECONDS", "30")
+        ),
+        workflow_lab_max_bytes=int(
+            os.getenv("WORKFLOW_LAB_MAX_BYTES", str(256 * 1024 * 1024))
         ),
     )

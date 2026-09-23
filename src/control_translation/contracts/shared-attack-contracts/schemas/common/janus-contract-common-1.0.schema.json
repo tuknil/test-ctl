@@ -511,6 +511,12 @@
           "maxLength": 128,
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*$"
         },
+        "path_payload": {
+          "description": "Optional exact producer payload rendered by the approved route adapter as one percent-encoded path segment after the registered path.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
         "query": {
           "type": "array",
           "items": {
@@ -757,6 +763,26 @@
             "selector": {
               "type": "string",
               "minLength": 1
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "family",
+            "kind",
+            "selector_type"
+          ],
+          "properties": {
+            "family": {
+              "const": "http"
+            },
+            "kind": {
+              "const": "http-body-structured"
+            },
+            "selector_type": {
+              "const": "any-field"
             }
           }
         },

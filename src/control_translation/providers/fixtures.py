@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from control_translation.contracts import ProvenMitigationPattern
 
-
 FIXTURE_PROVEN_PATTERNS: dict[str, ProvenMitigationPattern] = {
     "proven-pattern:CVE-2017-5638:waf:fixture-1": ProvenMitigationPattern(
         proven_pattern_id="proven-pattern:CVE-2017-5638:waf:fixture-1",

@@ -4,11 +4,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/ATT-CSO/control-translation/go-api/internal/lifecycle"
+	"github.com/ATT-CSO/control-translation/go-api/internal/lifecycle/lifecycletest"
 	"github.com/ATT-CSO/control-translation/go-api/internal/store"
 	"github.com/ATT-CSO/control-translation/go-api/internal/store/storetest"
 	"github.com/ATT-CSO/control-translation/go-api/internal/upstream"
@@ -40,15 +40,10 @@ func newTestServerAndFake(t *testing.T) (*Server, *storetest.FakeWorkspace) {
 	return server, fake
 }
 
-// newQueue opens a lifecycle queue in the test's temporary directory.
+// newQueue opens a lifecycle queue on a Postgres schema of its own.
 func newQueue(t *testing.T) *lifecycle.Store {
 	t.Helper()
-	queue, err := lifecycle.Open(filepath.Join(t.TempDir(), "lifecycle.db"))
-	if err != nil {
-		t.Fatalf("unable to open the lifecycle queue: %v", err)
-	}
-	t.Cleanup(func() { _ = queue.Close() })
-	return queue
+	return lifecycletest.Queue(t)
 }
 
 // newServerWithoutResolver models a deployment with no Databricks reader.

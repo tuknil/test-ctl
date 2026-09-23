@@ -33,11 +33,13 @@ from control_translation.persistence import (
 from control_translation.shared_contracts_v2 import SharedContractV2Error
 from control_translation.terminal import TerminalState
 from control_translation.upstream import UpstreamResultResolver
+from control_translation.workflow_lab import WorkflowLabPublicationError
 
 logger = logging.getLogger(__name__)
 
 RepositoryProvider = Callable[[], RunRepository]
 ResolverProvider = Callable[[], UpstreamResultResolver | None]
+ResultReferenceFactory = Callable[[str], DatabricksResultReference]
 
 
 class LifecycleWorker:
@@ -48,10 +50,12 @@ class LifecycleWorker:
         repository: RepositoryProvider,
         resolver: ResolverProvider,
         settings: Settings,
+        result_reference_factory: ResultReferenceFactory | None = None,
     ) -> None:
         self._repository = repository
         self._resolver = resolver
         self._settings = settings
+        self._result_reference_factory = result_reference_factory
         self._worker_id = f"control-translation:{uuid4()}"
         self._stop = threading.Event()
         self._wake = threading.Event()
@@ -202,6 +206,25 @@ class LifecycleWorker:
             repository = self._repository()
             prepared = repository.get_prepared_publication(run.status.run_id)
             if prepared is not None and prepared.publication_state == "publication-pending":
+                if isinstance(exc, WorkflowLabPublicationError) and not exc.retryable:
+                    failure = RunFailure(
+                        code=exc.code,
+                        detail=exc.detail,
+                        retryable=False,
+                    )
+                    repository.fail_lifecycle_run(
+                        run.status.run_id,
+                        worker_id=self._worker_id,
+                        attempt_number=run.attempt_number,
+                        failure=failure,
+                        result=prepared.canonical_result,
+                    )
+                    logger.error(
+                        "Permanent Workflow Lab publication failure terminalized run_id=%s code=%s",
+                        run.status.run_id,
+                        exc.code,
+                    )
+                    return
                 logger.warning(
                     "Publication remains pending for recovery run_id=%s attempt=%s error_type=%s",
                     run.status.run_id,
@@ -303,8 +326,22 @@ class LifecycleWorker:
                 )
                 if self._abort_if_requested(repository, run, abort_work):
                     return
+            result_reference = (
+                self._result_reference_factory(existing.result_id)
+                if self._result_reference_factory is not None
+                else DatabricksResultReference(
+                    system="databricks",
+                    catalog=self._settings.databricks_catalog,
+                    schema=self._settings.databricks_schema,
+                    table=self._settings.databricks_results_table,
+                    key=existing.result_id,
+                )
+            )
             lifecycle_result = build_lifecycle_result(
-                existing, run.request, self._settings
+                existing,
+                run.request,
+                self._settings,
+                result_reference=result_reference,
             )
             completion = CanonicalCompletion(
                 request_id=run.status.request_id,
@@ -312,13 +349,7 @@ class LifecycleWorker:
                 run_id=run.status.run_id,
                 result_id=existing.result_id,
                 terminal_state=lifecycle_result["terminal_state"],
-                result_ref=DatabricksResultReference(
-                    system="databricks",
-                    catalog=self._settings.databricks_catalog,
-                    schema=self._settings.databricks_schema,
-                    table=self._settings.databricks_results_table,
-                    key=existing.result_id,
-                ),
+                result_ref=result_reference,
                 evidence_refs=lifecycle_result["evidence_refs"],
                 content_sha256=lifecycle_result["content_sha256"],
                 size_bytes=lifecycle_result["size_bytes"],
@@ -424,7 +455,11 @@ class LifecycleWorker:
 
 
 def build_lifecycle_result(
-    result: ResultEnvelope, request: InvocationRequest, settings: Settings
+    result: ResultEnvelope,
+    request: InvocationRequest,
+    settings: Settings,
+    *,
+    result_reference: DatabricksResultReference | None = None,
 ) -> dict:
     """Project the legacy result into the immutable async result contract."""
     structured = result.structured_result
@@ -497,6 +532,7 @@ def build_lifecycle_result(
                     settings=settings,
                     result_id=result.result_id,
                     artifact_id=aggregate_artifact_id,
+                    result_reference=result_reference,
                 ),
                 "content_hash": aggregate.content_hash,
                 "candidate_metadata": (
@@ -510,6 +546,7 @@ def build_lifecycle_result(
         content_ref = _canonical_artifact_ref(
             settings=settings,
             result_id=result.result_id,
+            result_reference=result_reference,
         )
         primary_candidate = {
             "candidate_id": candidate.candidate_id,
@@ -550,15 +587,19 @@ def build_lifecycle_result(
         "result_id": result.result_id,
         "status": "completed",
         "terminal_state": terminal_state,
-        "result_ref": {
-            "system": "databricks",
-            "catalog": settings.databricks_catalog,
-            "schema": settings.databricks_schema,
-            "table": settings.databricks_results_table,
-            "key": result.result_id,
-        },
+        "result_ref": (
+            result_reference
+            or DatabricksResultReference(
+                system="databricks",
+                catalog=settings.databricks_catalog,
+                schema=settings.databricks_schema,
+                table=settings.databricks_results_table,
+                key=result.result_id,
+            )
+        ).model_dump(mode="json", by_alias=True),
         "evidence_refs": evidence_refs,
         "prose": structured.prose_summary,
+        "outcome_reason": structured.outcome_reason.model_dump(mode="json"),
         "primary_candidate": primary_candidate,
         "artifacts": artifacts,
         "inference": result.inference,
@@ -622,10 +663,19 @@ def build_lifecycle_result(
 
 
 def _canonical_artifact_ref(
-    *, settings: Settings, result_id: str, artifact_id: str = "primary"
+    *,
+    settings: Settings,
+    result_id: str,
+    artifact_id: str = "primary",
+    result_reference: DatabricksResultReference | None = None,
 ) -> str:
-    """Point to artifact bytes inside the immutable canonical Databricks row."""
+    """Point to artifact bytes inside the selected immutable result object."""
     encoded_result_id = quote(result_id, safe="")
+    if result_reference is not None and result_reference.system == "workflow-lab":
+        return (
+            f"workflow-lab-result://immutable-results/{encoded_result_id}"
+            f"#/artifacts/{quote(artifact_id, safe='')}/content"
+        )
     return (
         f"databricks://{settings.databricks_catalog}/"
         f"{settings.databricks_schema}/{settings.databricks_results_table}/"

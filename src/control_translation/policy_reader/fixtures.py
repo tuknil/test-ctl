@@ -9,7 +9,6 @@ from __future__ import annotations
 from control_translation.cancellation import CancellationSignal, check_cancelled
 from control_translation.policy_reader.base import PolicySnapshot
 
-
 _FIXTURE_SNAPSHOTS: dict[tuple[str, str], PolicySnapshot] = {
     ("akamai-waf", "akamai-policy:example:rev-17"): PolicySnapshot(
         snapshot_id="policy-snapshot:akamai:example:rev-17",

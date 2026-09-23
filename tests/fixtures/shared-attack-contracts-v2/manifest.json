@@ -9,6 +9,12 @@
       "byte_length": 2597
     },
     {
+      "name": "bypass-validation-expanded-work-accounting.json",
+      "source": "control-translation regression fixture for campaign-derived BV work accounting",
+      "sha256": "sha256:28dd0a4013cb11cc599d469aba60f18ee2ed8cd51126eb0efaca1bbe49481a38",
+      "byte_length": 379
+    },
+    {
       "name": "bypass-validation-root-dimensions-ddb49be.json",
       "source": "bypass-validation producer capture@ddb49be",
       "sha256": "sha256:e76e23ff745a1f161636c9a8f7336846bd721e71c1ab0f1c89fa47e416e75ed3",
@@ -37,6 +43,12 @@
       "source": "mitigation-check producer capture@d78824c",
       "sha256": "sha256:511980e2d0f93bcb62adbacbeddae509edff1c262b3daf56d90eca0f4b40ceb0",
       "byte_length": 930
+    },
+    {
+      "name": "workflow-lab-mc-path-payload-resolution.json",
+      "source": "non-sensitive semantic equivalent of retained Workflow Lab execution:5474b2f4-d7a5-4e19-8dbd-6a8adb985df3",
+      "sha256": "sha256:211ac66c7a625293b35fbdc7d104ab9c1f356f082e757555ca78a468f8ee7438",
+      "byte_length": 1881
     },
     {
       "name": "waf-rule-carriers.json",
