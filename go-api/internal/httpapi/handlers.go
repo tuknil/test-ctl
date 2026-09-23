@@ -106,7 +106,7 @@ func (s *Server) schema(w http.ResponseWriter, _ *http.Request) {
 		Set("terminal_states", states).
 		Set("run_mode", s.settings.RunMode).
 		Set("persistence", "databricks").
-		Set("lifecycle_coordination", "sqlite").
+		Set("lifecycle_coordination", "postgres").
 		Set("inference", s.inferencePayload()).
 		Set("supported_adapters", supported).
 		Set("execution_paths", []string{"deterministic-modsec-rule"}).

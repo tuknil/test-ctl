@@ -1,6 +1,11 @@
 package contracts
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
+
+var producerDigest = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 
 // Provenance names the caller and the system it called from.
 type Provenance struct {
@@ -28,6 +33,12 @@ type OrchestrationUpstreamInput struct {
 	CorrelationID string                    `json:"correlation_id"`
 	ResultRef     DatabricksResultReference `json:"result_ref"`
 	EvidenceRefs  []string                  `json:"evidence_refs"`
+
+	// The producer signs its result; these declare what the stored row must
+	// reproduce. Optional, so a caller that does not send them still works --
+	// but when present the row is authenticated against them.
+	ContentSHA256 string `json:"content_sha256"`
+	SizeBytes     int    `json:"size_bytes"`
 }
 
 var acceptedCompletionContracts = map[string]map[string]bool{
@@ -77,6 +88,12 @@ func (o *OrchestrationUpstreamInput) Validate() error {
 	}
 	if o.ResultRef.Key != o.ResultID {
 		return invalid("upstream_inputs.result_ref", "result_ref.key must equal result_id")
+	}
+	if o.ContentSHA256 != "" && !producerDigest.MatchString(o.ContentSHA256) {
+		return invalid("upstream_inputs.content_sha256", "must be sha256:<64 hex characters>")
+	}
+	if o.SizeBytes < 0 {
+		return invalid("upstream_inputs.size_bytes", "cannot be negative")
 	}
 	seen := map[string]bool{}
 	for _, ref := range o.EvidenceRefs {

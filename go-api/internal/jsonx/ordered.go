@@ -105,8 +105,8 @@ func (o Obj) MustString(key string) string {
 	return ""
 }
 
-// UnmarshalJSON decodes a JSON object while preserving its key order, so an
-// envelope stored in SQLite round-trips byte-identically.
+// UnmarshalJSON decodes a JSON object while preserving its key order, so a
+// stored envelope round-trips byte-identically.
 func (o *Obj) UnmarshalJSON(data []byte) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
