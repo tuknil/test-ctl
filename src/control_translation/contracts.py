@@ -79,6 +79,12 @@ class ProvenMitigationPattern(StrictRequestModel):
     pattern_summary: str
     proof_record_ids: list[str] = Field(min_length=2)
     json_body_field_feature: JsonBodyFieldFeature | None = None
+    # What the Defense Generation candidate said it produced, e.g.
+    # "modsecurity" or "wazuh-rule". It selects which deterministic compiler
+    # can read pattern_summary, so it is the producer's word rather than a
+    # guess from the content. Optional: a caller that omits it gets the
+    # ModSecurity/Akamai path, which is what every existing caller means.
+    upstream_artifact_type: str | None = None
 
     @field_validator("proof_record_ids")
     @classmethod

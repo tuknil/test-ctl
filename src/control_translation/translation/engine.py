@@ -46,6 +46,10 @@ from control_translation.translation.modsec_akamai import (
     compile_akamai_custom_rule,
     has_authoritative_secrule,
 )
+from control_translation.translation.wazuh_s1 import (
+    compile_sentinelone_star_rule,
+    is_wazuh_rule_artifact,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +101,14 @@ def translate(
     proposal = None
     proposal_from_doer = False
     proposal_source = "none"
-    if target_technology == "akamai-waf":
+    wazuh_source = is_wazuh_rule_artifact(pattern.upstream_artifact_type)
+    if wazuh_source and target_technology == "edr-s1":
+        # The producer said it emitted a Wazuh rule, so the authoritative
+        # artifact is executable and is compiled here rather than proposed.
+        proposal = compile_sentinelone_star_rule(pattern)
+        if proposal is not None:
+            proposal_source = "deterministic-wazuh-rule"
+    elif target_technology == "akamai-waf":
         proposal, proposal_source = _akamai_deterministic_proposal(
             pattern,
             translation_requirements=translation_requirements,
@@ -105,6 +116,20 @@ def translate(
         )
 
     if proposal is None:
+        if wazuh_source:
+            # Same rule as the SecRule case below: an authoritative executable
+            # artifact is never handed to the model. Either it compiles or the
+            # capability says it cannot express it.
+            return EngineFailure(
+                reason="unsupported-feature",
+                detail=(
+                    "The authoritative Wazuh rule could not be compiled "
+                    f"deterministically for {target_technology}; model fallback "
+                    "is disabled for authoritative executable source artifacts."
+                ),
+                proposal_source="deterministic-wazuh-rule",
+                llm_invoked=False,
+            )
         if (
             target_technology == "akamai-waf"
             and has_authoritative_secrule(pattern.pattern_summary)
