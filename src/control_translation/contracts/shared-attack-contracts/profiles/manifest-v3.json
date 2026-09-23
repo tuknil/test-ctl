@@ -1,0 +1,10 @@
+{
+  "manifest_version": 1,
+  "profile_id": "waf-bypass@3",
+  "resolver_id": "bv-approved-route-adapter",
+  "registry_id": "janus-approved-test-routes",
+  "relative_path": "bv-http-route-profile-v3.json",
+  "sha256": "sha256:9373f61caafa9fcede696e9c01e7d146235994b35faed4c9ada147b3f78396a6",
+  "byte_length": 6251,
+  "resolver_profile_digest": "sha256:749b4773b1f479e0b5ce00868a99a148076be87952640b41408d9dd3dc3f14f9"
+}

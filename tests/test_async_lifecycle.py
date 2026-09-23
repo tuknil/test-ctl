@@ -29,6 +29,7 @@ from control_translation.persistence import (
     canonical_result_bytes,
     normalized_request_digest,
 )
+from control_translation.workflow_lab import WorkflowLabPublicationError
 
 client = TestClient(app)
 
@@ -85,7 +86,7 @@ def _wait_for_terminal(run_id: str) -> dict:
     deadline = monotonic() + 5
     while monotonic() < deadline:
         response = client.get(f"/v1/control-translation-runs/{run_id}")
-        assert response.status_code == 200
+        assert response.status_code == 200, response.json()
         status = response.json()
         if status["status"] in {"completed", "failed", "canceled"}:
             return status
@@ -305,6 +306,8 @@ def test_queued_cancellation_is_idempotent(monkeypatch):
 
     assert first.status_code == 200
     assert first.json()["status"] == "canceled"
+    assert first.json()["result_id"] is None
+    assert first.json()["completion"] is None
     assert second.json() == first.json()
 
     terminal_result = client.get(
@@ -778,3 +781,89 @@ def test_cancel_race_respects_publication_cutoff(tmp_path, monkeypatch):
     assert completed.status.status == "completed"
     assert completed.publication_state == "published"
     assert lifecycle2.get_lifecycle_result(run_id2) is not None
+
+
+def test_permanent_publication_conflict_terminalizes_prepared_run(
+    tmp_path, monkeypatch
+):
+    lifecycle, sink, repository, worker, claimed, run_id = _split_worker_run(
+        tmp_path, "permanent-publication-conflict"
+    )
+
+    def conflict(*_args, **_kwargs):
+        sink.publish_calls += 1
+        raise WorkflowLabPublicationError(
+            "publication_conflict", "immutable publication conflicts", retryable=False
+        )
+
+    sink.save_completed_run = conflict
+    try:
+        worker._process(claimed, Event())
+    except WorkflowLabPublicationError as exc:
+        worker._persist_attempt_failure(claimed, exc)
+
+    terminal = lifecycle.get_lifecycle_run(run_id)
+    assert terminal is not None
+    assert terminal.status.status == "failed"
+    assert terminal.status.failure is not None
+    assert terminal.status.failure.code == "publication_conflict"
+    assert terminal.status.result_id is None
+    assert terminal.status.completion is None
+    assert terminal.publication_state == "prepared"
+    prepared_result = lifecycle.get_lifecycle_result(run_id)
+    assert prepared_result is not None
+    exposed = api_module._terminal_lifecycle_result(terminal, prepared_result)
+    assert isinstance(exposed, CapabilityRunStatus)
+    assert exposed.status == "failed"
+    assert exposed.failure is not None
+    assert exposed.failure.code == "publication_conflict"
+    monkeypatch.setattr(api_module, "_REPOSITORY", lifecycle)
+    monkeypatch.setattr(api_module, "_WORKFLOW_LAB_REPOSITORY", lifecycle)
+    monkeypatch.setattr(api_module, "_WORKFLOW_LAB_WORKER", object())
+    for path in (
+        f"/v1/control-translation-runs/{run_id}",
+        f"/v1/workflow-lab/runs/{run_id}",
+    ):
+        response = client.get(path)
+        assert response.status_code == 200, response.json()
+        assert response.json()["status"] == "failed"
+        assert response.json()["result_id"] is None
+        assert response.json()["completion"] is None
+    assert repository.claim_lifecycle_run(
+        worker_id="replacement", lease_seconds=30, max_attempts=3
+    ) is None
+
+
+def test_transient_publication_is_bounded_and_preserves_prepared_bytes(tmp_path):
+    lifecycle, sink, repository, worker, claimed, run_id = _split_worker_run(
+        tmp_path, "transient-publication-exhaustion"
+    )
+
+    def ambiguous(*_args, **_kwargs):
+        raise WorkflowLabPublicationError(
+            "publication_ambiguous", "publication outcome is ambiguous", retryable=True
+        )
+
+    sink.save_completed_run = ambiguous
+    try:
+        worker._process(claimed, Event())
+    except WorkflowLabPublicationError as exc:
+        worker._persist_attempt_failure(claimed, exc)
+    prepared = lifecycle.get_prepared_publication(run_id)
+    assert prepared is not None
+    with sqlite3.connect(lifecycle.database_path) as connection:
+        connection.execute(
+            "UPDATE capability_run_lifecycle SET attempt_number=3, lease_expires_at=? WHERE run_id=?",
+            ("2000-01-01T00:00:00+00:00", run_id),
+        )
+
+    assert repository.claim_lifecycle_run(
+        worker_id="replacement", lease_seconds=30, max_attempts=3
+    ) is None
+    terminal = lifecycle.get_lifecycle_run(run_id)
+    assert terminal is not None
+    assert terminal.status.status == "failed"
+    assert terminal.status.failure is not None
+    assert terminal.status.failure.code == "publication_attempts_exhausted"
+    assert terminal.publication_state == "prepared"
+    assert lifecycle.get_prepared_publication(run_id).canonical_result == prepared.canonical_result

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import re
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
@@ -17,7 +18,7 @@ from functools import lru_cache
 from hashlib import sha256 as hashlib_sha256
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 import rfc8785
 from jsonschema import Draft202012Validator
@@ -58,7 +59,7 @@ CT_PROFILE_ID = "waf-standard@2"
 SHARED_CONTRACT_VERSION = "2.0"
 SCHEMA_BUNDLE_VERSION = "shared-attack-contracts-phase-1-ct@2026-09-12"
 SCHEMA_BUNDLE_DIGEST = (
-    "sha256:fbc8e62217c6ff269458f16c55b690ff0341cd3a6e4eaca92336532ca001f828"
+    "sha256:b58597c7dfc061d92e7d8c0771ff33d67411e3942c3636e9b3f72357864034b3"
 )
 SCHEMA_IDS = {AMS_SCHEMA_ID, BUNDLE_SCHEMA_ID, "https://schemas.janus.internal/contracts/common/janus-contract-common-1.0.schema.json"}
 MC_RESOLVER_ID = "mc-approved-route-adapter"
@@ -70,9 +71,9 @@ BV_RESOLVER_ID = "bv-approved-route-adapter"
 LEGACY_BV_PROFILE_FILE_DIGEST = "sha256:e32674808bc8691021f26683aaa44bdd313a25875ea57168ddb4e0a2a6c1e2bc"
 LEGACY_BV_PROFILE_BYTE_LENGTH = 3745
 LEGACY_BV_RESOLVER_PROFILE_DIGEST = "sha256:46f4d0dd59e1464acc1ef19ef68d0134a4be554cc203da653192f057aa82e577"
-BV_PROFILE_FILE_DIGEST = "sha256:ca9e037080199f3a58958aa324484953d39e9c73e904c77ea6305692024900cb"
-BV_PROFILE_BYTE_LENGTH = 3861
-BV_RESOLVER_PROFILE_DIGEST = "sha256:eb15d48ba11ecf93d26c8ae1b0f08bb1754edf0afef1c0401f1bf897ac8771af"
+BV_PROFILE_FILE_DIGEST = "sha256:9373f61caafa9fcede696e9c01e7d146235994b35faed4c9ada147b3f78396a6"
+BV_PROFILE_BYTE_LENGTH = 6251
+BV_RESOLVER_PROFILE_DIGEST = "sha256:749b4773b1f479e0b5ce00868a99a148076be87952640b41408d9dd3dc3f14f9"
 
 
 def _expected_profiles(ct_profile_id: str) -> tuple[str, str, str, str]:
@@ -331,13 +332,29 @@ def _verify_locator(record: UpstreamRecord, locator: Any, *, capability: str) ->
     context: dict[str, Any] | None = None
     run_result: dict[str, Any] | None = None
     if capability == "check-generation":
-        if document.get("contract_type") != "check-generation-persisted-result" or document.get("contract_version") != "1.0":
-            raise SharedContractV2Error("cg-wrapper-identity-invalid", "expected check-generation-persisted-result@1.0")
-        raw_context = document.get("temporal_context")
         raw_run_result = document.get("run_result")
-        if not isinstance(raw_context, dict) or not isinstance(raw_run_result, dict):
-            raise SharedContractV2Error("cg-wrapper-invalid", "CG wrapper is incomplete")
-        context = raw_context
+        canonical_temporal = (
+            document.get("capability") == "check-generation"
+            and document.get("contract_id") == "check-generation-result@1.0"
+        )
+        if canonical_temporal:
+            if not isinstance(raw_run_result, dict):
+                raise SharedContractV2Error("cg-wrapper-invalid", "CG canonical result is incomplete")
+            context = {
+                "request_id": document.get("request_id"),
+                "correlation_id": document.get("correlation_id"),
+                "upstream_result_refs": document.get("upstream_result_refs"),
+                "inherited_evidence_refs": document.get("evidence_refs") or [],
+                "new_evidence_refs": [],
+                "result_created_at": document.get("created_at"),
+            }
+        else:
+            if document.get("contract_type") != "check-generation-persisted-result" or document.get("contract_version") != "1.0":
+                raise SharedContractV2Error("cg-wrapper-identity-invalid", "expected authenticated Check Generation result")
+            raw_context = document.get("temporal_context")
+            if not isinstance(raw_context, dict) or not isinstance(raw_run_result, dict):
+                raise SharedContractV2Error("cg-wrapper-invalid", "CG wrapper is incomplete")
+            context = raw_context
         run_result = raw_run_result
         expected = {"run_id": locator.run_id}
         if document.get("result_id") != locator.result_id:
@@ -362,7 +379,12 @@ def _verify_locator(record: UpstreamRecord, locator: Any, *, capability: str) ->
         upstream = upstreams[0]
         if not isinstance(upstream, dict):
             raise SharedContractV2Error("cg-wrapper-invalid", "CG upstream lineage is invalid")
-        if document.get("temporal_result_content_sha256") != locator.content_sha256:
+        advertised_digest = (
+            document.get("content_sha256")
+            if canonical_temporal
+            else document.get("temporal_result_content_sha256")
+        )
+        if advertised_digest != locator.content_sha256:
             raise SharedContractV2Error("outer-locator-integrity-failed", "CG wrapper digest differs")
     elif capability != "bypass-validation" and (
         document.get("content_sha256") != locator.content_sha256
@@ -582,7 +604,15 @@ def _validate_bundle(bundle: dict[str, Any], semantics: dict[str, Any], cg: dict
         raise SharedContractV2Error("bound-semantics-mismatch", "DG semantics binding differs")
     locator = binding["locator"]
     exact_cg = cg_raw or canonical_bytes(cg)
-    if strict_json_bytes(exact_cg, context="bound CG result") != cg:
+    decoded_cg = strict_json_bytes(exact_cg, context="bound CG result")
+    bound_cg = decoded_cg.get("run_result", decoded_cg)
+    if isinstance(bound_cg, dict):
+        bound_cg = {
+            key: value
+            for key, value in bound_cg.items()
+            if key != "_verified_characterization_revision_id"
+        }
+    if bound_cg != cg:
         raise SharedContractV2Error("bound-cg-locator-mismatch", "DG bound CG bytes decode differently")
     if locator.get("digest") != "sha256:" + hashlib_sha256(exact_cg).hexdigest() or locator.get("byte_length") != len(exact_cg):
         raise SharedContractV2Error("bound-cg-locator-mismatch", "DG does not bind the exact CG final result")
@@ -620,12 +650,19 @@ def _validate_bundle(bundle: dict[str, Any], semantics: dict[str, Any], cg: dict
     return attestation, contents
 
 
-def _accounting(semantics: dict[str, Any], *, work: int) -> CoverageAccounting:
+def _accounting(
+    semantics: dict[str, Any],
+    *,
+    required_work: int,
+    disposed_work: int,
+) -> CoverageAccounting:
     members = {item["member_id"] for item in semantics["source_binding"]["members"]}
     represented = {ref["id"] for item in semantics["test_inputs"] for ref in item["source_member_refs"]}
     unsupported = {ref["id"] for item in semantics["unsupported_dimensions"] for ref in item["source_member_refs"]}
     if represented & unsupported or represented | unsupported != members:
         raise SharedContractV2Error("source-member-partition-incomplete", "source member partition differs")
+    if disposed_work > required_work:
+        raise SharedContractV2Error("coverage-accounting-invalid", "disposed work exceeds required work")
     count = len(semantics["obligations"])
     return CoverageAccounting(
         required_obligation_count=count,
@@ -635,9 +672,9 @@ def _accounting(semantics: dict[str, Any], *, work: int) -> CoverageAccounting:
         represented_source_member_count=len(represented),
         unsupported_source_member_count=len(unsupported),
         unaccounted_source_member_count=0,
-        required_work_item_count=work,
-        disposed_work_item_count=work,
-        unaccounted_required_work_item_count=0,
+        required_work_item_count=required_work,
+        disposed_work_item_count=disposed_work,
+        unaccounted_required_work_item_count=required_work - disposed_work,
     )
 
 
@@ -652,11 +689,20 @@ def _expected_template_resolution(
     template = item["input"]
     rendered = deepcopy(template)
     rendered.pop("path_key", None)
+    path_payload = rendered.pop("path_payload", None)
+    path = route["path"]
+    if path_payload is not None:
+        if not isinstance(path_payload, str) or not path_payload:
+            raise SharedContractV2Error(
+                "mc-template-resolution-invalid",
+                "MC template path_payload is invalid",
+            )
+        path = path.rstrip("/") + "/" + _escape_path_payload(path_payload)
     rendered.update(
         modality="http-request",
         scheme=route["scheme"],
         authority=route["authority"],
-        path=route["path"],
+        path=path,
     )
     return {
         "template_id": item["input_id"],
@@ -748,7 +794,14 @@ def _validate_mc(
             "MC blocked aggregate must report match true",
         )
     provenance = mc.get("input_provenance")
-    if not isinstance(provenance, dict) or provenance.get("route_policy") != "shared-attack-contracts-v2" or provenance.get("verification") != "physical-and-logical-sha256-verified":
+    if (
+        not isinstance(provenance, dict)
+        or provenance.get("route_policy") != "shared-attack-contracts-v2"
+        or provenance.get("verification") not in {
+            "physical-and-logical-sha256-verified",
+            "workflow-lab-physical-and-logical-sha256-verified",
+        }
+    ):
         raise SharedContractV2Error("mc-chain-provenance-mismatch", "MC chain provenance differs")
     for key, capability in (("check_result", "check-generation"), ("defense_result", "defense-generation")):
         if not _same_locator_document(provenance.get(key), locators[capability]):
@@ -779,7 +832,11 @@ def _validate_mc(
             _validate_mc_evidence(case, obligation_id=obligation_id)
             _validate_mc_resolution(case, inputs[input_id], obligation_id=obligation_id, profile_id=profile_id, profile_digest=profile_digest)
         work += len(cases)
-    if mc.get("accounting") != _accounting(semantics, work=work).model_dump(mode="json"):
+    if mc.get("accounting") != _accounting(
+        semantics,
+        required_work=work,
+        disposed_work=work,
+    ).model_dump(mode="json"):
         raise SharedContractV2Error("mc-accounting-invalid", "MC CoverageAccounting differs")
 
 
@@ -792,6 +849,26 @@ def _bv_profile(profile_id: str) -> dict[str, Any]:
     if profile_id not in metadata:
         raise SharedContractV2Error("bv-profile-integrity-failed", "unapproved embedded BV profile")
     filename, byte_length, file_digest, profile_digest = metadata[profile_id]
+    if profile_id == "waf-bypass@3":
+        manifest = strict_json_bytes(
+            (BV_PROFILE_ROOT / "manifest-v3.json").read_bytes(),
+            context="waf-bypass@3 manifest",
+        )
+        expected_manifest = {
+            "manifest_version": 1,
+            "profile_id": profile_id,
+            "resolver_id": BV_RESOLVER_ID,
+            "registry_id": "janus-approved-test-routes",
+            "relative_path": filename,
+            "sha256": file_digest,
+            "byte_length": byte_length,
+            "resolver_profile_digest": profile_digest,
+        }
+        if manifest != expected_manifest:
+            raise SharedContractV2Error(
+                "bv-profile-integrity-failed",
+                "embedded waf-bypass@3 manifest metadata differs",
+            )
     raw = (BV_PROFILE_ROOT / filename).read_bytes()
     if len(raw) != byte_length or "sha256:" + hashlib_sha256(raw).hexdigest() != file_digest:
         raise SharedContractV2Error("bv-profile-integrity-failed", f"embedded {profile_id} profile bytes differ")
@@ -839,6 +916,32 @@ def _component_carrier(component: dict[str, Any]) -> str:
         "http-body-structured": "body-json",
         "http-path": "path",
     }.get(component["location"].get("kind"), "unsupported")
+
+
+def _component_target_label(component: dict[str, Any]) -> str:
+    location = component["location"]
+    kind = str(location["kind"])
+    if kind in {"http-query", "http-header", "http-cookie"}:
+        return f"{kind}:{location['name']}:{location.get('occurrence', 0)}"
+    if kind == "http-body-structured":
+        if location.get("selector_type") == "any-field":
+            return "http-body-structured:*"
+        return f"{kind}:{location['selector']}"
+    if kind == "http-path":
+        return "http-path:path-payload"
+    return kind
+
+
+def _component_target_label_matches(component: dict[str, Any], label: str) -> bool:
+    location = component["location"]
+    kind = str(location["kind"])
+    if kind in {"http-query", "http-header", "http-cookie"} and location.get("name") == "*":
+        prefix = f"{kind}:"
+        name, separator, occurrence = label.removeprefix(prefix).rpartition(":")
+        return label.startswith(prefix) and bool(separator and name) and occurrence.isdecimal()
+    if kind == "http-body-structured" and location.get("selector_type") == "any-field":
+        return label.startswith("http-body-structured:/")
+    return label == _component_target_label(component)
 
 
 def _expected_grammar_labels(component: dict[str, Any]) -> list[str]:
@@ -927,7 +1030,15 @@ def _expected_bv_dimensions(obligation: dict[str, Any], semantics: dict[str, Any
             chain_labels: list[str] = []
             transformations = list(component["transformations"])
             if transformations:
-                chain_labels.append("cg:" + ":".join(step["operation"] for step in transformations))
+                chain_labels.append(
+                    "baseline:authenticated-source"
+                    if profile_id == "waf-bypass@3"
+                    else "cg:" + ":".join(
+                        step["operation"] for step in transformations
+                    )
+                )
+            elif profile_id == "waf-bypass@3":
+                chain_labels.append("baseline:identity")
             for index, chain in enumerate(profile["bypass_dimensions"].get(carrier, [])):
                 bv_label = f"bv:{carrier}:{index}:" + ":".join(step["operation"] for step in chain)
                 chain_labels.append(bv_label)
@@ -941,7 +1052,9 @@ def _expected_bv_dimensions(obligation: dict[str, Any], semantics: dict[str, Any
             if not chain_labels:
                 chain_labels.append("baseline:identity")
             grammar_labels = (
-                _expected_grammar_labels(component)
+                ["source:authenticated-representation"]
+                if profile_id == "waf-bypass@3" and transformations
+                else _expected_grammar_labels(component)
                 if profile_id == "waf-bypass@3"
                 else ["grammar:exact"]
             )
@@ -950,6 +1063,12 @@ def _expected_bv_dimensions(obligation: dict[str, Any], semantics: dict[str, Any
                     label = (
                         chain_label
                         if grammar_label == "grammar:exact"
+                        else (
+                            "challenge:source:authenticated-representation"
+                            f"|component:{component_id}|carrier:{carrier}"
+                            f"|transformation:{chain_label}"
+                        )
+                        if grammar_label == "source:authenticated-representation"
                         else f"{grammar_label}|{chain_label}"
                     )
                     expected.append({
@@ -959,6 +1078,345 @@ def _expected_bv_dimensions(obligation: dict[str, Any], semantics: dict[str, Any
                         "component_id": component_id,
                     })
     return expected
+
+
+def _v3_challenge_attribution(
+    attribution: str,
+    *,
+    actual: dict[str, Any],
+    component: dict[str, Any],
+    producer_attributions: set[str],
+    challenges: dict[str, dict[str, Any]],
+) -> None:
+    fields = attribution.split("|")
+    if (
+        len(fields) not in {4, 5}
+        or not fields[0].startswith("challenge:")
+        or fields[1] != f"component:{actual['component_id']}"
+        or fields[2] != f"carrier:{actual['carrier']}"
+        or not fields[3].startswith("transformation:")
+        or (
+            len(fields) == 5
+            and not _component_target_label_matches(
+                component, fields[4].removeprefix("target:")
+            )
+        )
+    ):
+        raise SharedContractV2Error(
+            "bv-dimension-invalid", f"BV challenge attribution shape differs: {attribution}"
+        )
+    challenge_label = fields[0].removeprefix("challenge:")
+    transformation = fields[3].removeprefix("transformation:")
+    if challenge_label == "source:authenticated-representation":
+        producer_chains = {
+            label.split("|", 1)[1] if label.startswith("grammar:") else label
+            for label in producer_attributions
+        }
+        producer_chains.add("baseline:authenticated-source")
+        if transformation not in producer_chains:
+            raise SharedContractV2Error(
+                "bv-dimension-invalid",
+                "BV authenticated source representation has an unexpected transformation",
+            )
+        return
+    matching_ids = [
+        challenge_id
+        for challenge_id in challenges
+        if challenge_label.startswith(f"{challenge_id}:")
+    ]
+    if not matching_ids:
+        raise SharedContractV2Error(
+            "bv-dimension-invalid", "BV challenge attribution is not profile-approved"
+        )
+    challenge_id = max(matching_ids, key=len)
+    challenge = challenges[challenge_id]
+    if actual["carrier"] not in challenge.get("carriers", []):
+        raise SharedContractV2Error(
+            "bv-dimension-invalid", "BV challenge carrier is not profile-approved"
+        )
+    grammar = component.get("grammar")
+    slots = grammar.get("slots") if isinstance(grammar, dict) else None
+    if not isinstance(slots, list):
+        raise SharedContractV2Error(
+            "bv-dimension-invalid", "BV challenge component has no declared slots"
+        )
+    challenge_suffix = challenge_label[len(challenge_id) + 1 :]
+    matching_slots = [
+        slot
+        for slot in slots
+        if isinstance(slot, dict)
+        and isinstance(slot.get("slot_id"), str)
+        and (
+            challenge_suffix == slot["slot_id"]
+            or challenge_suffix.startswith(f"{slot['slot_id']}:")
+        )
+    ]
+    if not matching_slots:
+        raise SharedContractV2Error(
+            "bv-dimension-invalid", "BV challenge names an unknown component slot"
+        )
+    slot = max(matching_slots, key=lambda item: len(item["slot_id"]))
+    ordinal_suffix = challenge_suffix[len(slot["slot_id"]) :]
+    ordinal: int | None = None
+    if ordinal_suffix:
+        raw_ordinal = ordinal_suffix.removeprefix(":")
+        if not raw_ordinal.isdecimal():
+            raise SharedContractV2Error(
+                "bv-dimension-invalid", "BV challenge ordinal is malformed"
+            )
+        ordinal = int(raw_ordinal)
+        if ordinal >= challenge.get("maximum_values", 0):
+            raise SharedContractV2Error(
+                "bv-dimension-invalid", "BV challenge ordinal exceeds its profile bound"
+            )
+    domain = slot.get("allowed_domain")
+    if (
+        slot.get("value_type") not in challenge.get("value_types", [])
+        or not isinstance(domain, dict)
+        or domain.get("kind") not in challenge.get("domain_kinds", [])
+    ):
+        raise SharedContractV2Error(
+            "bv-dimension-invalid", "BV challenge is inapplicable to its declared slot"
+        )
+    if actual.get("supported") is False:
+        if transformation != "unsupported":
+            raise SharedContractV2Error(
+                "bv-dimension-invalid", "BV unsupported challenge attribution differs"
+            )
+        return
+    if ordinal is None:
+        raise SharedContractV2Error(
+            "bv-dimension-invalid", "BV supported challenge has no bounded ordinal"
+        )
+    if challenge.get("strategy") == "representation":
+        expected_transformation = f"authenticated-encode-{challenge.get('codec')}"
+        if transformation != expected_transformation:
+            raise SharedContractV2Error(
+                "bv-dimension-invalid", "BV representation challenge transformation differs"
+            )
+        return
+    producer_chains: set[str] = set()
+    for label in producer_attributions:
+        if label.startswith("grammar:"):
+            producer_chains.add(label.split("|", 1)[1])
+            continue
+        if label.startswith("challenge:source:authenticated-representation|"):
+            source_fields = label.split("|")
+            if len(source_fields) == 4 and source_fields[3].startswith(
+                "transformation:"
+            ):
+                producer_chains.add(
+                    source_fields[3].removeprefix("transformation:")
+                )
+                continue
+        producer_chains.add(label)
+    if transformation not in producer_chains:
+        raise SharedContractV2Error(
+            "bv-dimension-invalid", "BV challenge transformation is not producer-derived"
+        )
+
+
+def _validate_v3_challenge_target(
+    field: str,
+    *,
+    actual: dict[str, Any],
+    component: dict[str, Any],
+) -> None:
+    if not field.startswith("target:"):
+        raise SharedContractV2Error(
+            "bv-dimension-invalid", "BV challenge target attribution is malformed"
+        )
+    target = field.removeprefix("target:")
+    location = component.get("location")
+    if not isinstance(location, dict):
+        raise SharedContractV2Error(
+            "bv-dimension-invalid", "BV challenge component location is absent"
+        )
+    kind = location.get("kind")
+    if (
+        kind == "http-path"
+        and actual.get("carrier") == "path"
+        and target == "http-path:path-payload"
+    ):
+        return
+    named = {
+        "http-query": "query",
+        "http-header": "header",
+        "http-cookie": "cookie",
+    }
+    if kind in named and location.get("name") == "*":
+        prefix = f"{kind}:"
+        if target.startswith(prefix):
+            name, separator, occurrence = target.removeprefix(prefix).rpartition(":")
+            if (
+                separator
+                and name
+                and occurrence.isdigit()
+                and str(int(occurrence)) == occurrence
+                and actual.get("carrier") == named[kind]
+            ):
+                return
+    if (
+        kind == "http-body-structured"
+        and location.get("selector_type") == "any-field"
+        and actual.get("carrier") == "body-json"
+        and target.startswith("http-body-structured:/")
+        and not re.search(r"~(?![01])", target.removeprefix("http-body-structured:"))
+    ):
+        return
+    raise SharedContractV2Error(
+        "bv-dimension-invalid", "BV challenge target attribution differs"
+    )
+
+
+def _validate_bv_v3_dimensions(
+    dimensions: list[Any],
+    obligation: dict[str, Any],
+    semantics: dict[str, Any],
+    *,
+    obligation_id: str,
+) -> None:
+    components = _index(semantics["components"], "component_id", "components-invalid")
+    producer_by_target: dict[tuple[str, str, str], set[str]] = {}
+    for expected in _expected_bv_dimensions(
+        obligation, semantics, profile_id="waf-bypass@3"
+    ):
+        target = (
+            expected["input_id"],
+            expected["component_id"],
+            expected["carrier"],
+        )
+        producer_by_target.setdefault(target, set()).add(expected["transformation"])
+    transformed_targets = {
+        target
+        for target in producer_by_target
+        if components[target[1]].get("transformations")
+    }
+    profile_challenges = _bv_profile("waf-bypass@3").get("positive_challenges")
+    if not isinstance(profile_challenges, list):
+        raise SharedContractV2Error(
+            "bv-profile-integrity-failed", "embedded waf-bypass@3 challenges are absent"
+        )
+    challenges = _index(profile_challenges, "challenge_id", "bv-profile-integrity-failed")
+    seen_dimensions: set[bytes] = set()
+    seen_attributions: set[tuple[tuple[str, str, str], str]] = set()
+    observed_producers: dict[tuple[str, str, str], set[str]] = {
+        target: set() for target in producer_by_target
+    }
+    observed_authenticated_source: set[tuple[str, str, str]] = set()
+    for actual in dimensions:
+        if not isinstance(actual, dict):
+            raise SharedContractV2Error(
+                "bv-dimension-invalid", f"BV dimension is malformed: {obligation_id}"
+            )
+        input_id = actual.get("input_id")
+        component_id = actual.get("component_id")
+        carrier = actual.get("carrier")
+        if (
+            not isinstance(input_id, str)
+            or not input_id
+            or not isinstance(component_id, str)
+            or not component_id
+            or not isinstance(carrier, str)
+            or not carrier
+        ):
+            raise SharedContractV2Error(
+                "bv-dimension-invalid",
+                f"BV dimension identity fields are absent: {obligation_id}",
+            )
+        target: tuple[str, str, str] = (input_id, component_id, carrier)
+        producer_attributions = producer_by_target.get(target)
+        if producer_attributions is None:
+            raise SharedContractV2Error(
+                "bv-dimension-invalid",
+                f"BV dimension is unreachable from its obligation: {obligation_id}",
+            )
+        component = components[target[1]]
+        if (
+            target[0] not in {ref["id"] for ref in obligation["required_input_refs"]}
+            or target[0] not in {ref["id"] for ref in component["input_refs"]}
+            or target[2] != _component_carrier(component)
+        ):
+            raise SharedContractV2Error(
+                "bv-dimension-invalid",
+                f"BV dimension input, component, or carrier differs: {obligation_id}",
+            )
+        transformation = actual.get("transformation")
+        if not isinstance(transformation, str) or not transformation:
+            raise SharedContractV2Error(
+                "bv-dimension-invalid", f"BV dimension label is absent: {obligation_id}"
+            )
+        dimension_key = canonical_bytes(
+            {
+                "carrier": target[2],
+                "transformation": transformation,
+                "input_id": target[0],
+                "component_id": target[1],
+            }
+        )
+        if dimension_key in seen_dimensions:
+            raise SharedContractV2Error(
+                "bv-dimension-invalid", f"BV dimension is duplicated: {obligation_id}"
+            )
+        seen_dimensions.add(dimension_key)
+        attributions = transformation.split("||attribution:")
+        if any(not attribution for attribution in attributions) or len(attributions) != len(
+            set(attributions)
+        ):
+            raise SharedContractV2Error(
+                "bv-dimension-invalid", f"BV dimension attributions are invalid: {obligation_id}"
+            )
+        if actual.get("supported") is False and any(
+            not attribution.startswith("challenge:") for attribution in attributions
+        ):
+            raise SharedContractV2Error(
+                "bv-dimension-invalid",
+                f"BV unsupported label is not an approved challenge: {obligation_id}",
+            )
+        for attribution in attributions:
+            attribution_key = (target, attribution)
+            if attribution_key in seen_attributions:
+                raise SharedContractV2Error(
+                    "bv-dimension-invalid",
+                    f"BV attribution is duplicated across dimensions: {obligation_id}",
+                )
+            seen_attributions.add(attribution_key)
+            base_attribution = attribution
+            if "|target:" in attribution:
+                base_attribution, target_field = attribution.rsplit("|", 1)
+                _validate_v3_challenge_target(
+                    target_field,
+                    actual=actual,
+                    component=component,
+                )
+            if base_attribution in producer_attributions:
+                observed_producers[target].add(base_attribution)
+                continue
+            _v3_challenge_attribution(
+                base_attribution,
+                actual=actual,
+                component=component,
+                producer_attributions=producer_attributions,
+                challenges=challenges,
+            )
+            if attribution.startswith("challenge:source:authenticated-representation|"):
+                observed_authenticated_source.add(target)
+    if any(
+        (
+            target in transformed_targets
+            and target not in observed_authenticated_source
+            and observed_producers[target] != expected
+        )
+        or (
+            target not in transformed_targets
+            and observed_producers[target] != expected
+        )
+        for target, expected in producer_by_target.items()
+    ):
+        raise SharedContractV2Error(
+            "bv-dimension-invalid",
+            f"BV campaign omitted required producer baseline work: {obligation_id}",
+        )
 
 
 def _validate_bv_resolution(
@@ -988,20 +1446,27 @@ def _validate_bv_resolution(
         raise SharedContractV2Error("bv-template-resolution-invalid", f"BV template resolution identity differs: {obligation_id}")
     rendered = resolution.get("rendered_request")
     expected_rendered = base["rendered_request"]
-    if not isinstance(rendered, dict) or set(rendered) != set(expected_rendered):
+    location_kind = component["location"].get("kind")
+    expected_keys = set(expected_rendered)
+    if location_kind == "http-path":
+        expected_keys.add("path_payload")
+    if not isinstance(rendered, dict) or set(rendered) != expected_keys:
         raise SharedContractV2Error("bv-template-resolution-invalid", f"BV rendered request shape differs: {obligation_id}")
     mutable_field = {
         "http-query": "query", "http-header": "headers", "http-cookie": "cookies",
         "http-method": "method", "http-path": "path", "http-body-raw": "body",
         "http-body-structured": "body",
-    }.get(component["location"].get("kind"))
+    }.get(location_kind)
+    mutable_fields = {mutable_field}
+    if location_kind == "http-path":
+        mutable_fields.add("path_payload")
     if mutable_field is None or any(
-        rendered[key] != value for key, value in expected_rendered.items() if key != mutable_field
+        rendered[key] != value for key, value in expected_rendered.items() if key not in mutable_fields
     ):
         raise SharedContractV2Error("bv-template-resolution-invalid", f"BV changed a nonselected template field: {obligation_id}")
 
 
-def _validate_bv(bv: dict[str, Any], semantics: dict[str, Any], attestation: dict[str, Any], locators: Mapping[str, Any], *, profile_id: str, profile_digest: str) -> None:
+def _validate_bv(bv: dict[str, Any], semantics: dict[str, Any], attestation: dict[str, Any], locators: Mapping[str, Any], *, profile_id: str, profile_digest: str) -> CoverageAccounting:
     if (
         bv.get("contract_id") != "bypass-validation@2.0"
         or bv.get("profile_id") != profile_id
@@ -1039,21 +1504,99 @@ def _validate_bv(bv: dict[str, Any], semantics: dict[str, Any], attestation: dic
     inputs = _index(semantics["test_inputs"], "input_id", "semantics-inputs-invalid")
     components = _index(semantics["components"], "component_id", "components-invalid")
     nested_resolutions: list[dict[str, Any]] = []
+    planned_work = 0
+    executed_work = 0
+    unsupported_work = 0
+    attempted_families: set[str] = set()
+    planned_governed_families: set[str] = set()
+    executed_governed_families: set[str] = set()
+    unsupported_governed_families: set[str] = set()
+    all_attempt_ids: set[str] = set()
     for obligation_id, campaign in campaigns.items():
         dimensions = campaign.get("attempted_dimensions")
         expected_dimensions = _expected_bv_dimensions(obligations[obligation_id], semantics, profile_id=profile_id)
-        if not isinstance(dimensions, list) or len(dimensions) != len(expected_dimensions):
+        if not isinstance(dimensions, list) or not dimensions:
             raise SharedContractV2Error("bv-empty-campaign", f"BV campaign has no attempted dimensions: {obligation_id}")
+        if profile_id == "waf-bypass@3":
+            _validate_bv_v3_dimensions(
+                dimensions,
+                obligations[obligation_id],
+                semantics,
+                obligation_id=obligation_id,
+            )
+            dimension_pairs = ((actual, None) for actual in dimensions)
+        else:
+            if len(dimensions) != len(expected_dimensions):
+                raise SharedContractV2Error("bv-empty-campaign", f"BV campaign has no attempted dimensions: {obligation_id}")
+            dimension_pairs = zip(dimensions, expected_dimensions, strict=True)
+        planned_work += len(dimensions)
         supported_attempt_ids: list[str] = []
         expected_resolutions: list[tuple[dict[str, Any], dict[str, Any]]] = []
-        for actual, expected in zip(dimensions, expected_dimensions, strict=True):
-            allowed = {"carrier", "transformation", "input_id", "component_id", "supported", "detail", "attempt_id", "disposition"}
-            if not isinstance(actual, dict) or not set(actual) <= allowed or any(actual.get(key) != value for key, value in expected.items()):
+        for actual, expected in dimension_pairs:
+            allowed = {
+                "carrier",
+                "transformation",
+                "input_id",
+                "component_id",
+                "family",
+                "wire_value_sha256",
+                "wire_value_size_bytes",
+                "baseline_value_sha256",
+                "wire_encoding_chain",
+                "supported",
+                "detail",
+                "attempt_id",
+                "disposition",
+            }
+            if (
+                not isinstance(actual, dict)
+                or not set(actual) <= allowed
+                or (
+                    expected is not None
+                    and any(actual.get(key) != value for key, value in expected.items())
+                )
+            ):
                 raise SharedContractV2Error("bv-dimension-invalid", f"BV dimension is bogus or out of order: {obligation_id}")
+            attempted_families.add(actual["transformation"])
+            family = actual.get("family")
+            if family is not None and (not isinstance(family, str) or not family):
+                raise SharedContractV2Error(
+                    "bv-dimension-invalid", f"BV governed family is invalid: {obligation_id}"
+                )
+            if isinstance(family, str):
+                planned_governed_families.add(family)
             supported = actual.get("supported")
             if supported is True:
+                if isinstance(family, str):
+                    executed_governed_families.add(family)
                 if not isinstance(actual.get("attempt_id"), str) or not actual["attempt_id"] or actual.get("disposition") not in {"blocked", "bypassed", "safety-stop"} or actual.get("detail") is not None:
                     raise SharedContractV2Error("bv-dimension-invalid", f"BV supported dimension evidence differs: {obligation_id}")
+                wire_digest = actual.get("wire_value_sha256")
+                baseline_digest = actual.get("baseline_value_sha256")
+                wire_size = actual.get("wire_value_size_bytes")
+                wire_chain = actual.get("wire_encoding_chain")
+                if (
+                    not isinstance(wire_digest, str)
+                    or not re.fullmatch(r"sha256:[a-f0-9]{64}", wire_digest)
+                    or not isinstance(baseline_digest, str)
+                    or not re.fullmatch(r"sha256:[a-f0-9]{64}", baseline_digest)
+                    or not isinstance(wire_size, int)
+                    or isinstance(wire_size, bool)
+                    or wire_size < 0
+                    or not isinstance(wire_chain, list)
+                    or any(not isinstance(step, str) or not step for step in wire_chain)
+                ):
+                    raise SharedContractV2Error(
+                        "bv-dimension-invalid",
+                        f"BV wire-value evidence differs: {obligation_id}",
+                    )
+                if family == "encoding" and (
+                    not wire_chain or wire_digest == baseline_digest
+                ):
+                    raise SharedContractV2Error(
+                        "bv-dimension-invalid",
+                        f"BV encoding dimension is an identity/no-op: {obligation_id}",
+                    )
                 if actual["disposition"] == "bypassed":
                     raise SharedContractV2Error(
                         "bv-translation-outcome-invalid",
@@ -1064,12 +1607,23 @@ def _validate_bv(bv: dict[str, Any], semantics: dict[str, Any], attestation: dic
                 if item["input"].get("modality") == "http-request-template":
                     expected_resolutions.append((item, components[actual["component_id"]]))
             elif supported is False:
+                if isinstance(family, str):
+                    unsupported_governed_families.add(family)
                 if actual.get("attempt_id") is not None or actual.get("disposition") is not None or not isinstance(actual.get("detail"), str) or not actual["detail"]:
                     raise SharedContractV2Error("bv-dimension-invalid", f"BV unsupported dimension evidence differs: {obligation_id}")
+                unsupported_work += 1
             else:
                 raise SharedContractV2Error("bv-dimension-invalid", f"BV dimension support state is absent: {obligation_id}")
         if campaign.get("attempt_refs") != supported_attempt_ids:
             raise SharedContractV2Error("bv-attempt-accounting-invalid", f"BV attempts do not bind dimensions: {obligation_id}")
+        campaign_attempt_ids = set(supported_attempt_ids)
+        if len(campaign_attempt_ids) != len(supported_attempt_ids) or campaign_attempt_ids & all_attempt_ids:
+            raise SharedContractV2Error(
+                "bv-attempt-accounting-invalid",
+                f"BV attempt IDs are not globally unique: {obligation_id}",
+            )
+        all_attempt_ids.update(campaign_attempt_ids)
+        executed_work += len(supported_attempt_ids)
         resolutions = campaign.get("resolution_refs")
         if not isinstance(resolutions, list) or len(resolutions) != len(expected_resolutions):
             raise SharedContractV2Error("bv-template-resolution-invalid", f"BV resolutions do not bind template attempts: {obligation_id}")
@@ -1117,8 +1671,53 @@ def _validate_bv(bv: dict[str, Any], semantics: dict[str, Any], attestation: dic
             unique_resolutions.append(resolution)
     if bv.get("resolutions") != unique_resolutions:
         raise SharedContractV2Error("bv-template-resolution-invalid", "BV top-level resolutions differ from campaign resolutions")
-    if bv.get("accounting") != _accounting(semantics, work=len(obligations)).model_dump(mode="json"):
+    disposed_work = executed_work + unsupported_work
+    if disposed_work != planned_work:
+        raise SharedContractV2Error(
+            "bv-attempt-accounting-invalid",
+            "BV planned dimensions contain a silent non-executed disposition",
+        )
+    search_bounds = bv.get("search_bounds")
+    expected_attempted = sorted(attempted_families)
+    if planned_governed_families:
+        expected_attempted = sorted(executed_governed_families)
+    if (
+        not isinstance(search_bounds, dict)
+        or search_bounds.get("attempt_budget") != planned_work
+        or search_bounds.get("attempts_executed") != executed_work
+        or search_bounds.get("variant_families_attempted") != expected_attempted
+    ):
+        raise SharedContractV2Error(
+            "bv-attempt-accounting-invalid",
+            "BV search bounds differ from authenticated campaign dimensions",
+        )
+    if planned_governed_families:
+        enabled = ["baseline", "case-normalization", "encoding", "semantic-domain"]
+        governed = {
+            "variant_families_requested": enabled,
+            "variant_families_enabled": enabled,
+            "variant_families_planned": sorted(planned_governed_families),
+            "variant_families_generated": sorted(executed_governed_families),
+            "variant_families_executed": sorted(executed_governed_families),
+            "variant_families_budget_skipped": [],
+            "variant_families_unsupported": sorted(unsupported_governed_families),
+            "variant_families_out_of_scope": sorted(
+                set(enabled) - planned_governed_families
+            ),
+        }
+        if any(search_bounds.get(key) != value for key, value in governed.items()):
+            raise SharedContractV2Error(
+                "bv-attempt-accounting-invalid",
+                "BV governed family accounting differs from authenticated dimensions",
+            )
+    accounting = _accounting(
+        semantics,
+        required_work=planned_work,
+        disposed_work=disposed_work,
+    )
+    if bv.get("accounting") != accounting.model_dump(mode="json"):
         raise SharedContractV2Error("bv-accounting-invalid", "BV CoverageAccounting differs")
+    return accounting
 
 
 @dataclass(frozen=True)
@@ -1185,7 +1784,7 @@ def verify_four_result_join(
     )
     bv_locators = dict(locators)
     bv_locators["candidate_bundle"] = bundle
-    _validate_bv(
+    accounting = _validate_bv(
         documents["bypass-validation"],
         semantics,
         attestation,
@@ -1194,7 +1793,6 @@ def verify_four_result_join(
         profile_digest=bv_profile_digest,
     )
     count = len(semantics["obligations"])
-    accounting = _accounting(semantics, work=count)
     verification = PreTranslationVerification(
         all_required_obligations_have_dg_mapping=True,
         all_required_obligations_have_mc_disposition=True,
@@ -1322,12 +1920,64 @@ _CARRIER_CONDITION_TYPES = {
 _CARRIERS_REQUIRING_SELECTOR = frozenset({"header", "cookie"})
 
 
+def _escape_path_payload(value: str) -> str:
+    """Match the authoritative Go net/url.PathEscape path-segment encoding."""
+    return quote(value, safe="$&+:-=@")
+
+
 def _strict_object(raw: bytes, *, artifact_id: str) -> dict[str, Any]:
     return strict_json_bytes(raw, context=f"DG artifact {artifact_id}")
 
 
+def _semantic_carrier(component: dict[str, Any]) -> tuple[str, str]:
+    location = component.get("location")
+    if not isinstance(location, dict):
+        raise SharedContractV2Error("cannot-express", "component location is absent")
+    kind = location.get("kind")
+    if kind in {"http-query", "http-header", "http-cookie"}:
+        name = location.get("name")
+        if not isinstance(name, str) or not name:
+            raise SharedContractV2Error("cannot-express", "named component selector is absent")
+        return {
+            "http-query": "query",
+            "http-header": "header",
+            "http-cookie": "cookie",
+        }[kind], name
+    if kind == "http-body-structured":
+        selector_type = location.get("selector_type")
+        if selector_type == "any-field":
+            return "body", "*"
+        selector = location.get("selector")
+        if not isinstance(selector, str) or not selector:
+            raise SharedContractV2Error("cannot-express", "structured body selector is absent")
+        return "body", selector
+    if kind == "http-body-raw":
+        return "body", ""
+    if kind == "http-path":
+        return "path", ""
+    if kind == "http-method":
+        return "method", ""
+    raise SharedContractV2Error(
+        "cannot-express", f"component location {kind!r} has no Akamai mapping"
+    )
+
+
+def _same_carrier_binding(
+    actual: tuple[Any, Any], expected: tuple[str, str]
+) -> bool:
+    if actual[0] != expected[0] or not isinstance(actual[1], str):
+        return False
+    if actual[0] == "header":
+        return actual[1].casefold() == expected[1].casefold()
+    return actual[1] == expected[1]
+
+
 def _component_condition(
-    rule: dict[str, Any], *, source_artifact_id: str, seen_rule_ids: set[str]
+    rule: dict[str, Any],
+    *,
+    component: dict[str, Any],
+    source_artifact_id: str,
+    seen_rule_ids: set[str],
 ) -> tuple[dict[str, Any], tuple[str, str, str]]:
     rule_id = rule.get("rule_id")
     carrier = rule.get("carrier")
@@ -1336,13 +1986,23 @@ def _component_condition(
     pattern = rule.get("pattern")
     flags = rule.get("flags")
     transformations = rule.get("transformations")
+    expected_carrier, expected_name = _semantic_carrier(component)
+    location = component["location"]
+    carrier_binding_matches = _same_carrier_binding(
+        (carrier, name), (expected_carrier, expected_name)
+    ) or (
+        location.get("kind") == "http-body-structured"
+        and location.get("selector_type") == "any-field"
+        and carrier == "body"
+        and name == "*"
+    )
     if (
         not isinstance(rule_id, str)
         or not rule_id
         or rule_id in seen_rule_ids
         or carrier not in _CARRIER_CONDITION_TYPES
         or not isinstance(name, str)
-        or (carrier in _CARRIERS_REQUIRING_SELECTOR and not name)
+        or not carrier_binding_matches
         or not isinstance(component_id, str)
         or not component_id
         or not isinstance(pattern, str)
@@ -1354,11 +2014,19 @@ def _component_condition(
     ):
         raise SharedContractV2Error(
             "cannot-express",
-            f"DG rule in {source_artifact_id} cannot map without semantic loss",
+            f"DG rule {rule_id!r} in {source_artifact_id} cannot map without semantic loss "
+            f"(carrier={carrier!r}, name={name!r}, component={component_id!r}, "
+            f"expected_carrier={expected_carrier!r}, expected_name={expected_name!r})",
         )
     seen_rule_ids.add(rule_id)
+    location_kind = location["kind"]
+    condition_type = _CARRIER_CONDITION_TYPES[carrier]
+    if carrier == "header" and name == "*":
+        condition_type = "requestHeaderMatch"
+    if location_kind == "http-body-structured":
+        condition_type = "argsPostJSONMatch"
     condition: dict[str, Any] = {
-        "type": _CARRIER_CONDITION_TYPES[carrier],
+        "type": condition_type,
         "positiveMatch": True,
         "valueCase": "i" not in flags,
         "valueWildcard": False,
@@ -1368,13 +2036,16 @@ def _component_condition(
         "sourceComponentId": component_id,
         "sourceCarrier": carrier,
         "sourceSelector": name,
+        "sourceLocationKind": location_kind,
         "transformations": transformations,
     }
-    if carrier == "header":
+    if location.get("selector_type") is not None:
+        condition["sourceSelectorType"] = location["selector_type"]
+    if carrier == "header" and name != "*":
         condition["header"] = name
-    elif carrier in {"query", "body"} and name:
+    elif carrier in {"query", "body"} and name and name != "*":
         condition["parameter"] = name
-    elif carrier == "cookie":
+    elif carrier == "cookie" and name != "*":
         condition["cookieName"] = name
     return condition, (carrier, name, component_id)
 
@@ -1434,7 +2105,11 @@ def _profile_routes(profile_id: str) -> Mapping[str, Mapping[str, str]]:
 
 
 def _resolved_route_conditions(
-    route: dict[str, Any], *, profile_id: str, alternative_id: str
+    route: dict[str, Any],
+    *,
+    profile_id: str,
+    alternative_id: str,
+    path_payload: str | None = None,
 ) -> list[dict[str, Any]]:
     if route.get("kind") == "opaque-path-key":
         path_key = route.get("path_key")
@@ -1455,13 +2130,16 @@ def _resolved_route_conditions(
         raise SharedContractV2Error(
             "cannot-express", f"route alternative {alternative_id} is incomplete"
         )
+    rendered_path = path
+    if path_payload is not None:
+        rendered_path = path.rstrip("/") + "/" + _escape_path_payload(path_payload)
     return [
         {
             "type": "pathMatch",
             "positiveMatch": True,
             "valueCase": True,
             "valueWildcard": False,
-            "value": [path],
+            "value": [rendered_path],
             "matchOperator": "exact",
             "sourceRoute": route,
         },
@@ -1490,19 +2168,29 @@ def _translate_rule_document(
             "cannot-express",
             f"DG artifact {source_artifact_id} has no expressible WAF rules",
         )
-    if document.get("placement_mode") != "route-bound-v1":
+    placement_mode = document.get("placement_mode")
+    if placement_mode not in {None, "", "route-bound-v1"}:
         raise SharedContractV2Error(
-            "cannot-express", f"DG artifact {source_artifact_id} lacks route-bound placement"
+            "cannot-express", f"DG artifact {source_artifact_id} uses an unknown placement mode"
         )
     route_alternatives = document.get("route_bound_alternatives")
     coverage_alternatives = document.get("coverage_alternatives")
-    if not isinstance(route_alternatives, list) or not route_alternatives or not isinstance(coverage_alternatives, list):
+    if not isinstance(coverage_alternatives, list) or not coverage_alternatives:
+        raise SharedContractV2Error(
+            "cannot-express", f"DG artifact {source_artifact_id} lacks Boolean alternatives"
+        )
+    if placement_mode == "route-bound-v1" and (
+        not isinstance(route_alternatives, list) or not route_alternatives
+    ):
         raise SharedContractV2Error(
             "cannot-express", f"DG artifact {source_artifact_id} lacks route-bound alternatives"
         )
     rules_by_component: dict[str, dict[str, Any]] = {}
     carrier_keys: list[tuple[str, str, str]] = []
     rule_ids: set[str] = set()
+    semantic_components = _index(
+        semantics["components"], "component_id", "components-invalid"
+    )
     for rule in rules:
         if not isinstance(rule, dict):
             raise SharedContractV2Error(
@@ -1514,8 +2202,16 @@ def _translate_rule_document(
                 "cannot-express",
                 f"DG rule in {source_artifact_id} cannot map without semantic loss",
             )
+        component = semantic_components.get(str(component_id))
+        if component is None:
+            raise SharedContractV2Error(
+                "cannot-express", f"DG rule in {source_artifact_id} has no semantic component"
+            )
         condition, carrier_key = _component_condition(
-            rule, source_artifact_id=source_artifact_id, seen_rule_ids=rule_ids
+            rule,
+            component=component,
+            source_artifact_id=source_artifact_id,
+            seen_rule_ids=rule_ids,
         )
         if carrier_key in carrier_keys:
             raise SharedContractV2Error(
@@ -1525,8 +2221,39 @@ def _translate_rule_document(
             )
         carrier_keys.append(carrier_key)
         rules_by_component[component_id] = condition
+    if placement_mode in {None, ""}:
+        translated: list[tuple[str, dict[str, Any]]] = []
+        seen_coverage: set[bytes] = set()
+        for index, component_ids in enumerate(coverage_alternatives):
+            key = canonical_bytes(component_ids)
+            if (
+                not isinstance(component_ids, list)
+                or not component_ids
+                or key in seen_coverage
+                or any(component_id not in rules_by_component for component_id in component_ids)
+            ):
+                raise SharedContractV2Error(
+                    "cannot-express", "DG endpoint-independent coverage alternative is invalid"
+                )
+            seen_coverage.add(key)
+            translated.append(
+                (
+                    f"endpoint-independent:{index}",
+                    {
+                        "name": f"janus-{document.get('rule_set_id', source_artifact_id)}-{index}",
+                        "description": "One endpoint-independent Boolean alternative from a verified DG WAF rule set.",
+                        "operation": "AND",
+                        "conditions": [deepcopy(rules_by_component[item]) for item in component_ids],
+                        "sourceArtifactId": source_artifact_id,
+                        "sourceRuleSetId": document.get("rule_set_id"),
+                        "sourceAlternativeId": f"endpoint-independent:{index}",
+                        "sourceAction": document.get("action"),
+                        "fastLoopNegativeMaterials": document.get("fast_loop_negative_materials", []),
+                    },
+                )
+            )
+        return translated, carrier_keys
     semantic_inputs = _index(semantics["test_inputs"], "input_id", "semantics-inputs-invalid")
-    semantic_components = _index(semantics["components"], "component_id", "components-invalid")
     coverage_keys = {canonical_bytes(item) for item in coverage_alternatives}
     represented_coverage: set[bytes] = set()
     translated: list[tuple[str, dict[str, Any]]] = []
@@ -1554,6 +2281,7 @@ def _translate_rule_document(
         bindings = _index(component_bindings, "component_id", "route-component-bindings-invalid")
         if set(bindings) != set(component_ids):
             raise SharedContractV2Error("cannot-express", "DG route component binding is incomplete")
+        path_payloads: list[str] = []
         for component_id in component_ids:
             component = semantic_components.get(component_id)
             if component is None or component_id not in rules_by_component:
@@ -1566,32 +2294,72 @@ def _translate_rule_document(
             ]
             if bindings[component_id].get("input_refs") != expected_refs or not expected_refs:
                 raise SharedContractV2Error("cannot-express", "DG route binding differs from authenticated CG inputs")
-        conditions = _resolved_route_conditions(
-            route, profile_id=profile_id, alternative_id=alternative_id
-        ) + [deepcopy(rules_by_component[component_id]) for component_id in component_ids]
-        translated.append(
-            (
-                alternative_id,
-                {
-                    "name": f"janus-{document.get('rule_set_id', source_artifact_id)}-{len(translated)}",
-                    "description": "One route-bound Boolean alternative from a verified DG WAF rule set.",
-                    "operation": "AND",
-                    "conditions": conditions,
-                    "sourceArtifactId": source_artifact_id,
-                    "sourceRuleSetId": document.get("rule_set_id"),
-                    "sourceAlternativeId": alternative_id,
-                    "sourceAction": document.get("action"),
-                    "fastLoopNegativeMaterials": document.get("fast_loop_negative_materials", []),
-                },
+            if component["location"].get("kind") == "http-path":
+                for ref in expected_refs:
+                    payload = semantic_inputs[ref["id"]]["input"].get("path_payload")
+                    if route.get("kind") == "opaque-path-key" and (
+                        not isinstance(payload, str) or not payload
+                    ):
+                        raise SharedContractV2Error(
+                            "cannot-express",
+                            "template path component has no exact authenticated path_payload",
+                        )
+                    if isinstance(payload, str) and payload not in path_payloads:
+                        path_payloads.append(payload)
+        variants: list[str | None] = path_payloads or [None]
+        for variant_index, path_payload in enumerate(variants):
+            route_conditions = _resolved_route_conditions(
+                route,
+                profile_id=profile_id,
+                alternative_id=alternative_id,
+                path_payload=path_payload,
             )
-        )
+            component_conditions = [
+                deepcopy(rules_by_component[component_id])
+                for component_id in component_ids
+                if semantic_components[component_id]["location"].get("kind") != "http-path"
+            ]
+            path_components = [
+                component_id
+                for component_id in component_ids
+                if semantic_components[component_id]["location"].get("kind") == "http-path"
+            ]
+            if path_components:
+                route_conditions[0]["sourcePathComponents"] = [
+                    deepcopy(rules_by_component[component_id])
+                    for component_id in path_components
+                ]
+            translated_id = (
+                alternative_id
+                if len(variants) == 1
+                else f"{alternative_id}:path-payload:{variant_index}"
+            )
+            translated.append(
+                (
+                    translated_id,
+                    {
+                        "name": f"janus-{document.get('rule_set_id', source_artifact_id)}-{len(translated)}",
+                        "description": "One route-bound Boolean alternative from a verified DG WAF rule set.",
+                        "operation": "AND",
+                        "conditions": route_conditions + component_conditions,
+                        "sourceArtifactId": source_artifact_id,
+                        "sourceRuleSetId": document.get("rule_set_id"),
+                        "sourceAlternativeId": alternative_id,
+                        "sourceAction": document.get("action"),
+                        "fastLoopNegativeMaterials": document.get("fast_loop_negative_materials", []),
+                    },
+                )
+            )
     if represented_coverage != coverage_keys:
         raise SharedContractV2Error("cannot-express", "DG route alternatives do not cover every Boolean alternative")
     return translated, carrier_keys
 
 
 def _translate_carrier_document(
-    document: dict[str, Any], *, source_artifact_id: str
+    document: dict[str, Any],
+    *,
+    source_artifact_id: str,
+    semantics: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[tuple[str, str, str]]]:
     bindings = document.get("carrier_bindings")
     if not isinstance(bindings, list) or not bindings:
@@ -1601,6 +2369,11 @@ def _translate_carrier_document(
         )
     translated: list[dict[str, Any]] = []
     carrier_keys: list[tuple[str, str, str]] = []
+    semantic_components = (
+        _index(semantics["components"], "component_id", "components-invalid")
+        if semantics is not None
+        else None
+    )
     for binding in bindings:
         if not isinstance(binding, dict):
             raise SharedContractV2Error(
@@ -1609,12 +2382,34 @@ def _translate_carrier_document(
         carrier = binding.get("carrier")
         name = binding.get("name")
         component_id = binding.get("component_id")
+        expected = (
+            _semantic_carrier(semantic_components[component_id])
+            if semantic_components is not None and component_id in semantic_components
+            else None
+        )
+        component = (
+            semantic_components.get(component_id)
+            if semantic_components is not None and isinstance(component_id, str)
+            else None
+        )
+        any_field_binding = (
+            isinstance(component, dict)
+            and component.get("location", {}).get("kind") == "http-body-structured"
+            and component.get("location", {}).get("selector_type") == "any-field"
+            and carrier == "body"
+            and name == "*"
+        )
         if (
             carrier not in _CARRIER_CONDITION_TYPES
             or not isinstance(name, str)
-            or (carrier in _CARRIERS_REQUIRING_SELECTOR and not name)
             or not isinstance(component_id, str)
             or not component_id
+            or (
+                expected is not None
+                and not _same_carrier_binding((carrier, name), expected)
+                and not any_field_binding
+            )
+            or (expected is None and carrier in _CARRIERS_REQUIRING_SELECTOR and not name)
         ):
             raise SharedContractV2Error(
                 "cannot-express",
@@ -1684,7 +2479,9 @@ def build_waf_translation_plan(
                 rule_documents.append(translated)
         elif "carrier_bindings" in document:
             _, carriers = _translate_carrier_document(
-                document, source_artifact_id=source_id
+                document,
+                source_artifact_id=source_id,
+                semantics=verified.semantics,
             )
             binding_carriers.update(carriers)
         else:
@@ -1721,8 +2518,8 @@ def build_waf_translation_plan(
     }
     proposal = TranslationProposal(
         candidate_content=primary_candidate_content,
-        translation_label="exact",
-        justification="Every verified DG WAF rule, carrier, selector, and pattern is preserved.",
+        translation_label="equivalent",
+        justification="Every verified DG Boolean alternative, carrier, selector, pattern, and ordered transformation is preserved without fixture route narrowing.",
         translation_assumptions=[],
         limitations=list(candidate.get("limitations", [])),
     )

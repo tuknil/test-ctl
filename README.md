@@ -5,6 +5,15 @@ candidate for a target technology (Akamai WAF, generic firewall, or an
 EDR/S1 stub) — or a grounded reason it cannot be produced. Implements the
 Janus `control-translation` Capability Functional Specification (CFS).
 
+## Workflow Lab replay
+
+With `WORKFLOW_LAB_ENABLED=true`, the additive `/v1/workflow-lab/readyz` and
+`/v1/workflow-lab/runs` lifecycle routes resolve the exact CG, DG, MC, and BV
+locators from Workflow Lab and publish the translated result back there. The
+replay worker and SQLite lifecycle are separate from production. Existing
+production routes continue to require Databricks references and use the
+existing production repository and resolver.
+
 ## Source provenance
 
 - CFS source: `artifacts/capabilities/cfs-control-translation.md` in the

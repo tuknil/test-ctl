@@ -6,17 +6,16 @@ import json
 import logging
 import random
 import threading
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
-from collections.abc import Callable
-from typing import Mapping, Protocol
+from typing import Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from pydantic import BaseModel, ConfigDict
-
 
 logger = logging.getLogger(__name__)
 
@@ -299,7 +298,7 @@ class CallbackDispatcher:
             self._wake_event.clear()
 
     def deliver_due(self, *, now: datetime | None = None) -> int:
-        current_time = now or datetime.now(timezone.utc)
+        current_time = now or datetime.now(UTC)
         deliveries = self._repository_provider().list_due_callback_deliveries(
             now=current_time,
             limit=self._batch_size,
@@ -463,5 +462,5 @@ def _retry_after(headers: Mapping[str, str], now: datetime) -> float | None:
         except (TypeError, ValueError, OverflowError):
             return None
         if retry_at.tzinfo is None:
-            retry_at = retry_at.replace(tzinfo=timezone.utc)
+            retry_at = retry_at.replace(tzinfo=UTC)
         return max(0.0, (retry_at - now).total_seconds())
