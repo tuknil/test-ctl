@@ -7,12 +7,22 @@ than proposed by a model -- the same posture the ModSecurity -> Akamai path
 takes, and for the same reason: the upstream artifact is executable and
 authoritative, so guessing at it is worse than declining.
 
-What this does not do is pretend the two products see the same thing. A Wazuh
-rule matches decoded *log events*; an S1QL query matches *endpoint telemetry*.
-The mapping below is only the fields where a Sysmon or auditd log field has a
-direct S1 telemetry counterpart. Anything outside that map declines, so a rule
-is never emitted from a field whose meaning was guessed.
+The vocabulary below is the producer's, not Wazuh's whole surface. Defense
+Generation emits a fixed set of canonical observables (`event.type`,
+`src.process.*`, `tgt.file.path`, `registry.keyPath`, ...) with
+`type="pcre2"`, as in `tests/fixtures/defense-generation-wazuh-candidate.xml`.
+A generic Sysmon or auditd ruleset uses different field names and is not what
+this reads.
 
+Everything here fails closed. A Wazuh rule is a conjunction of conditions, so
+any condition this cannot express exactly -- a negated field, a correlation
+across events, a regex that is not a literal with anchors, a condition element
+outside the `<field>` vocabulary -- makes the whole rule undecidable rather
+than partially translated. Dropping a condition broadens a detection and
+inverting one reverses it; both are worse than declining.
+
+What this cannot do is pretend the two products see the same thing. A Wazuh
+rule matches decoded *log events*; an S1QL query matches *endpoint telemetry*.
 The STAR shape is the `POST /web/api/v2.1/cloud-detection/rules` body described
 in `docs/syntexresearch.md`; it has not been validated against a live console.
 """
@@ -27,59 +37,107 @@ from control_translation.contracts import ProvenMitigationPattern
 # The artifact_type a Defense Generation candidate uses for a Wazuh rule.
 WAZUH_ARTIFACT_TYPE = "wazuh-rule"
 
-# Wazuh log fields that have a direct SentinelOne telemetry counterpart, with
-# the S1 event class each one implies. A field outside this map is not
-# translated and not guessed at.
-_FIELD_MAP: dict[str, tuple[str, str]] = {
-    # Sysmon event 1 / auditd execve: process execution.
-    "win.eventdata.image": ("TgtProcImagePath", "Process Creation"),
-    "win.eventdata.originalfilename": ("TgtProcName", "Process Creation"),
-    "win.eventdata.commandline": ("TgtProcCmdLine", "Process Creation"),
-    "win.eventdata.parentimage": ("SrcProcImagePath", "Process Creation"),
-    "win.eventdata.parentcommandline": ("SrcProcCmdLine", "Process Creation"),
-    "win.eventdata.user": ("TgtProcUser", "Process Creation"),
-    "audit.exe": ("TgtProcImagePath", "Process Creation"),
-    "audit.execve.a0": ("TgtProcCmdLine", "Process Creation"),
-    # Sysmon event 11: file creation.
-    "win.eventdata.targetfilename": ("TgtFilePath", "File Creation"),
-    # Sysmon event 3: network connection.
-    "win.eventdata.destinationip": ("DstIP", "IP Connect"),
-    "win.eventdata.destinationport": ("DstPort", "IP Connect"),
-    "win.eventdata.destinationhostname": ("DstHost", "IP Connect"),
+# The field that carries the event class. It is not a comparison like the
+# others: its value becomes the S1QL EventType and decides which other
+# observables can appear at all.
+EVENT_TYPE_FIELD = "event.type"
+
+# SentinelOne EventType values this can emit, and the observable family each
+# belongs to. An event.type outside this set declines: passing an unrecognized
+# value through would produce a syntactically valid rule that never fires,
+# which is the one failure mode a detection cannot report.
+_EVENT_FAMILIES: dict[str, str] = {
+    "Process Creation": "process",
+    "File Creation": "file",
+    "File Modification": "file",
+    "File Deletion": "file",
+    "Registry Key Create": "registry",
+    "Registry Value Create": "registry",
+    "Registry Value Modified": "registry",
+    "IP Connect": "network",
 }
 
-# Regex constructs this cannot translate into an S1QL operator. A value
-# carrying one of these declines rather than being matched approximately. A
-# bare "." is in here on purpose: in a Wazuh pattern it matches any character,
-# so treating it as a literal dot would narrow the rule silently. A literal dot
-# is written "\." and is unescaped below.
+# Producer observable -> (S1QL field, the event families where it is observable).
+#
+# SrcProc* is the acting process for a Process Creation event in both dialects:
+# the producer's telemetry puts the executed command line in
+# `src.process.cmdline`, and the S1QL example in docs/syntexresearch.md matches
+# the same thing with SrcProcCmdLine. Getting that round the wrong way would
+# build a rule about the parent process instead.
+_FIELD_MAP: dict[str, tuple[str, frozenset[str]]] = {
+    "src.process.name": ("SrcProcName", frozenset({"process"})),
+    "src.process.cmdline": ("SrcProcCmdLine", frozenset({"process"})),
+    "tgt.file.path": ("TgtFilePath", frozenset({"file"})),
+    "registry.keypath": ("RegistryKeyPath", frozenset({"registry"})),
+}
+
+# Producer observables with no SentinelOne counterpart this can name. They are
+# listed rather than merely absent so the decline says which observable stopped
+# it instead of reporting an unknown field.
+_UNMAPPED_OBSERVABLES: dict[str, str] = {
+    "script.content": (
+        "SentinelOne Deep Visibility has no script-content observable that "
+        "this can name; matching the interpreter command line instead would "
+        "detect something different"
+    ),
+}
+
+# Wazuh matching engines whose "^" and "$" anchor. "osmatch" is a plain
+# substring match where both are literal characters, so the anchor handling
+# below would silently change what the rule means.
+_REGEX_ENGINES = frozenset({"pcre2", "osregex", ""})
+
+# Rule attributes that make a rule a correlation over several events. One STAR
+# query matches one event, so these cannot be expressed.
+_CORRELATION_ATTRIBUTES = ("frequency", "timeframe")
+
+# Condition-bearing elements other than <field>. Each one narrows the rule, so
+# any of them present means the field conditions alone are not the rule.
+_UNSUPPORTED_CONDITIONS = frozenset({
+    "decoded_as", "program_name", "match", "regex", "pcre2",
+    "srcip", "dstip", "srcport", "dstport", "user", "srcuser", "dstuser",
+    "url", "id", "status", "hostname", "extra_data", "system_name",
+    "action", "location", "data", "protocol",
+    "if_sid", "if_group", "if_matched_sid", "if_matched_group",
+    "same_source_ip", "same_srcip", "same_user", "different_url",
+})
+
+# Elements that carry no condition.
+_METADATA_ELEMENTS = frozenset({"description", "group", "options", "info", "list", "mitre"})
+
+# Regex constructs that are not a literal. A bare "." is here on purpose: in a
+# pattern it matches any character, so treating it as a literal dot narrows the
+# rule. A literal dot is written "\." and is unescaped below.
 _UNTRANSLATABLE = frozenset("*+?[]{}()|.")
 
-# Backslash escapes that denote a literal character, so unescaping them loses
+# Backslash escapes denoting a literal character; unescaping them loses
 # nothing. Anything else after a backslash ("\d", "\w", "\s") is a character
-# class and has no S1QL equivalent.
-_LITERAL_ESCAPES = frozenset(".\\-/@:^$ ")
-
-# Fields compared as numbers rather than strings.
-_NUMERIC_FIELDS = frozenset({"DstPort"})
+# class with no S1QL equivalent.
+_LITERAL_ESCAPES = frozenset(".\\-/@:^$ _")
 
 # Wazuh level (0-15) to the four STAR severities.
 _SEVERITY_BANDS = ((12, "Critical"), (9, "High"), (6, "Medium"), (0, "Low"))
 
 
-class _Condition:
+class DeclinedRule(Exception):
+    """A rule this cannot express exactly, carrying why."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+class _Comparison:
     """One S1QL comparison derived from one Wazuh field."""
 
-    def __init__(self, s1ql_field: str, operator: str, value: str) -> None:
-        self.s1ql_field = s1ql_field
+    def __init__(self, field: str, operator: str, value: str) -> None:
+        self.field = field
         self.operator = operator
         self.value = value
 
     def render(self) -> str:
-        if self.operator == "numeric-equals":
-            return f"{self.s1ql_field} = {self.value}"
         escaped = self.value.replace("\\", "\\\\").replace("'", "\\'")
-        return f"{self.s1ql_field} {self.operator} '{escaped}'"
+        return f"{self.field} {self.operator} '{escaped}'"
 
 
 def compile_sentinelone_star_rule(
@@ -90,50 +148,55 @@ def compile_sentinelone_star_rule(
     None means the rule uses something this cannot express faithfully; the
     caller then declines rather than falling back to a guess.
     """
+    try:
+        return _compile(pattern)
+    except DeclinedRule:
+        return None
+
+
+def decline_reason(pattern: ProvenMitigationPattern) -> str | None:
+    """Why the rule could not be compiled, for the decline detail."""
+    try:
+        _compile(pattern)
+    except DeclinedRule as declined:
+        return declined.reason
+    return None
+
+
+def _compile(pattern: ProvenMitigationPattern) -> TranslationProposal:
     rule = _parse_rule(pattern.pattern_summary)
-    if rule is None:
-        return None
+    _reject_unsupported_structure(rule)
 
-    conditions: list[_Condition] = []
-    event_types: set[str] = set()
-    for element in rule.findall("field"):
-        name = (element.get("name") or "").strip().lower()
-        mapped = _FIELD_MAP.get(name)
-        if mapped is None:
-            # An unmapped field carries part of the rule's meaning. Emitting
-            # without it would silently broaden the detection.
-            return None
-        condition = _condition_for(mapped[0], element.text or "")
-        if condition is None:
-            return None
-        conditions.append(condition)
-        event_types.add(mapped[1])
+    event_type, comparisons = _read_fields(rule)
+    if event_type is None:
+        raise DeclinedRule(
+            f"the rule declares no {EVENT_TYPE_FIELD}, so the SentinelOne "
+            "event class it applies to is unknown"
+        )
+    if not comparisons:
+        raise DeclinedRule(
+            f"the rule constrains only {EVENT_TYPE_FIELD}, which would match "
+            "every event of that class"
+        )
 
-    if not conditions:
-        return None
-    if len(event_types) > 1:
-        # One STAR rule is one event class; splitting would change what the
-        # single proven pattern means.
-        return None
+    family = _EVENT_FAMILIES[event_type]
+    for observable, comparison in comparisons:
+        _, families = _FIELD_MAP[observable]
+        if family not in families:
+            raise DeclinedRule(
+                f"'{observable}' is not observable on a '{event_type}' event, "
+                "so the compiled query could never match"
+            )
 
-    event_type = next(iter(event_types))
-    level = _rule_level(rule)
-    description = _text_of(rule, "description") or pattern.discriminator_description
+    clauses = [f"EventType = '{event_type}'"]
+    clauses.extend(comparison.render() for _, comparison in comparisons)
 
-    # A rule chained to a parent (if_sid / if_group) inherits that parent's
-    # conditions, which are not in this file and so are not in the query.
-    inherited = [
-        element.tag
-        for element in rule
-        if element.tag in ("if_sid", "if_group", "if_matched_sid")
-    ]
-
-    clauses = [f"EventType = '{event_type}'"] + [c.render() for c in conditions]
     star_rule = {
         "data": {
             "name": _rule_name(pattern, rule),
-            "description": description,
-            "severity": _severity_for(level),
+            "description": _text_of(rule, "description")
+            or pattern.discriminator_description,
+            "severity": _severity_for(_rule_level(rule)),
             "queryType": "events",
             "queryLang": "2.0",
             "s1ql": " AND ".join(clauses),
@@ -146,117 +209,215 @@ def compile_sentinelone_star_rule(
         }
     }
 
-    assumptions = [
-        "The Wazuh rule in the upstream defense-generation artifact is the "
-        "authoritative source of the match semantics.",
-        "The Wazuh log fields used by the rule are sourced from Sysmon or "
-        "auditd telemetry that SentinelOne observes independently on the same "
-        "endpoint.",
-        "The STAR rule is scoped at creation time; no account, site or group "
-        "filter is asserted here.",
-        "Backslashes in a path are doubled inside the S1QL string literal. "
-        "The console is not reachable from here, so that escaping convention "
-        "is taken from the query examples rather than confirmed.",
-    ]
-    limitations = [
-        "The candidate is shape-validated only and has not been created in a "
-        "SentinelOne console.",
-        "Wazuh matches decoded log events and S1QL matches endpoint telemetry; "
-        "the two observe the same activity through different collectors, so "
-        "timing and field coverage are not identical.",
-        "treatAsThreat is UNDEFINED, so the rule alerts without killing or "
-        "quarantining. Promoting it is an operator decision.",
-    ]
-
-    label = "equivalent"
-    if inherited:
-        label = "broader"
-        limitations.append(
-            "The Wazuh rule is chained to a parent rule via "
-            f"{', '.join(sorted(set(inherited)))}; the parent's conditions are "
-            "not present in this artifact and are therefore not in the query, "
-            "so the STAR rule matches more than the Wazuh rule does."
-        )
-
+    translated = ", ".join(
+        f"{observable} -> {comparison.field}"
+        for observable, comparison in comparisons
+    )
     return TranslationProposal(
         candidate_content=star_rule,
-        translation_label=label,
+        # Every condition was translated exactly or the rule declined, so the
+        # query matches what the Wazuh rule matches.
+        translation_label="equivalent",
         justification=(
             "Compiled the proven Wazuh rule deterministically into a "
-            f"SentinelOne STAR rule: {', '.join(sorted(_FIELD_MAP[name][0] for name in _used_fields(rule)))} "
-            f"-> S1QL over {event_type} events."
+            f"SentinelOne STAR rule over {event_type} events: {translated}."
         ),
-        translation_assumptions=assumptions,
-        limitations=limitations,
+        translation_assumptions=[
+            "The Wazuh rule in the upstream defense-generation artifact is the "
+            "authoritative source of the match semantics.",
+            "The canonical observables the rule names are the same activity "
+            "SentinelOne records independently on the endpoint, so a condition "
+            "on one holds for the other.",
+            "S1QL's CIS operators are case-insensitive and their plain forms "
+            "are case-sensitive, which is how a pattern's (?i) flag is carried "
+            "across; the console is not reachable from here to confirm it.",
+            "Backslashes in a path are doubled inside the S1QL string literal.",
+            "The STAR rule is scoped at creation time; no account, site or "
+            "group filter is asserted here.",
+        ],
+        limitations=[
+            "The candidate is shape-validated only and has not been created in "
+            "a SentinelOne console.",
+            "Wazuh matches decoded log events and S1QL matches endpoint "
+            "telemetry; the two observe the same activity through different "
+            "collectors, so timing and field coverage are not identical.",
+            "treatAsThreat is UNDEFINED, so the rule alerts without killing or "
+            "quarantining. Promoting it is an operator decision.",
+        ],
     )
 
 
-def _used_fields(rule: ElementTree.Element) -> list[str]:
-    return [
-        (element.get("name") or "").strip().lower()
-        for element in rule.findall("field")
-        if (element.get("name") or "").strip().lower() in _FIELD_MAP
-    ]
+def _reject_unsupported_structure(rule: ElementTree.Element) -> None:
+    """Fail closed on anything outside the <field> vocabulary.
 
-
-def _parse_rule(artifact: str) -> ElementTree.Element | None:
-    """Return the single <rule> element, or None when there is not exactly one."""
-    text = artifact.strip()
-    if not text:
-        return None
-    try:
-        root = ElementTree.fromstring(text)
-    except ElementTree.ParseError:
-        return None
-
-    if root.tag == "rule":
-        return root
-    rules = root.findall(".//rule")
-    # More than one rule is more than one proven pattern; this compiles the
-    # single candidate the proof loop validated, not a rule set.
-    return rules[0] if len(rules) == 1 else None
-
-
-def _condition_for(s1ql_field: str, raw_value: str) -> _Condition | None:
-    """Translate one Wazuh field value into an S1QL comparison.
-
-    Wazuh field values are patterns. Only the anchors are translated, because
-    they map exactly onto S1QL operators; any other regex construct declines.
+    A Wazuh rule ANDs all of its conditions. Ignoring one because this cannot
+    read it makes the emitted query match more than the rule does, so an
+    unreadable condition ends the compilation instead.
     """
-    value = raw_value.strip()
-    if not value:
-        return None
+    for attribute in _CORRELATION_ATTRIBUTES:
+        if (rule.get(attribute) or "").strip():
+            raise DeclinedRule(
+                f"the rule correlates across events via '{attribute}', which a "
+                "single STAR query cannot express"
+            )
 
-    starts = value.startswith("^")
-    body = value[1:] if starts else value
-    # A trailing "$" anchors, unless it is itself escaped as a literal.
-    ends = body.endswith("$") and not body.endswith("\\$")
+    for element in rule:
+        tag = element.tag
+        if tag == "field" or tag in _METADATA_ELEMENTS:
+            continue
+        if tag in _UNSUPPORTED_CONDITIONS:
+            raise DeclinedRule(
+                f"the rule uses the '<{tag}>' condition, which this does not "
+                "translate; dropping it would broaden the detection"
+            )
+        raise DeclinedRule(
+            f"the rule uses an unrecognized element '<{tag}>', so what it "
+            "matches cannot be established"
+        )
+
+
+def _read_fields(
+    rule: ElementTree.Element,
+) -> tuple[str | None, list[tuple[str, _Comparison]]]:
+    event_type: str | None = None
+    comparisons: list[tuple[str, _Comparison]] = []
+
+    for element in rule.findall("field"):
+        name = (element.get("name") or "").strip().lower()
+        if not name:
+            raise DeclinedRule("a <field> condition has no name")
+
+        # A negated condition is the one case where a partial translation is
+        # worse than none: emitted positively it matches exactly what the rule
+        # excludes.
+        if (element.get("negate") or "").strip().lower() in ("yes", "true", "1"):
+            raise DeclinedRule(
+                f"'{name}' is negated, and S1QL negation is not translated "
+                "here; emitting it positively would reverse the rule"
+            )
+
+        engine = (element.get("type") or "").strip().lower()
+        if engine not in _REGEX_ENGINES:
+            raise DeclinedRule(
+                f"'{name}' uses the '{engine}' matching engine, where the "
+                "anchors this relies on do not mean what they mean in a regex"
+            )
+
+        value = (element.text or "").strip()
+        if not value:
+            raise DeclinedRule(f"'{name}' has no pattern to match")
+
+        if name == EVENT_TYPE_FIELD:
+            event_type = _read_event_type(value)
+            continue
+        if name in _UNMAPPED_OBSERVABLES:
+            raise DeclinedRule(
+                f"'{name}' cannot be translated: {_UNMAPPED_OBSERVABLES[name]}"
+            )
+        mapped = _FIELD_MAP.get(name)
+        if mapped is None:
+            raise DeclinedRule(
+                f"'{name}' is not in the observable vocabulary this translates; "
+                "dropping it would broaden the detection"
+            )
+        comparisons.append((name, _comparison_for(mapped[0], name, value)))
+
+    return event_type, comparisons
+
+
+def _read_event_type(value: str) -> str:
+    """Read the S1 EventType from an event.type pattern.
+
+    The producer writes it anchored, as "^Process Creation$". Anything less
+    exact would leave the event class ambiguous.
+    """
+    pattern, case_insensitive = _strip_inline_flags(value)
+    if not (pattern.startswith("^") and _ends_anchored(pattern)):
+        raise DeclinedRule(
+            f"{EVENT_TYPE_FIELD} must be an anchored exact pattern; "
+            "an unanchored event class is ambiguous"
+        )
+    literal = _unescape(pattern[1:-1])
+    if literal is None:
+        raise DeclinedRule(f"{EVENT_TYPE_FIELD} is not a literal event class")
+
+    for known in _EVENT_FAMILIES:
+        if literal == known or (case_insensitive and literal.lower() == known.lower()):
+            return known
+    raise DeclinedRule(
+        f"'{literal}' is not a SentinelOne event class this recognizes, so the "
+        "compiled query would never match"
+    )
+
+
+def _comparison_for(s1ql_field: str, observable: str, raw: str) -> _Comparison:
+    """Translate one field pattern into an S1QL comparison.
+
+    Only anchors and the inline case-insensitivity flag are translated, because
+    those map exactly onto S1QL operators. Any other regex construct declines.
+    """
+    pattern, case_insensitive = _strip_inline_flags(raw)
+
+    starts = pattern.startswith("^")
+    body = pattern[1:] if starts else pattern
+    ends = _ends_anchored(body)
     body = body[:-1] if ends else body
 
-    core = _unescape(body)
-    if not core:
-        return None
+    literal = _unescape(body)
+    if literal is None:
+        raise DeclinedRule(
+            f"the pattern for '{observable}' is a regex, and S1QL compares "
+            "strings; approximating it would change what the rule matches"
+        )
+    if not literal:
+        raise DeclinedRule(f"the pattern for '{observable}' matches nothing")
 
-    numeric = core.isdigit() and s1ql_field in _NUMERIC_FIELDS
     if starts and ends:
-        return _Condition(s1ql_field, "numeric-equals" if numeric else "=", core)
-    if numeric:
-        # A number compared with a substring operator is not the same
-        # comparison, so an unanchored numeric pattern is not translated.
-        return None
+        if case_insensitive:
+            # S1QL equality is case-sensitive and this has no case-insensitive
+            # equality operator it can vouch for, so the combination declines
+            # rather than being widened to a substring match.
+            raise DeclinedRule(
+                f"the pattern for '{observable}' is a case-insensitive exact "
+                "match, which this does not translate"
+            )
+        return _Comparison(s1ql_field, "=", literal)
+
+    suffix = "CIS" if case_insensitive else ""
     if starts:
-        return _Condition(s1ql_field, "StartsWithCIS", core)
+        return _Comparison(s1ql_field, f"StartsWith{suffix}", literal)
     if ends:
-        return _Condition(s1ql_field, "EndsWithCIS", core)
-    return _Condition(s1ql_field, "ContainsCIS", core)
+        return _Comparison(s1ql_field, f"EndsWith{suffix}", literal)
+    return _Comparison(s1ql_field, f"Contains{suffix}", literal)
+
+
+def _strip_inline_flags(pattern: str) -> tuple[str, bool]:
+    """Split a leading "(?i)" off a pattern.
+
+    It is the one inline flag with an exact S1QL counterpart: the CIS operators
+    are case-insensitive. Any other inline group is left in place and will be
+    rejected as a regex construct.
+    """
+    if pattern.startswith("(?i)"):
+        return pattern[4:], True
+    return pattern, False
+
+
+def _ends_anchored(pattern: str) -> bool:
+    """Whether a pattern ends with an anchoring "$" rather than a literal one."""
+    if not pattern.endswith("$"):
+        return False
+    # Count the backslashes immediately before it: an odd number escapes it.
+    trailing = len(pattern[:-1]) - len(pattern[:-1].rstrip("\\"))
+    return trailing % 2 == 0
 
 
 def _unescape(pattern: str) -> str | None:
     """Return the literal text of a pattern, or None if it is not literal.
 
-    This is the whole safety property of the compiler: anything that still
-    carries regex meaning after unescaping cannot be expressed as an S1QL
-    string comparison, so it declines instead of approximating.
+    This is the safety property of the compiler: anything still carrying regex
+    meaning after unescaping cannot be an S1QL string comparison, so it
+    declines instead of being approximated.
     """
     literal: list[str] = []
     index = 0
@@ -276,6 +437,30 @@ def _unescape(pattern: str) -> str | None:
         literal.append(character)
         index += 1
     return "".join(literal)
+
+
+def _parse_rule(artifact: str) -> ElementTree.Element:
+    """Return the single <rule> element, declining anything else."""
+    text = (artifact or "").strip()
+    if not text:
+        raise DeclinedRule("the artifact is empty")
+    try:
+        root = ElementTree.fromstring(text)
+    except ElementTree.ParseError as exc:
+        raise DeclinedRule(f"the artifact is not well-formed XML: {exc}") from exc
+
+    if root.tag == "rule":
+        return root
+    rules = root.findall(".//rule")
+    if not rules:
+        raise DeclinedRule("the artifact contains no <rule>")
+    if len(rules) > 1:
+        # The proof loop validated one candidate, not a rule set.
+        raise DeclinedRule(
+            f"the artifact contains {len(rules)} rules; one proven candidate "
+            "is expected"
+        )
+    return rules[0]
 
 
 def _rule_level(rule: ElementTree.Element) -> int:

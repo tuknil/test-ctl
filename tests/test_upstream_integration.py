@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from time import monotonic
 
 import pytest
@@ -984,14 +985,11 @@ def test_temporal_upstream_result_id_must_match_reference():
 # artifact is not a SecRule and the target is not a WAF, so artifact_type --
 # not the rule text -- is what selects the EDR path.
 
+# The exact Defense Generation artifact, read from the fixture so this
+# exercises the producer's dialect rather than a hand-authored rule.
 WAZUH_RULE = (
-    '<group name="sysmon,">'
-    '<rule id="100200" level="12">'
-    '<field name="win.eventdata.image">\\\\powershell\\.exe$</field>'
-    '<field name="win.eventdata.commandLine">-enc</field>'
-    "<description>Encoded PowerShell execution</description>"
-    "</rule></group>"
-)
+    Path(__file__).parent / "fixtures" / "defense-generation" / "wazuh-candidate.xml"
+).read_text()
 
 
 def _edr_records(
@@ -1038,8 +1036,10 @@ def test_a_wazuh_artifact_translates_to_a_sentinelone_star_rule():
 
     star = json.loads(candidate.candidate_artifact.content_ref)
     assert star["data"]["queryLang"] == "2.0"
-    assert star["data"]["s1ql"].startswith("EventType = 'Process Creation'")
-    assert "TgtProcCmdLine ContainsCIS '-enc'" in star["data"]["s1ql"]
+    assert star["data"]["s1ql"] == (
+        "EventType = 'Process Creation' "
+        "AND SrcProcCmdLine ContainsCIS '-EncodedCommand'"
+    )
 
 
 def test_the_wazuh_path_is_deterministic_and_never_reaches_the_model():
@@ -1059,7 +1059,9 @@ def test_an_uncompilable_wazuh_rule_declines_instead_of_asking_the_model():
     records = _edr_records(
         artifact_content=(
             '<rule id="1" level="10">'
-            '<field name="win.eventdata.image">power.*shell</field>'
+            '<field name="event.type" type="pcre2">^Process Creation$</field>'
+            '<field name="src.process.cmdline" type="pcre2" negate="yes">'
+            "(?i)-EncodedCommand</field>"
             "<description>d</description></rule>"
         )
     )
@@ -1073,6 +1075,8 @@ def test_an_uncompilable_wazuh_rule_declines_instead_of_asking_the_model():
     assert result.terminal_state != TerminalState.TRANSLATED
     assert result.structured_result.primary_candidate is None
     assert result.inference["llm_invoked"] is False
+    # The decline names the condition that stopped it, not just the target.
+    assert "negated" in result.structured_result.outcome_reason.detail
 
 
 def test_an_unlabelled_artifact_still_takes_the_akamai_path():

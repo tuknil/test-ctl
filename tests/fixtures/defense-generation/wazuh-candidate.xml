@@ -1,0 +1,7 @@
+<group name="janus,edr-proof,">
+  <rule id="103047" level="12">
+    <field name="event.type" type="pcre2">^Process Creation$</field>
+    <field name="src.process.cmdline" type="pcre2">(?i)-EncodedCommand</field>
+    <description>EDR proof</description>
+  </rule>
+</group>

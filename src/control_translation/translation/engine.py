@@ -48,6 +48,7 @@ from control_translation.translation.modsec_akamai import (
 )
 from control_translation.translation.wazuh_s1 import (
     compile_sentinelone_star_rule,
+    decline_reason as wazuh_decline_reason,
     is_wazuh_rule_artifact,
 )
 
@@ -120,11 +121,17 @@ def translate(
             # Same rule as the SecRule case below: an authoritative executable
             # artifact is never handed to the model. Either it compiles or the
             # capability says it cannot express it.
+            #
+            # The compiler fails closed on a great many things, so the decline
+            # carries which condition stopped it. Without that an operator
+            # cannot tell a negated field from an unsupported observable.
+            reason = wazuh_decline_reason(pattern)
             return EngineFailure(
                 reason="unsupported-feature",
                 detail=(
                     "The authoritative Wazuh rule could not be compiled "
-                    f"deterministically for {target_technology}; model fallback "
+                    f"deterministically for {target_technology}: "
+                    f"{reason or 'the rule is not expressible'}. Model fallback "
                     "is disabled for authoritative executable source artifacts."
                 ),
                 proposal_source="deterministic-wazuh-rule",
