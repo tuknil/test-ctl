@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from time import monotonic
 
 import pytest
@@ -974,3 +975,119 @@ def test_temporal_upstream_result_id_must_match_reference():
 
     with pytest.raises(ValidationError):
         InvokeRequestEnvelope.model_validate(body)
+
+
+# ---------------------------------------------------------------------------
+# Wazuh -> SentinelOne
+# ---------------------------------------------------------------------------
+
+# Defense Generation declares what it produced. When that is a Wazuh rule the
+# artifact is not a SecRule and the target is not a WAF, so artifact_type --
+# not the rule text -- is what selects the EDR path.
+
+# The exact Defense Generation artifact, read from the fixture so this
+# exercises the producer's dialect rather than a hand-authored rule.
+WAZUH_RULE = (
+    Path(__file__).parent / "fixtures" / "defense-generation" / "wazuh-candidate.xml"
+).read_text()
+
+
+def _edr_records(
+    *, artifact_type: str = "wazuh-rule", artifact_content: str = WAZUH_RULE
+) -> dict[str, UpstreamRecord]:
+    records = _records()
+    defense = records["defense-generation-result:defense-1"]
+    candidate = {
+        **defense.result["primary_candidate"],
+        "selected_control_class": "edr",
+        "discriminator": "Encoded PowerShell spawned from an Office process.",
+        "artifact_type": artifact_type,
+        "artifact_content": artifact_content,
+    }
+    records["defense-generation-result:defense-1"] = UpstreamRecord(
+        result_id=defense.result_id,
+        terminal_state=defense.terminal_state,
+        correlation_id=defense.correlation_id,
+        subject_record_revision_id=defense.subject_record_revision_id,
+        request={**defense.request, "selected_control_class": "edr"},
+        result={
+            **defense.result,
+            "primary_candidate": candidate,
+            "target_policy_context_id": "edr-policy:example:rev-1",
+        },
+    )
+    return records
+
+
+def test_a_wazuh_artifact_translates_to_a_sentinelone_star_rule():
+    result = capability.invoke_envelope(
+        InvokeRequestEnvelope.model_validate(_body()),
+        resolver=FakeResolver(_edr_records()),
+        settings=_settings(),
+    )
+
+    assert result.terminal_state == TerminalState.TRANSLATED, result.prose
+    candidate = result.structured_result.primary_candidate
+    assert candidate is not None
+    # artifact_type on the upstream row, not the request, chose the target.
+    assert candidate.target_technology == "edr-s1"
+    assert candidate.target_control_class == "edr"
+    assert candidate.candidate_artifact.artifact_type == "edr-rule"
+
+    star = json.loads(candidate.candidate_artifact.content_ref)
+    assert star["data"]["queryLang"] == "2.0"
+    assert star["data"]["s1ql"] == (
+        "EventType = 'Process Creation' "
+        "AND SrcProcCmdLine ContainsCIS '-EncodedCommand'"
+    )
+
+
+def test_the_wazuh_path_is_deterministic_and_never_reaches_the_model():
+    result = capability.invoke_envelope(
+        InvokeRequestEnvelope.model_validate(_body()),
+        resolver=FakeResolver(_edr_records()),
+        settings=_settings(),
+    )
+
+    assert result.inference["llm_invoked"] is False
+    assert result.inference["proposal_source"] == "deterministic-wazuh-rule"
+
+
+def test_an_uncompilable_wazuh_rule_declines_instead_of_asking_the_model():
+    """The artifact is authoritative and executable. A rule this cannot express
+    is a decline, the same as an uncompilable SecRule -- never a guess."""
+    records = _edr_records(
+        artifact_content=(
+            '<rule id="1" level="10">'
+            '<field name="event.type" type="pcre2">^Process Creation$</field>'
+            '<field name="src.process.cmdline" type="pcre2" negate="yes">'
+            "(?i)-EncodedCommand</field>"
+            "<description>d</description></rule>"
+        )
+    )
+
+    result = capability.invoke_envelope(
+        InvokeRequestEnvelope.model_validate(_body()),
+        resolver=FakeResolver(records),
+        settings=_settings(),
+    )
+
+    assert result.terminal_state != TerminalState.TRANSLATED
+    assert result.structured_result.primary_candidate is None
+    assert result.inference["llm_invoked"] is False
+    # The decline names the condition that stopped it, not just the target.
+    assert "negated" in result.structured_result.outcome_reason.detail
+
+
+def test_an_unlabelled_artifact_still_takes_the_akamai_path():
+    """Every existing caller omits artifact_type. They must be unaffected."""
+    result = capability.invoke_envelope(
+        InvokeRequestEnvelope.model_validate(_body()),
+        resolver=FakeResolver(_records()),
+        settings=_settings(),
+    )
+
+    assert result.terminal_state == TerminalState.TRANSLATED
+    candidate = result.structured_result.primary_candidate
+    assert candidate is not None
+    assert candidate.target_technology == "akamai-waf"

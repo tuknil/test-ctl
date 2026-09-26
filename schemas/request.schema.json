@@ -990,6 +990,18 @@
             }
           ],
           "default": null
+        },
+        "upstream_artifact_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Upstream Artifact Type"
         }
       },
       "required": [

@@ -12,6 +12,7 @@ from control_translation.cancellation import (
     OperationCancelled,
     check_cancelled,
 )
+from control_translation.translation.wazuh_s1 import is_wazuh_rule_artifact
 from control_translation.contracts import (
     BypassCounterexample,
     DatabricksResultReference,
@@ -224,6 +225,8 @@ def resolve_proof_loop(
         primary_candidate.get("artifact_content"),
         "Defense Generation candidate artifact content is missing",
     )
+    artifact_type = primary_candidate.get("artifact_type")
+    artifact_type = artifact_type.strip() if isinstance(artifact_type, str) else None
     mitigation_id = records["Mitigation Check"].result_id
     bypass_id = records["Bypass Validation"].result_id
     request_context = _mitigation_request_context(
@@ -249,6 +252,7 @@ def resolve_proof_loop(
         pattern_summary=artifact_content,
         proof_record_ids=[mitigation_id, bypass_id],
         json_body_field_feature=json_body_field_feature,
+        upstream_artifact_type=artifact_type or None,
     )
     qualification = ProofLoopQualification(
         route="validated" if bypass_cleared else "poc-exhaustion",
@@ -293,6 +297,10 @@ def resolve_proof_loop(
         defense.request,
         key="target_technology",
     )
+    if target_technology is None and is_wazuh_rule_artifact(artifact_type):
+        # A Wazuh rule cannot be compiled for a WAF, so a row that names no
+        # target still determines one: the artifact it produced does.
+        target_technology = "edr-s1"
     target_policy_context_id = _preferred_string(
         defense.result,
         defense.request,
